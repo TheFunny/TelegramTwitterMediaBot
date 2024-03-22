@@ -34,7 +34,7 @@ class TweetMedia:
     def _uri(self) -> str | None:
         match = x_media_regex.match(self._url)
         if match:
-            return match.group(2).removesuffix('.jpg')
+            return match.group(2).removesuffix('.jpg').removesuffix('.png')
         return None
 
     @property
