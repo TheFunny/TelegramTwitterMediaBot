@@ -33,7 +33,7 @@ async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         media = list(tweet.pm_media_generator)
         message_sent = await update.effective_message.reply_media_group(
             media, caption=tweet.message_text,
-            # reply_to_message_id=update.message.message_id
+            reply_to_message_id=update.message.message_id
         )
     if 'forward_channel_id' in context.user_data:
         try:
@@ -59,12 +59,13 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
     if channel.type != ChatType.CHANNEL:
         await update.effective_message.reply_text("That is not a channel.")
         return
-    channel_admin = await channel.get_administrators()
+    try:
+        channel_admin = await channel.get_administrators()
+    except Exception as e:
+        await update.effective_message.reply_text(str(e) + "\nPlease add the bot to the channel and set as admin")
+        return
     user_bot = filter(lambda x: x.user.id == context.bot.id, channel_admin)
     user_bot = next(user_bot, None)
-    if not user_bot:
-        await update.effective_message.reply_text("I am not an admin in that channel.")
-        return
     if user_bot.can_post_messages:
         context.user_data['forward_channel_id'] = channel.id
         await update.effective_message.reply_text("Add successfully.")
@@ -101,7 +102,6 @@ async def post_shutdown(application: Application) -> None:
 def main():
     defaults = Defaults(parse_mode=ParseMode.HTML, allow_sending_without_reply=True)
     persistence = PicklePersistence(filepath='pers_data')
-    # proxy_url = 'http://127.0.0.1:10809'
     application = (ApplicationBuilder()
                    .token(common.BOT_TOKEN)
                    .defaults(defaults)
@@ -109,8 +109,6 @@ def main():
                    .post_init(post_init)
                    .post_stop(post_stop)
                    .post_shutdown(post_shutdown)
-                   # .proxy(proxy_url)
-                   # .get_updates_proxy(proxy_url)
                    .build()
                    )
 
@@ -119,7 +117,6 @@ def main():
 
     handlers = [
         MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, reply_media),
-        # MessageHandler(None, reply_media),
         InlineQueryHandler(inline_query, common.x_url_regex),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
