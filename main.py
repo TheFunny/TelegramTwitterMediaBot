@@ -52,7 +52,7 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
         return
     channel = context.args[0]
     try:
-        channel: Chat = context.bot.get_chat(channel)
+        channel: Chat = await context.bot.get_chat(channel)
     except Exception as e:
         await update.effective_message.reply_text(str(e))
         return
