@@ -11,7 +11,7 @@ from telegram import (
 from common import x_url_regex, x_media_regex, x_tco_regex
 
 twimg_url = 'https://pbs.twimg.com/'
-vx_api_url = 'https://api.vxtwitter.com/status/'
+vx_api_url = 'https://api.vxtwitter.com/status/{0}/status/{1}'
 
 message_raw_text = """{url}
 <a href="{author_url}">{author}</a>: {text}
@@ -108,25 +108,25 @@ class TGTweet(Tweet):
     def __init__(self, session: ClientSession, url: str):
         self._session: ClientSession = session
         self._url: str = url
-        self._id: str = self._tweet_id
-        assert self._id
+        self._api_param: tuple[str] = self._tweet_id
+        assert self._api_param
 
     async def __aenter__(self):
-        self._tweet: dict = await self._fetch_tweet(self._id)
+        self._tweet: dict = await self._fetch_tweet(self._api_param)
         super().__init__(*self._init_properties)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
-    async def _fetch_tweet(self, tweet_id: str) -> dict:
-        return await fetch_json(self._session, vx_api_url + tweet_id)
+    async def _fetch_tweet(self, api_param: tuple[str]) -> dict:
+        return await fetch_json(self._session, vx_api_url.format(*api_param))
 
     @property
-    def _tweet_id(self) -> str | None:
+    def _tweet_id(self) -> tuple[str] | None:
         match = x_url_regex.match(self._url)
         if match:
-            return match.group(1).strip('/')
+            return match.groups()
         return None
 
     @property

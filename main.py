@@ -9,7 +9,8 @@ from telegram.ext import (
     filters,
     InlineQueryHandler,
     PicklePersistence,
-    MessageHandler, CommandHandler
+    MessageHandler,
+    CommandHandler
 )
 
 import common
@@ -32,7 +33,8 @@ async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     async with TGTweet(context.bot_data['client'], url) as tweet:
         media = list(tweet.pm_media_generator)
         message_sent = await update.effective_message.reply_media_group(
-            media, caption=tweet.message_text,
+            media,
+            caption=tweet.message_text,
             reply_to_message_id=update.message.message_id
         )
     if 'forward_channel_id' in context.user_data:

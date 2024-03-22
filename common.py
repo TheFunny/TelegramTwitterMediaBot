@@ -14,7 +14,7 @@ if WEBHOOK:
     WEBHOOK_CERT = os.getenv("WEBHOOK_CERT", "cert/cert.pem")
     WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")
 
-x_url_regex = re.compile(r"^(?:https?://)(?:www\.|mobile\.|)(?:x|twitter)\.com/.+/status/(\d+)")
+x_url_regex = re.compile(r"^(?:https?://)(?:www\.|mobile\.|)(?:x|twitter)\.com/(.+)/status/(\d+)")
 x_media_regex = re.compile(r"^(?:https?://)(pbs|video)\.twimg\.com/(.*)")
 x_tco_regex = re.compile(r"(?:https?://)t\.co/.+$", re.M)
 
