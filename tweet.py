@@ -168,7 +168,7 @@ class TGTweet(Tweet):
         for i, tweet_media in enumerate(self.media):
             if tweet_media.type == "image":
                 yield InlineQueryResultPhoto(
-                    id=self.id,
+                    id=str(i),
                     photo_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
                     title=self.url,
@@ -177,7 +177,7 @@ class TGTweet(Tweet):
                 )
             elif tweet_media.type == "video":
                 yield InlineQueryResultVideo(
-                    id=self.id,
+                    id=str(i),
                     video_url=tweet_media.url,
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
