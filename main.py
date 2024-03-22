@@ -105,7 +105,7 @@ async def post_shutdown(application: Application) -> None:
 
 def main():
     defaults = Defaults(parse_mode=ParseMode.HTML, allow_sending_without_reply=True)
-    persistence = PicklePersistence(filepath='pers_data')
+    persistence = PicklePersistence(filepath='pers.pkl')
     application = (ApplicationBuilder()
                    .token(common.BOT_TOKEN)
                    .defaults(defaults)
