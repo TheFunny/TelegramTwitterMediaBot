@@ -27,5 +27,5 @@
 .python-version
 LICENSE
 README.md
-pers.pkl
+data/
 cert/
