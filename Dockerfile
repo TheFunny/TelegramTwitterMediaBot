@@ -1,13 +1,9 @@
 FROM python:3.12-slim-bullseye
 
+LABEL maintainer="admin@yoursfunny.top"
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade -r requirements.txt
-
-WORKDIR /app
-COPY . /app
 
 RUN set -eux; \
 	apt-get update; \
@@ -15,6 +11,13 @@ RUN set -eux; \
 	rm -rf /var/lib/apt/lists/*; \
 # verify that the binary works
 	gosu nobody true
+
+WORKDIR /app
+
+COPY requirements.txt /app
+RUN python -m pip install --no-cache-dir --upgrade -r requirements.txt
+
+COPY . /app
 
 RUN chmod a+x docker-entrypoint.sh
 
