@@ -21,6 +21,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.inline_query.query
     if query == "":
         return
+    common.logger.info(f"Query: {query}")
     async with TGTweet(context.bot_data['client'], query) as tweet:
         result = list(tweet.inline_query_generator)
         await update.inline_query.answer(result)
@@ -30,6 +31,7 @@ async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_chat.send_action(ChatAction.UPLOAD_PHOTO)
     # url = update.message.text.split(" ")[0]
     url = update.message.text
+    common.logger.info(f"Receiving url: {url}")
     async with TGTweet(context.bot_data['client'], url) as tweet:
         media = list(tweet.pm_media_generator)
         message_sent = await update.effective_message.reply_media_group(

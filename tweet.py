@@ -8,7 +8,7 @@ from telegram import (
     InputMediaVideo
 )
 
-from common import x_url_regex, x_media_regex, x_tco_regex
+from common import x_url_regex, x_media_regex, x_tco_regex, logger
 
 twimg_url = 'https://pbs.twimg.com/'
 vx_api_url = 'https://api.vxtwitter.com/status/{0}/status/{1}'
@@ -19,6 +19,7 @@ message_raw_text = """{url}
 
 
 async def fetch_json(session: ClientSession, url: str) -> dict:
+    logger.info(f"Fetching {url}")
     async with session.get(url) as response:
         assert response.status == 200, f"Failed to fetch {url}, status code {response.status}"
         return await response.json()
@@ -29,6 +30,9 @@ class TweetMedia:
         self._url: str = url
         self._thumb: str = thumb
         self._type: str = media_type
+
+    def __str__(self):
+        return f"url: {self.url}, thumb: {self.thumb}, type: {self.type}"
 
     @property
     def _uri(self) -> str | None:
@@ -114,6 +118,7 @@ class TGTweet(Tweet):
     async def __aenter__(self):
         self._tweet: dict = await self._fetch_tweet(self._api_param)
         super().__init__(*self._init_properties)
+        logger.info(f"Media: {self.media}")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
