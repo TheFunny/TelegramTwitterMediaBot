@@ -1,7 +1,6 @@
 version: '3.7'
 services:
-  tgxmb:
-    build: .
+  tgxmb: image: yoursfunny/telegram-twitter-media-bot: latest
     restart: always
     ports:
       - "8443:8443"
