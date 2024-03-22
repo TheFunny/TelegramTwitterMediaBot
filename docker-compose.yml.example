@@ -1,4 +1,3 @@
-version: '3.7'
 services:
   tgxmb: image: yoursfunny/telegram-twitter-media-bot: latest
     restart: always
