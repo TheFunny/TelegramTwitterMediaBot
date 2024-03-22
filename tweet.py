@@ -11,7 +11,7 @@ from telegram import (
 from common import x_url_regex, x_media_regex, x_tco_regex, logger
 
 twimg_url = 'https://pbs.twimg.com/'
-vx_api_url = 'https://api.vxtwitter.com/status/{0}/status/{1}'
+vx_api_url = 'https://api.vxtwitter.com/{0}/status/{1}'
 
 message_raw_text = """{url}
 <a href="{author_url}">{author}</a>: {text}
@@ -32,7 +32,7 @@ class TweetMedia:
         self._type: str = media_type
 
     def __str__(self):
-        return f"url: {self.url}, thumb: {self.thumb}, type: {self.type}"
+        return f"Media[url: {self.url}, thumb: {self.thumb}, type: {self.type}]"
 
     @property
     def _uri(self) -> str | None:
@@ -118,7 +118,7 @@ class TGTweet(Tweet):
     async def __aenter__(self):
         self._tweet: dict = await self._fetch_tweet(self._api_param)
         super().__init__(*self._init_properties)
-        logger.info(f"Media: {self.media}")
+        logger.info("Media: {0}".format(str(m) for m in self.media))
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
