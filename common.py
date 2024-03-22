@@ -1,9 +1,9 @@
 import logging
-import re
 import os
+import re
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN = os.getenv("ADMIN").split(",")
+ADMIN = os.getenv("BOT_ADMIN").split(",")
 
 WEBHOOK = os.getenv("WEBHOOK", False)
 if WEBHOOK:
