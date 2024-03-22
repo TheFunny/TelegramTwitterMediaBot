@@ -1,6 +1,6 @@
 from aiohttp import ClientSession
 from telegram import Update, Chat
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ParseMode, ChatAction, ChatType
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -56,7 +56,7 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         await update.effective_message.reply_text(str(e))
         return
-    if channel.type != "CHANNEL":
+    if channel.type != ChatType.CHANNEL:
         await update.effective_message.reply_text("That is not a channel.")
         return
     channel_admin = await channel.get_administrators()
