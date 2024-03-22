@@ -109,8 +109,9 @@ class Tweet:
 
 
 class TGTweet(Tweet):
-    def __init__(self, session: ClientSession, url: str):
-        self._session: ClientSession = session
+    _session: ClientSession
+
+    def __init__(self, url: str):
         self._url: str = url
         self._api_param: tuple[str] = self._tweet_id
         assert self._api_param
@@ -122,6 +123,14 @@ class TGTweet(Tweet):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
+
+    @classmethod
+    def set_session(cls, session: ClientSession) -> None:
+        cls._session = session
+
+    @classmethod
+    async def close_session(cls) -> None:
+        await cls._session.close()
 
     async def _fetch_tweet(self, api_param: tuple[str]) -> dict:
         return await fetch_json(self._session, vx_api_url.format(*api_param))

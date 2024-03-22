@@ -22,7 +22,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if query == "":
         return
     common.logger.info(f"Query: {query}")
-    async with TGTweet(context.bot_data['client'], query) as tweet:
+    async with TGTweet(query) as tweet:
         result = list(tweet.inline_query_generator)
         await update.inline_query.answer(result)
 
@@ -32,7 +32,7 @@ async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # url = update.message.text.split(" ")[0]
     url = update.message.text
     common.logger.info(f"Receiving url: {url}")
-    async with TGTweet(context.bot_data['client'], url) as tweet:
+    async with TGTweet(url) as tweet:
         media = list(tweet.pm_media_generator)
         message_sent = await update.effective_message.reply_media_group(
             media,
@@ -92,7 +92,7 @@ async def post_init(application: Application) -> None:
     DESCRIPTION = "A bot to fetch tweets from Twitter."
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
-    application.bot_data['client'] = ClientSession()
+    TGTweet.set_session(ClientSession())
 
 
 async def post_stop(application: Application) -> None:
@@ -100,7 +100,7 @@ async def post_stop(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    await application.bot_data['client'].close()
+    await TGTweet.close_session()
 
 
 def main():
