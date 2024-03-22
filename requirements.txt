@@ -1,0 +1,2 @@
+python-telegram-bot[webhooks]~=21.0.1
+aiohttp[speedups]~=3.9.3

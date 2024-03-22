@@ -1,0 +1,22 @@
+version: '3.7'
+services:
+  tgxmb:
+    build: .
+    restart: always
+    ports:
+      - "8443:8443"
+    environment:
+      LOCAL_USER_ID: '1000'
+      BOT_TOKEN: ''
+      BOT_ADMIN: ''
+      WEBHOOK: false
+      WEBHOOK_LISTEN: '127.0.0.1'
+      WEBHOOK_PORT: 8443
+      WEBHOOK_URL: 'https://example.com'
+      WEBHOOK_KEY: './cert/private.key'
+      WEBHOOK_CERT: './cert/cert.pem'
+      WEBHOOK_SECRET_TOKEN: 'secret-token'
+#      LOG_LEVEL: 'WARNING'
+    volumes:
+      - ./cert:/app/cert
+    container_name: tgxmb
