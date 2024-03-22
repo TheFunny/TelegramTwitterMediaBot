@@ -1,13 +1,6 @@
-# import json
 import logging
 import re
 import os
-
-# with open("config.json") as config_file:
-#     config = json.load(config_file)
-
-# admin = config["telegram"]["admin"]
-# token = config["telegram"]["token"]
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN = os.getenv("ADMIN").split(",")

@@ -1,5 +1,5 @@
 from aiohttp import ClientSession
-from telegram import Update, Chat, ChatMemberAdministrator
+from telegram import Update, Chat
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application,
