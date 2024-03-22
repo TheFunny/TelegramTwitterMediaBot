@@ -15,6 +15,7 @@ services:
       WEBHOOK_CERT: './cert/cert.pem'
       WEBHOOK_SECRET_TOKEN: 'secret-token'
 #      LOG_LEVEL: 'WARNING'
-volumes: - ./pers_data: /app/pers_data
+volumes:
+      - ./pers_data: /app/pers_data
 #      - ./cert:/app/cert
     container_name: tgxmb
