@@ -7,6 +7,7 @@ from telegram import (
     InputMediaPhoto,
     InputMediaVideo
 )
+
 from common import x_url_regex, x_media_regex, x_tco_regex
 
 twimg_url = 'https://pbs.twimg.com/'
@@ -19,7 +20,7 @@ message_raw_text = """{url}
 
 async def fetch_json(session: ClientSession, url: str) -> dict:
     async with session.get(url) as response:
-        assert response.status == 200
+        assert response.status == 200, f"Failed to fetch {url}, status code {response.status}"
         return await response.json()
 
 
