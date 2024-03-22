@@ -118,7 +118,6 @@ class TGTweet(Tweet):
     async def __aenter__(self):
         self._tweet: dict = await self._fetch_tweet(self._api_param)
         super().__init__(*self._init_properties)
-        logger.info("Media: {0}".format(str(m) for m in self.media))
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -172,6 +171,7 @@ class TGTweet(Tweet):
     @property
     def inline_query_generator(self) -> Generator[InlineQueryResultPhoto | InlineQueryResultVideo, None, None]:
         for i, tweet_media in enumerate(self.media):
+            logger.info(f"Media: {str(tweet_media)}")
             if tweet_media.type == "image":
                 yield InlineQueryResultPhoto(
                     id=str(i),
@@ -195,6 +195,7 @@ class TGTweet(Tweet):
     @property
     def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo, None, None]:
         for tweet_media in self.media:
+            logger.info(f"Media: {str(tweet_media)}")
             if tweet_media.type == "image":
                 yield InputMediaPhoto(
                     media=tweet_media.url,
