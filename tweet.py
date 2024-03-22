@@ -32,7 +32,7 @@ class TweetMedia:
         self._type: str = media_type
 
     def __str__(self):
-        return f"Media[url: {self.url}, thumb: {self.thumb}, type: {self.type}]"
+        return f"Media[url: {self.url} thumb: {self.thumb} type: {self.type}]"
 
     @property
     def _uri(self) -> str | None:
@@ -45,7 +45,7 @@ class TweetMedia:
     def url(self) -> str:
         match self._type:
             case "image":
-                return f"{twimg_url}{self._uri}?format=jpg&name=orig"
+                return f"{twimg_url}{self._uri}?format=jpg&name=4096x4096"
             case "video":
                 return self._url
 
@@ -171,7 +171,7 @@ class TGTweet(Tweet):
     @property
     def inline_query_generator(self) -> Generator[InlineQueryResultPhoto | InlineQueryResultVideo, None, None]:
         for i, tweet_media in enumerate(self.media):
-            logger.info(f"Media: {str(tweet_media)}")
+            logger.info(str(tweet_media))
             if tweet_media.type == "image":
                 yield InlineQueryResultPhoto(
                     id=str(i),
@@ -195,7 +195,7 @@ class TGTweet(Tweet):
     @property
     def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo, None, None]:
         for tweet_media in self.media:
-            logger.info(f"Media: {str(tweet_media)}")
+            logger.info(str(tweet_media))
             if tweet_media.type == "image":
                 yield InputMediaPhoto(
                     media=tweet_media.url,
