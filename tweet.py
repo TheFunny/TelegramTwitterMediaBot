@@ -147,12 +147,13 @@ class TGTweet(Tweet):
 
     @property
     def _init_properties(self) -> tuple:
+        id = self._tweet['tweetID']
         author = self._tweet['user_name']
         author_id = self._tweet['user_screen_name']
         text = self._tweet_text
         media = self._tweet_media
         sensitive = self._tweet['possibly_sensitive']
-        return self._id, author, author_id, text, media, sensitive
+        return id, author, author_id, text, media, sensitive
 
     @property
     def message_text(self) -> str:
