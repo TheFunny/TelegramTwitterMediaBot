@@ -5,7 +5,7 @@ from telegram import (
     InlineQueryResultPhoto,
     InlineQueryResultVideo,
     InputMediaPhoto,
-    InputMediaVideo
+    InputMediaVideo, InputMediaAnimation, InlineQueryResultMpeg4Gif
 )
 
 from common import x_url_regex, x_media_regex, x_tco_regex, logger
@@ -186,8 +186,6 @@ class TGTweet(Tweet):
                     id=str(i),
                     photo_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
-                    title=self.url,
-                    description=self.text,
                     caption=self.message_text if not i else None
                 )
             elif tweet_media.type == "video":
@@ -196,8 +194,13 @@ class TGTweet(Tweet):
                     video_url=tweet_media.url,
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
-                    title=self.url,
-                    description=self.text,
+                    caption=self.message_text if not i else None
+                )
+            elif tweet_media.type == "gif":
+                yield InlineQueryResultMpeg4Gif(
+                    id=str(i),
+                    mpeg4_url=tweet_media.url,
+                    thumbnail_url=tweet_media.thumb,
                     caption=self.message_text if not i else None
                 )
 
@@ -212,6 +215,12 @@ class TGTweet(Tweet):
                 )
             elif tweet_media.type == "video":
                 yield InputMediaVideo(
+                    media=tweet_media.url,
+                    has_spoiler=self.sensitive,
+                    thumbnail=tweet_media.thumb
+                )
+            elif tweet_media.type == "gif":
+                yield InputMediaAnimation(
                     media=tweet_media.url,
                     has_spoiler=self.sensitive,
                     thumbnail=tweet_media.thumb
