@@ -4,8 +4,10 @@ from aiohttp import ClientSession
 from telegram import (
     InlineQueryResultPhoto,
     InlineQueryResultVideo,
+    InlineQueryResultMpeg4Gif,
     InputMediaPhoto,
-    InputMediaVideo, InputMediaAnimation, InlineQueryResultMpeg4Gif
+    InputMediaVideo,
+    InputMediaAnimation
 )
 
 from common import x_url_regex, x_media_regex, x_tco_regex, logger
@@ -48,6 +50,10 @@ class TweetMedia:
                 return f"{twimg_url}{self._uri}?format=jpg&name=4096x4096"
             case "video":
                 return self._url
+            case "gif":
+                return self._url
+            case _:
+                return self._url
 
     @property
     def thumb(self) -> str:
@@ -55,6 +61,10 @@ class TweetMedia:
             case "image":
                 return f"{twimg_url}{self._uri}?format=jpg&name=thumb"
             case "video":
+                return self._thumb
+            case "gif":
+                return self._thumb
+            case _:
                 return self._thumb
 
     @property
