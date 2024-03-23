@@ -204,6 +204,7 @@ class TGTweet(Tweet):
                     video_url=tweet_media.url,
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
+                    title=self.text,
                     caption=self.message_text if not i else None
                 )
             elif tweet_media.type == "gif":
