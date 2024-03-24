@@ -87,19 +87,21 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     match = common.message_url_regex.search(update_text).span()
     if match:
         update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
-            context.user_data['message_url'], update_text[match[0]:match[1]]
+            context.user_data['message_url'], update_text[match[0] + 1:match[1] - 1]
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
     await message_to_send[0].edit_caption(
         update_text,
-        reply_markup=InlineKeyboardMarkup.from_button(InlineKeyboardButton("✅ Forward", callback_data="forward"))
+        reply_markup=InlineKeyboardMarkup.from_button(
+            InlineKeyboardButton("↩️ Confirm", callback_data="forward")
+        )
     )
 
 
 async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message_to_send = context.user_data['message_to_send']
     await forward_message(update, context, message_to_send)
-    await update.callback_query.answer('Forwarded.')
+    await update.callback_query.answer('✅ Forwarded')
     await update.callback_query.edit_message_reply_markup()
     del context.user_data['message_reply']
     del context.user_data['message_to_send']
