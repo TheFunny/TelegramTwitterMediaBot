@@ -105,8 +105,6 @@ async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TY
     await forward_message(update, context, message_to_send)
     await update.callback_query.answer('✅ Forwarded')
     await update.callback_query.edit_message_reply_markup()
-    message_reply: Message = context.user_data['message_reply']
-    await message_reply.edit_text("Message forwarded.")
     del context.user_data['message_reply']
     del context.user_data['message_to_send']
     del context.user_data['message_url']
