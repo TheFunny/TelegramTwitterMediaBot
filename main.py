@@ -1,7 +1,7 @@
 from functools import wraps
 
 from aiohttp import ClientSession
-from telegram import Update, Chat
+from telegram import Update, Chat, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply, Message
 from telegram.constants import ParseMode, ChatAction, ChatType
 from telegram.ext import (
     Application,
@@ -12,7 +12,7 @@ from telegram.ext import (
     InlineQueryHandler,
     PicklePersistence,
     MessageHandler,
-    CommandHandler
+    CommandHandler, CallbackQueryHandler
 )
 
 import common
@@ -47,19 +47,63 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     common.logger.info(f"Receiving url: {url}")
     async with TGTweet(url) as tweet:
         media = list(tweet.pm_media_generator)
-        message_sent = await update.effective_message.reply_media_group(
+        message_to_send = await update.effective_message.reply_media_group(
             media,
             caption=tweet.message_text,
-            reply_to_message_id=update.message.message_id
+            reply_to_message_id=update.message.message_id,
         )
+        url = tweet.url
+    if context.user_data.get('edit_before_forward', False):
+        message_reply = await update.effective_message.reply_text(
+            "Reply to edit message.",
+            reply_markup=ForceReply(selective=True, input_field_placeholder="{}"),
+        )
+        context.user_data['message_reply'] = message_reply
+        context.user_data['message_to_send'] = message_to_send
+        context.user_data['message_url'] = url
+        return
     if 'forward_channel_id' in context.user_data:
-        try:
-            await update.effective_chat.copy_messages(
-                chat_id=context.user_data['forward_channel_id'],
-                message_ids=[m.id for m in message_sent],
-            )
-        except Exception as e:
-            await update.effective_message.reply_text(str(e))
+        await forward_message(update, context, message_to_send)
+
+
+async def forward_message(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        message_sent: tuple[Message, ...],
+) -> None:
+    try:
+        for i, m in enumerate(message_sent):
+            await m.copy(context.user_data['forward_channel_id'])
+    except Exception as e:
+        await update.effective_message.reply_text(str(e))
+
+
+async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if 'message_reply' not in context.user_data:
+        return
+    if update.message.reply_to_message != context.user_data['message_reply']:
+        return
+    update_text = update.message.text
+    match = common.message_url_regex.search(update_text).span()
+    if match:
+        update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
+            context.user_data['message_url'], update_text[match[0]:match[1]]
+        ) + update_text[match[1]:]
+    message_to_send = context.user_data['message_to_send']
+    await message_to_send[0].edit_caption(
+        update_text,
+        reply_markup=InlineKeyboardMarkup.from_button(InlineKeyboardButton("✅ Forward", callback_data="forward"))
+    )
+
+
+async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message_to_send = context.user_data['message_to_send']
+    await forward_message(update, context, message_to_send)
+    await update.callback_query.answer('Forwarded.')
+    await update.callback_query.edit_message_reply_markup()
+    del context.user_data['message_reply']
+    del context.user_data['message_to_send']
+    del context.user_data['message_url']
 
 
 @send_action(ChatAction.TYPING)
@@ -95,6 +139,20 @@ async def cmd_remove_forward_channel(update: Update, context: ContextTypes.DEFAU
         await update.effective_message.reply_text("Remove successfully.")
         return
     await update.effective_message.reply_text("No channel to remove.")
+
+
+@send_action(ChatAction.TYPING)
+async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.get('forward_channel_id', None):
+        await update.effective_message.reply_text("Please enable forward channel first.")
+        return
+    ebf_status = context.user_data.get('edit_before_forward', False)
+    if ebf_status:
+        context.user_data['edit_before_forward'] = False
+        await update.effective_message.reply_text("Disable edit before forward.")
+        return
+    context.user_data['edit_before_forward'] = True
+    await update.effective_message.reply_text("Enable edit before forward.")
 
 
 async def post_init(application: Application) -> None:
@@ -134,9 +192,11 @@ def main():
 
     handlers = [
         MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
+        MessageHandler(None, edit_message),
         InlineQueryHandler(inline_query, common.x_url_regex),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
+        CallbackQueryHandler(query_forward_message, pattern="forward"),
     ]
 
     application.add_handlers(handlers)
