@@ -56,7 +56,8 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.user_data.get('edit_before_forward', False):
         message_reply = await update.effective_message.reply_text(
             "Reply to edit message.",
-            reply_markup=ForceReply(selective=True, input_field_placeholder="{}"),
+            reply_markup=ForceReply(selective=True, input_field_placeholder="{URL}"),
+            reply_to_message_id=update.message.message_id,
         )
         context.user_data['message_reply'] = message_reply
         context.user_data['message_to_send'] = message_to_send
@@ -103,6 +104,8 @@ async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TY
     await forward_message(update, context, message_to_send)
     await update.callback_query.answer('✅ Forwarded')
     await update.callback_query.edit_message_reply_markup()
+    message_reply: Message = context.user_data['message_reply']
+    await message_reply.edit_text("Message forwarded.")
     del context.user_data['message_reply']
     del context.user_data['message_to_send']
     del context.user_data['message_url']

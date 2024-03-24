@@ -17,7 +17,7 @@ if WEBHOOK:
 x_url_regex = re.compile(r"^(?:https?://)(?:www\.|mobile\.|)(?:x|twitter)\.com/(.+)/status/(\d+)")
 x_media_regex = re.compile(r"^(?:https?://)(pbs|video)\.twimg\.com/(.*)")
 x_tco_regex = re.compile(r"(?:https?://)t\.co/.+$", re.M)
-message_url_regex = re.compile(r"\{\w+\}", re.M)
+message_url_regex = re.compile(r"\{.+\}", re.S)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "WARNING"),
