@@ -1,3 +1,5 @@
+from functools import wraps
+
 from aiohttp import ClientSession
 from telegram import Update, Chat
 from telegram.constants import ParseMode, ChatAction, ChatType
@@ -17,6 +19,18 @@ import common
 from tweet import TGTweet
 
 
+def send_action(action):
+    def decorator(func):
+        @wraps(func)
+        async def command_func(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            await update.effective_chat.send_action(action)
+            return await func(update, context, *args, **kwargs)
+
+        return command_func
+
+    return decorator
+
+
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.inline_query.query
     if query == "":
@@ -27,9 +41,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.inline_query.answer(result)
 
 
-async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_chat.send_action(ChatAction.UPLOAD_PHOTO)
-    # url = update.message.text.split(" ")[0]
+@send_action(ChatAction.UPLOAD_PHOTO)
+async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
     common.logger.info(f"Receiving url: {url}")
     async with TGTweet(url) as tweet:
@@ -49,8 +62,8 @@ async def reply_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.effective_message.reply_text(str(e))
 
 
+@send_action(ChatAction.TYPING)
 async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_chat.send_action(ChatAction.TYPING)
     if not context.args:
         await update.effective_message.reply_text("Please provide a channel username or id.")
         return
@@ -75,8 +88,8 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
         await update.effective_message.reply_text("Add successfully.")
 
 
+@send_action(ChatAction.TYPING)
 async def cmd_remove_forward_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_chat.send_action(ChatAction.TYPING)
     if 'forward_channel_id' in context.user_data:
         del context.user_data['forward_channel_id']
         await update.effective_message.reply_text("Remove successfully.")
@@ -120,7 +133,7 @@ def main():
     # user_filter.add_user_ids(common.admin)
 
     handlers = [
-        MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, reply_media),
+        MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
         InlineQueryHandler(inline_query, common.x_url_regex),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
