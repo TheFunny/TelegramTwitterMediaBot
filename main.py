@@ -192,11 +192,11 @@ def main():
 
     handlers = [
         MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
-        MessageHandler(None, edit_message),
         InlineQueryHandler(inline_query, common.x_url_regex),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
+        MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
     ]
 
