@@ -143,7 +143,7 @@ async def cmd_remove_forward_channel(update: Update, context: ContextTypes.DEFAU
 
 @send_action(ChatAction.TYPING)
 async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get('forward_channel_id', None) is not None:
+    if context.user_data.get('forward_channel_id', None) is None:
         await update.effective_message.reply_text("Please enable forward channel first.")
         return
     ebf_status = context.user_data.get('edit_before_forward', False)
