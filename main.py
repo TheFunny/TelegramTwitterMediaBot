@@ -85,8 +85,9 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message.reply_to_message != context.user_data['message_reply']:
         return
     update_text = update.message.text
-    match = common.message_url_regex.search(update_text).span()
+    match = common.message_url_regex.search(update_text)
     if match:
+        match = match.span()
         update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
             context.user_data['message_url'], update_text[match[0] + 1:match[1] - 1]
         ) + update_text[match[1]:]
