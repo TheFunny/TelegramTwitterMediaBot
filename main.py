@@ -70,11 +70,13 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def forward_message(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-        message_sent: tuple[Message, ...],
+        message_to_send: tuple[Message, ...],
 ) -> None:
     try:
-        for i, m in enumerate(message_sent):
-            await m.copy(context.user_data['forward_channel_id'])
+        await update.effective_chat.copy_messages(
+            context.user_data['forward_channel_id'],
+            [m.id for m in message_to_send]
+        )
     except Exception as e:
         await update.effective_message.reply_text(str(e))
 
