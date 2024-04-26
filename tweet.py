@@ -197,7 +197,7 @@ class TGTweet(Tweet):
                     id=str(i),
                     photo_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
-                    caption=self.message_text if not i else None
+                    caption=self.message_text
                 )
             elif tweet_media.type == "video":
                 yield InlineQueryResultVideo(
@@ -206,14 +206,14 @@ class TGTweet(Tweet):
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
                     title=self.text,
-                    caption=self.message_text if not i else None
+                    caption=self.message_text
                 )
             elif tweet_media.type == "gif":
                 yield InlineQueryResultMpeg4Gif(
                     id=str(i),
                     mpeg4_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
-                    caption=self.message_text if not i else None
+                    caption=self.message_text
                 )
 
     @property
