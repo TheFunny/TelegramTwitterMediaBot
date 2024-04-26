@@ -189,7 +189,8 @@ class TGTweet(Tweet):
         )
 
     @property
-    def inline_query_generator(self) -> Generator[InlineQueryResultPhoto | InlineQueryResultVideo, None, None]:
+    def inline_query_generator(self) -> Generator[
+        InlineQueryResultPhoto | InlineQueryResultVideo | InlineQueryResultMpeg4Gif, None, None]:
         for i, tweet_media in enumerate(self.media):
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
@@ -217,7 +218,7 @@ class TGTweet(Tweet):
                 )
 
     @property
-    def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo, None, None]:
+    def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | InputMediaAnimation, None, None]:
         for tweet_media in self.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
