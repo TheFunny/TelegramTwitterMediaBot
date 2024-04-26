@@ -1,3 +1,4 @@
+import html
 from typing import Generator
 
 from aiohttp import ClientSession
@@ -183,8 +184,8 @@ class TGTweet(Tweet):
         return message_raw_text.format(
             url=self.url,
             author_url=self.author_url,
-            author=self.author,
-            text=self.text
+            author=html.escape(self.author),
+            text=html.escape(self.text)
         )
 
     @property
