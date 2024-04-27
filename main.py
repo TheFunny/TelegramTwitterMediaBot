@@ -95,9 +95,9 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.user_data['message_url'], update_text[match[0] + 1:match[1] - 1]
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
-    await message_to_send[0].edit_caption(
-        html.escape(update_text),
-        reply_markup=InlineKeyboardMarkup.from_button(
+    await message_to_send[0].edit_caption(html.escape(update_text))
+    await context.user_data['message_reply'].edit_message_reply_markup(
+        InlineKeyboardMarkup.from_button(
             InlineKeyboardButton("↩️ Confirm", callback_data="forward")
         )
     )
@@ -107,7 +107,7 @@ async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TY
     message_to_send = context.user_data['message_to_send']
     await forward_message(update, context, message_to_send)
     await update.callback_query.answer('✅ Forwarded')
-    await update.callback_query.edit_message_reply_markup()
+    await update.callback_query.delete_message()
     del context.user_data['message_reply']
     del context.user_data['message_to_send']
     del context.user_data['message_url']
