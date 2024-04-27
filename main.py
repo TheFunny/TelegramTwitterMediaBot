@@ -1,3 +1,4 @@
+import html
 from functools import wraps
 
 from aiohttp import ClientSession
@@ -95,7 +96,7 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
     await message_to_send[0].edit_caption(
-        update_text,
+        html.escape(update_text),
         reply_markup=InlineKeyboardMarkup.from_button(
             InlineKeyboardButton("↩️ Confirm", callback_data="forward")
         )
