@@ -87,7 +87,7 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if update.message.reply_to_message != context.user_data['message_reply']:
         return
-    update_text = update.message.text
+    update_text = html.escape(update.message.text)
     match = common.message_url_regex.search(update_text)
     if match:
         match = match.span()
@@ -95,7 +95,7 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.user_data['message_url'], update_text[match[0] + 1:match[1] - 1]
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
-    await message_to_send[0].edit_caption(html.escape(update_text))
+    await message_to_send[0].edit_caption(update_text)
     await context.user_data['message_reply'].edit_message_reply_markup(
         InlineKeyboardMarkup.from_button(
             InlineKeyboardButton("↩️ Confirm", callback_data="forward")
