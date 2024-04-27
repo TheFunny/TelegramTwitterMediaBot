@@ -162,6 +162,11 @@ async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_
     await update.effective_message.reply_text("Enable edit before forward.")
 
 
+@send_action(ChatAction.TYPING)
+async def cmd_user_dict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(str(context.user_data))
+
+
 async def post_init(application: Application) -> None:
     # commands = [
     #     BotCommand('start', CMD_START),
@@ -194,8 +199,8 @@ def main():
                    .build()
                    )
 
-    # user_filter = filters.User()
-    # user_filter.add_user_ids(common.admin)
+    user_filter = filters.User()
+    user_filter.add_user_ids(common.ADMIN)
 
     handlers = [
         MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
@@ -205,6 +210,7 @@ def main():
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
         MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
+        CommandHandler("bot_dict", cmd_user_dict, filters=user_filter),
     ]
 
     application.add_handlers(handlers)
