@@ -2,7 +2,7 @@ import html
 from functools import wraps
 
 from aiohttp import ClientSession
-from telegram import Update, Chat, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply, Message
+from telegram import Update, Chat, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.constants import ParseMode, ChatAction, ChatType
 from telegram.ext import (
     Application,
@@ -56,8 +56,10 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         url = tweet.url
     if context.user_data.get('edit_before_forward', False):
         message_reply = await update.effective_message.reply_text(
-            "Reply to edit message.",
-            reply_markup=ForceReply(selective=True, input_field_placeholder="[URL]"),
+            "Reply to edit message. [URL]",
+            reply_markup=InlineKeyboardMarkup.from_button(
+                InlineKeyboardButton("↩️ Confirm", callback_data="forward")
+            ),
             reply_to_message_id=update.message.message_id,
         )
         context.user_data['message_reply'] = message_reply
@@ -96,11 +98,6 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
     await message_to_send[0].edit_caption(update_text)
-    await context.user_data['message_reply'].edit_reply_markup(
-        InlineKeyboardMarkup.from_button(
-            InlineKeyboardButton("↩️ Confirm", callback_data="forward")
-        )
-    )
 
 
 async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
