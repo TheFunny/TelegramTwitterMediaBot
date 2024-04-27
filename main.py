@@ -153,6 +153,9 @@ async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_
     ebf_status = context.user_data.get('edit_before_forward', False)
     if ebf_status:
         context.user_data['edit_before_forward'] = False
+        context.user_data.pop('message_reply', None)
+        context.user_data.pop('message_to_send', None)
+        context.user_data.pop('message_url', None)
         await update.effective_message.reply_text("Disable edit before forward.")
         return
     context.user_data['edit_before_forward'] = True
