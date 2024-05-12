@@ -107,7 +107,10 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 update_text[match[0] + 1:match[1] - 1]
             ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
-    await message_to_send[0].edit_caption(update_text)
+    if isinstance(message_to_send, tuple):
+        await message_to_send[0].edit_text(update_text)
+    else:
+        await message_to_send.edit_text(update_text)
 
 
 async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
