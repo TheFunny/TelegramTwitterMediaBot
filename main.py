@@ -89,12 +89,17 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if update.message.reply_to_message != context.user_data['message_reply']:
         return
-    update_text = html.escape(update.message.text)
+    template = context.user_data.get('template', None)
+    if template:
+        update_text = template
+    else:
+        update_text = html.escape(update.message.text)
     match = common.message_url_regex.search(update_text)
     if match:
         match = match.span()
         update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
-            context.user_data['message_url'], update_text[match[0] + 1:match[1] - 1]
+            context.user_data['message_url'],
+            update_text[match[0] + 1:match[1] - 1] if not template else update.message.text
         ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
     await message_to_send[0].edit_caption(update_text)
@@ -162,6 +167,18 @@ async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_
     await update.effective_message.reply_text("Enable edit before forward.")
 
 
+@send_action
+async def cmd_set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    reply = update.effective_message.reply_to_message
+    if not reply:
+        await update.effective_message.reply_text("Please reply to a message to set as template.")
+        return
+    if '[]' in reply.text_html:
+        context.user_data['template'] = reply.text_html
+        await update.effective_message.reply_text("Template set.")
+    await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
+
+
 @send_action(ChatAction.TYPING)
 async def cmd_user_dict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(str(context.user_data))
@@ -208,6 +225,7 @@ def main():
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
+        CommandHandler("set_template", cmd_set_template),
         MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
         CommandHandler("bot_dict", cmd_user_dict, filters=user_filter),
