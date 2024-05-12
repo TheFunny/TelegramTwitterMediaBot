@@ -7,8 +7,7 @@ from telegram import (
     InlineQueryResultVideo,
     InlineQueryResultMpeg4Gif,
     InputMediaPhoto,
-    InputMediaVideo,
-    InputMediaAnimation
+    InputMediaVideo
 )
 
 from common import x_url_regex, x_media_regex, x_tco_regex, logger
@@ -125,6 +124,7 @@ class TGTweet(Tweet):
     def __init__(self, url: str):
         self._url: str = url
         self._api_param: tuple[str] = self._tweet_id
+        self._is_single_gif: bool = False
         assert self._api_param
 
     async def __aenter__(self):
@@ -180,6 +180,10 @@ class TGTweet(Tweet):
         return id, author, author_id, text, media, sensitive
 
     @property
+    def is_single_gif(self) -> bool:
+        return self._is_single_gif
+
+    @property
     def message_text(self) -> str:
         return message_raw_text.format(
             url=self.url,
@@ -219,7 +223,7 @@ class TGTweet(Tweet):
                 )
 
     @property
-    def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | InputMediaAnimation, None, None]:
+    def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | tuple[str, bool], None, None]:
         for tweet_media in self.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
@@ -234,7 +238,10 @@ class TGTweet(Tweet):
                     thumbnail=tweet_media.thumb
                 )
             elif tweet_media.type == "gif":
-                yield InputMediaAnimation(
+                if len(self.media) == 1:
+                    self._is_single_gif = True
+                    yield tweet_media.url, self.sensitive
+                yield InputMediaVideo(
                     media=tweet_media.url,
                     has_spoiler=self.sensitive,
                     thumbnail=tweet_media.thumb

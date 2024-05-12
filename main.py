@@ -52,6 +52,11 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             media,
             caption=tweet.message_text,
             reply_to_message_id=update.message.message_id,
+        ) if not tweet.is_single_gif else await update.effective_message.reply_animation(
+            media[0][0],
+            caption=tweet.message_text,
+            reply_to_message_id=update.message.message_id,
+            has_spoiler=media[0][1]
         )
         url = tweet.url
     if context.user_data.get('edit_before_forward', False):
