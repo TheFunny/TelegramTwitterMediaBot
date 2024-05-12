@@ -173,10 +173,11 @@ async def cmd_set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not reply:
         await update.effective_message.reply_text("Please reply to a message to set as template.")
         return
-    if '[]' in reply.text_html:
-        context.user_data['template'] = reply.text_html
-        await update.effective_message.reply_text("Template set.")
-    await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
+    if '[]' not in reply.text_html:
+        await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
+        return
+    context.user_data['template'] = reply.text_html
+    await update.effective_message.reply_text("Template set.")
 
 
 @send_action(ChatAction.TYPING)
