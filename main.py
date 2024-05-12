@@ -95,15 +95,20 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message.reply_to_message != context.user_data['message_reply']:
         return
     template = context.user_data.get('template', None)
+    message_url = '<a href="{0}">{1}</a>'
+    url = context.user_data['message_url']
     if template:
-        update_text = template.replace("[]", html.escape(update.message.text))
+        update_text = template.replace("[]", message_url.format(
+            url,
+            html.escape(update.message.text)
+        ))
     else:
         update_text = html.escape(update.message.text)
         match = common.message_url_regex.search(update_text)
         if match:
             match = match.span()
-            update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
-                context.user_data['message_url'],
+            update_text = update_text[:match[0]] + message_url.format(
+                url,
                 update_text[match[0] + 1:match[1] - 1]
             ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
