@@ -167,7 +167,7 @@ async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_
     await update.effective_message.reply_text("Enable edit before forward.")
 
 
-@send_action
+@send_action(ChatAction.TYPING)
 async def cmd_set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply = update.effective_message.reply_to_message
     if not reply:
