@@ -91,16 +91,16 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     template = context.user_data.get('template', None)
     if template:
-        update_text = template
+        update_text = template.replace("[]", html.escape(update.message.text))
     else:
         update_text = html.escape(update.message.text)
-    match = common.message_url_regex.search(update_text)
-    if match:
-        match = match.span()
-        update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
-            context.user_data['message_url'],
-            update_text[match[0] + 1:match[1] - 1] if not template else update.message.text
-        ) + update_text[match[1]:]
+        match = common.message_url_regex.search(update_text)
+        if match:
+            match = match.span()
+            update_text = update_text[:match[0]] + '<a href="{0}">{1}</a>'.format(
+                context.user_data['message_url'],
+                update_text[match[0] + 1:match[1] - 1]
+            ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
     await message_to_send[0].edit_caption(update_text)
 
