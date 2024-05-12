@@ -58,6 +58,8 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_to_message_id=update.message.message_id,
             has_spoiler=media[0][1]
         )
+        if not isinstance(message_to_send, tuple):
+            message_to_send = (message_to_send,)
         url = tweet.url
     if context.user_data.get('edit_before_forward', False):
         message_reply = await update.effective_message.reply_text(
@@ -112,10 +114,7 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 update_text[match[0] + 1:match[1] - 1]
             ) + update_text[match[1]:]
     message_to_send = context.user_data['message_to_send']
-    if isinstance(message_to_send, tuple):
-        await message_to_send[0].edit_text(update_text)
-    else:
-        await message_to_send.edit_caption(update_text)
+    await message_to_send[0].edit_text(update_text)
 
 
 async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
