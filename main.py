@@ -8,6 +8,7 @@ from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
+from common import logger
 from tweet import TGTweet
 
 
@@ -27,7 +28,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.inline_query.query
     if query == "":
         return
-    common.logger.info(f"Query: {query}")
+    logger.info(f"Query: {query}")
     async with TGTweet(query) as tweet:
         result = list(tweet.inline_query_generator)
         await update.inline_query.answer(result)
@@ -36,7 +37,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 @send_action(ChatAction.UPLOAD_PHOTO)
 async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
-    common.logger.info(f"Receiving url: {url}")
+    logger.info(f"Receiving url: {url}")
     async with TGTweet(url) as tweet:
         media = list(tweet.pm_media_generator)
         message_to_send = await update.effective_message.reply_media_group(
