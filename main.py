@@ -2,19 +2,10 @@ import html
 from functools import wraps
 
 from aiohttp import ClientSession
-from telegram import Update, Chat, InlineKeyboardMarkup, InlineKeyboardButton, Message
-from telegram.constants import ParseMode, ChatAction, ChatType
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    ContextTypes,
-    Defaults,
-    filters,
-    InlineQueryHandler,
-    PicklePersistence,
-    MessageHandler,
-    CommandHandler, CallbackQueryHandler
-)
+from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ChatAction, ChatType, ParseMode
+from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults,
+                          InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
 from tweet import TGTweet
@@ -226,6 +217,7 @@ def main():
                    .post_init(post_init)
                    .post_stop(post_stop)
                    .post_shutdown(post_shutdown)
+                   .concurrent_updates(True)
                    .build()
                    )
 
@@ -233,8 +225,8 @@ def main():
     user_filter.add_user_ids(common.ADMIN)
 
     handlers = [
-        MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
         InlineQueryHandler(inline_query, common.x_url_regex),
+        MessageHandler(filters.Regex(common.x_url_regex) & filters.ChatType.PRIVATE, url_media),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
