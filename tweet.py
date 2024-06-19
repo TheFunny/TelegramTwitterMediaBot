@@ -209,18 +209,18 @@ class TGTweet(Tweet):
     def inline_query_generator(self) -> Generator[
         InlineQueryResultPhoto | InlineQueryResultVideo | InlineQueryResultMpeg4Gif, None, None
     ]:
-        for i, tweet_media in enumerate(self.media):
+        for tweet_media in self.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
                 yield InlineQueryResultPhoto(
-                    id=str(i),
+                    id=str(uuid4()),
                     photo_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
                     caption=self.message_text
                 )
             elif tweet_media.type == "video":
                 yield InlineQueryResultVideo(
-                    id=str(i),
+                    id=str(uuid4()),
                     video_url=tweet_media.url,
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
@@ -229,7 +229,7 @@ class TGTweet(Tweet):
                 )
             elif tweet_media.type == "gif":
                 yield InlineQueryResultMpeg4Gif(
-                    id=str(i),
+                    id=str(uuid4()),
                     mpeg4_url=tweet_media.url,
                     thumbnail_url=tweet_media.thumb,
                     caption=self.message_text
