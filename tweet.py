@@ -19,7 +19,7 @@ message_raw_text = """{url}
 
 
 def create_client() -> 'AsyncClient':
-    return AsyncClient()
+    return AsyncClient(http2=True)
 
 
 async def close_client(_client: 'AsyncClient') -> None:
