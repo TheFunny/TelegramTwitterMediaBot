@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import html
 from functools import wraps
 from typing import TYPE_CHECKING
@@ -8,7 +10,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandl
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
-from tweet import TGTweet
+from tweet import TelegramTweet
 
 if TYPE_CHECKING:
     from telegram import Chat, Message, Update

@@ -1,11 +1,18 @@
+from __future__ import annotations
+
 import html
-from typing import Generator
+from functools import cached_property
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from httpx import AsyncClient
 from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
                       InputMediaVideo)
 
 from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
+
+if TYPE_CHECKING:
+    from typing import Generator, TypedDict
 
 logger = get_logger(__name__)
 
@@ -18,15 +25,15 @@ message_raw_text = """{url}
 """
 
 
-def create_client() -> 'AsyncClient':
+def create_client() -> AsyncClient:
     return AsyncClient(http2=True)
 
 
-async def close_client(_client: 'AsyncClient') -> None:
+async def close_client(_client: AsyncClient) -> None:
     await _client.aclose()
 
 
-async def fetch_json(_client: 'AsyncClient', url: str) -> dict:
+async def fetch_json(_client: AsyncClient, url: str) -> dict:
     logger.info(f"Fetching {url}")
     response = await _client.get(url)
     assert response.status_code == response.is_success, f"Failed to fetch {url}, status code {response.status_code}"
