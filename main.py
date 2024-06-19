@@ -2,7 +2,6 @@ import html
 from functools import wraps
 from typing import TYPE_CHECKING
 
-from aiohttp import ClientSession
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler, Defaults,
@@ -203,7 +202,7 @@ async def post_init(application: Application) -> None:
     DESCRIPTION = "A bot to fetch tweets from Twitter."
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
-    TGTweet.set_session(ClientSession())
+    TGTweet.init_client()
 
 
 async def post_stop(application: Application) -> None:
@@ -211,7 +210,7 @@ async def post_stop(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    await TGTweet.close_session()
+    await TGTweet.close_client()
 
 
 def main():

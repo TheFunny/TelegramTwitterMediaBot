@@ -1,13 +1,11 @@
 import html
-from typing import Generator, TYPE_CHECKING
+from typing import Generator
 
+from httpx import AsyncClient
 from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
                       InputMediaVideo)
 
 from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
-
-if TYPE_CHECKING:
-    from aiohttp import ClientSession
 
 logger = get_logger(__name__)
 
@@ -20,11 +18,19 @@ message_raw_text = """{url}
 """
 
 
-async def fetch_json(session: ClientSession, url: str) -> dict:
+def create_client() -> 'AsyncClient':
+    return AsyncClient()
+
+
+async def close_client(_client: 'AsyncClient') -> None:
+    await _client.aclose()
+
+
+async def fetch_json(_client: 'AsyncClient', url: str) -> dict:
     logger.info(f"Fetching {url}")
-    async with session.get(url) as response:
-        assert response.status == 200, f"Failed to fetch {url}, status code {response.status}"
-        return await response.json()
+    response = await _client.get(url)
+    assert response.status_code == response.is_success, f"Failed to fetch {url}, status code {response.status_code}"
+    return response.json()
 
 
 class TweetMedia:
@@ -119,7 +125,7 @@ class Tweet:
 
 
 class TGTweet(Tweet):
-    _session: ClientSession
+    _httpx_client: AsyncClient
 
     def __init__(self, url: str):
         self._url: str = url
@@ -136,15 +142,15 @@ class TGTweet(Tweet):
         pass
 
     @classmethod
-    def set_session(cls, session: ClientSession) -> None:
-        cls._session = session
+    def init_client(cls) -> None:
+        cls._httpx_client = create_client()
 
     @classmethod
-    async def close_session(cls) -> None:
-        await cls._session.close()
+    async def close_client(cls) -> None:
+        await close_client(cls._httpx_client)
 
     async def _fetch_tweet(self, api_param: tuple[str]) -> dict:
-        return await fetch_json(self._session, vx_api_url.format(*api_param))
+        return await fetch_json(self._httpx_client, vx_api_url.format(*api_param))
 
     @property
     def _tweet_id(self) -> tuple[str] | None:
