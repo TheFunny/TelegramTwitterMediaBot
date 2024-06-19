@@ -1,15 +1,21 @@
 import html
 from functools import wraps
+from typing import TYPE_CHECKING
 
 from aiohttp import ClientSession
-from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ChatType, ParseMode
-from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults,
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler, Defaults,
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
-from common import logger
 from tweet import TGTweet
+
+if TYPE_CHECKING:
+    from telegram import Chat, Message, Update
+    from telegram.ext import Application, ContextTypes
+
+logger = common.get_logger(__name__)
 
 
 def send_action(action):

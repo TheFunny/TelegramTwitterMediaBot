@@ -1,16 +1,16 @@
 import html
-from typing import Generator
+from typing import Generator, TYPE_CHECKING
 
-from aiohttp import ClientSession
-from telegram import (
-    InlineQueryResultPhoto,
-    InlineQueryResultVideo,
-    InlineQueryResultMpeg4Gif,
-    InputMediaPhoto,
-    InputMediaVideo
-)
+from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
+                      InputMediaVideo)
 
-from common import x_url_regex, x_media_regex, x_tco_regex, logger
+from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
+
+if TYPE_CHECKING:
+    from aiohttp import ClientSession
+
+logger = get_logger(__name__)
+
 
 twimg_url = 'https://pbs.twimg.com/'
 vx_api_url = 'https://api.vxtwitter.com/{0}/status/{1}'
