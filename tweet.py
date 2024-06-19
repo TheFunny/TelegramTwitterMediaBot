@@ -293,7 +293,7 @@ class TelegramTweet(Tweet):
                 )
 
     @property
-    def pm_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | tuple[str, bool], None, None]:
+    def message_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | tuple[str, bool], None, None]:
         for tweet_media in self.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":

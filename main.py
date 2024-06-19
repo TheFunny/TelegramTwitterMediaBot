@@ -36,7 +36,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if query == "":
         return
     logger.info(f"Query: {query}")
-    async with TGTweet(query) as tweet:
+    async with TelegramTweet(query) as tweet:
         result = list(tweet.inline_query_generator)
         await update.inline_query.answer(result)
 
@@ -45,8 +45,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
     logger.info(f"Receiving url: {url}")
-    async with TGTweet(url) as tweet:
-        media = list(tweet.pm_media_generator)
+    async with TelegramTweet(url) as tweet:
+        media = list(tweet.message_media_generator)
         message_to_send = await update.effective_message.reply_media_group(
             media,
             caption=tweet.message_text,
@@ -204,7 +204,7 @@ async def post_init(application: Application) -> None:
     DESCRIPTION = "A bot to fetch tweets from Twitter."
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
-    TGTweet.init_client()
+    TelegramTweet.init_client()
 
 
 async def post_stop(application: Application) -> None:
@@ -212,7 +212,7 @@ async def post_stop(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    await TGTweet.close_client()
+    await TelegramTweet.close_client()
 
 
 def main():
