@@ -14,6 +14,15 @@ from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
 if TYPE_CHECKING:
     from typing import Generator, TypedDict
 
+
+    class TweetInfo(TypedDict):
+        tweetID: str
+        user_name: str
+        user_screen_name: str
+        text: str
+        media_extended: list[dict]
+        possibly_sensitive: bool
+
 logger = get_logger(__name__)
 
 
@@ -41,6 +50,8 @@ async def fetch_json(_client: AsyncClient, url: str) -> dict:
 
 
 class TweetMedia:
+    __slots__ = ('_url', '_thumb', '_type', '__dict__')
+
     def __init__(self, url: str, thumb: str, media_type: str):
         self._url: str = url
         self._thumb: str = thumb
@@ -49,14 +60,14 @@ class TweetMedia:
     def __str__(self):
         return f"Media[url: {self.url} thumb: {self.thumb} type: {self.type}]"
 
-    @property
+    @cached_property
     def _uri(self) -> str | None:
         match = x_media_regex.match(self._url)
         if match:
             return match.group(2).removesuffix('.jpg').removesuffix('.png')
         return None
 
-    @property
+    @cached_property
     def url(self) -> str:
         match self._type:
             case "image":
@@ -68,7 +79,7 @@ class TweetMedia:
             case _:
                 return self._url
 
-    @property
+    @cached_property
     def thumb(self) -> str:
         match self._type:
             case "image":
@@ -86,6 +97,8 @@ class TweetMedia:
 
 
 class Tweet:
+    __slots__ = ('_id', '_author', '_author_id', '_text', '_media', '_sensitive', '__dict__')
+
     def __init__(
             self,
             tweet_id: str,
@@ -106,7 +119,7 @@ class Tweet:
     def id(self) -> str:
         return self._id
 
-    @property
+    @cached_property
     def url(self) -> str:
         return f"https://twitter.com/{self._author_id}/status/{self._id}"
 
@@ -114,7 +127,7 @@ class Tweet:
     def author(self) -> str:
         return self._author
 
-    @property
+    @cached_property
     def author_url(self) -> str:
         return f"https://twitter.com/{self._author_id}"
 
@@ -131,7 +144,51 @@ class Tweet:
         return self._sensitive
 
 
-class TGTweet(Tweet):
+class ProcessTweet:
+    __slots__ = ('_httpx_client', '_url', '_tweet')
+
+    def __init__(self, httpx_client: AsyncClient, url: str):
+        self._httpx_client: AsyncClient = httpx_client
+        self._url: str = url
+
+    async def __aenter__(self):
+        self._tweet = await self._fetch_tweet()
+        return Tweet(
+            tweet_id=self._tweet["tweetID"],
+            author=self._tweet["user_name"],
+            author_id=self._tweet["user_screen_name"],
+            text=self._tweet_text,
+            media=self._tweet_media,
+            sensitive=self._tweet["possibly_sensitive"]
+        )
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    async def _fetch_tweet(self) -> TweetInfo:
+        match = x_url_regex.match(self._url)
+        assert match, f"Invalid URL: {self._url}"
+        auther_id, tweet_id = match.group()
+        return await fetch_json(self._httpx_client, vx_api_url.format(auther_id, tweet_id))
+
+    @property
+    def _tweet_text(self) -> str:
+        match = x_tco_regex.search(self._tweet['text'])
+        return self._tweet['text'][:match.start()].strip(" ") if match else self._tweet['text']
+
+    @property
+    def _tweet_media(self) -> list[TweetMedia]:
+        return [
+            TweetMedia(
+                url=tweet_media['url'],
+                thumb=tweet_media['thumbnail_url'],
+                media_type=tweet_media['type']
+            )
+            for tweet_media in self._tweet['media_extended']
+        ]
+
+
+class TelegramTweet(Tweet):
     _httpx_client: AsyncClient
 
     def __init__(self, url: str):
