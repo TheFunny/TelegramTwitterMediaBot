@@ -10,7 +10,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandl
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
-from tweet import TelegramTweet
+from tweet import Telegram
 
 if TYPE_CHECKING:
     from telegram import Chat, Message, Update
@@ -36,7 +36,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if query == "":
         return
     logger.info(f"Query: {query}")
-    async with TelegramTweet(query) as tweet:
+    async with Telegram(query) as tweet:
         result = list(tweet.inline_query_generator)
         await update.inline_query.answer(result)
 
@@ -45,13 +45,13 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
     logger.info(f"Receiving url: {url}")
-    async with TelegramTweet(url) as tweet:
+    async with Telegram(url) as tweet:
         media = list(tweet.message_media_generator)
         message_to_send = await update.effective_message.reply_media_group(
             media,
             caption=tweet.message_text,
             reply_to_message_id=update.message.message_id,
-        ) if not tweet.is_single_gif else await update.effective_message.reply_animation(
+        ) if not isinstance(tuple, media[0]) else await update.effective_message.reply_animation(
             media[0][0],
             caption=tweet.message_text,
             reply_to_message_id=update.message.message_id,
@@ -204,7 +204,7 @@ async def post_init(application: Application) -> None:
     DESCRIPTION = "A bot to fetch tweets from Twitter."
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
-    TelegramTweet.init_client()
+    Telegram.init_client()
 
 
 async def post_stop(application: Application) -> None:
@@ -212,7 +212,7 @@ async def post_stop(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    await TelegramTweet.close_client()
+    await Telegram.close_client()
 
 
 def main():
@@ -226,6 +226,7 @@ def main():
                    .post_stop(post_stop)
                    .post_shutdown(post_shutdown)
                    .concurrent_updates(True)
+                   .http_version('2')
                    .build()
                    )
 

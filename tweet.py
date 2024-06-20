@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import Generator, TYPE_CHECKING
 from uuid import uuid4
 
 from httpx import AsyncClient
@@ -12,16 +12,7 @@ from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQ
 from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
 
 if TYPE_CHECKING:
-    from typing import Generator, TypedDict
-
-
-    class TweetInfo(TypedDict):
-        tweetID: str
-        user_name: str
-        user_screen_name: str
-        text: str
-        media_extended: list[dict]
-        possibly_sensitive: bool
+    from types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
 
 logger = get_logger(__name__)
 
@@ -58,12 +49,11 @@ class TweetMedia:
         self._type: str = media_type
 
     def __str__(self):
-        return f"Media[url: {self.url} thumb: {self.thumb} type: {self.type}]"
+        return f"TweetMedia(url={self.url}, thumb={self.thumb}, type={self.type})"
 
     @cached_property
     def _uri(self) -> str | None:
-        match = x_media_regex.match(self._url)
-        if match:
+        if match := x_media_regex.match(self._url):
             return match.group(2).removesuffix('.jpg').removesuffix('.png')
         return None
 
@@ -188,85 +178,39 @@ class ProcessTweet:
         ]
 
 
-class TelegramTweet(Tweet):
-    _httpx_client: AsyncClient
+class TelegramTweet:
+    __slots__ = ('_httpx_client', '_url', '_tweet', '__dict__')
 
-    def __init__(self, url: str):
+    def __init__(self, httpx_client: AsyncClient, url: str):
+        self._httpx_client: AsyncClient = httpx_client
         self._url: str = url
-        self._api_param: tuple[str] = self._tweet_id
-        self._is_single_gif: bool = False
-        assert self._api_param
 
     async def __aenter__(self):
-        self._tweet: dict = await self._fetch_tweet(self._api_param)
-        super().__init__(*self._init_properties)
+        async with ProcessTweet(self._httpx_client, self._url) as tweet:
+            self._tweet = tweet
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
-    @classmethod
-    def init_client(cls) -> None:
-        cls._httpx_client = create_client()
+    @cached_property
+    def url(self) -> str:
+        return self._tweet.url
 
-    @classmethod
-    async def close_client(cls) -> None:
-        await close_client(cls._httpx_client)
-
-    async def _fetch_tweet(self, api_param: tuple[str]) -> dict:
-        return await fetch_json(self._httpx_client, vx_api_url.format(*api_param))
-
-    @property
-    def _tweet_id(self) -> tuple[str] | None:
-        match = x_url_regex.match(self._url)
-        if match:
-            return match.groups()
-        return None
-
-    @property
-    def _tweet_text(self) -> str:
-        match = x_tco_regex.search(self._tweet['text'])
-        return self._tweet['text'][:match.start()].strip(" ") if match else self._tweet['text']
-
-    @property
-    def _tweet_media(self) -> list[TweetMedia]:
-        return [
-            TweetMedia(
-                url=x['url'],
-                thumb=x['thumbnail_url'],
-                media_type=x['type']
-            )
-            for x in self._tweet['media_extended']
-        ]
-
-    @property
-    def _init_properties(self) -> tuple:
-        id = self._tweet['tweetID']
-        author = self._tweet['user_name']
-        author_id = self._tweet['user_screen_name']
-        text = self._tweet_text
-        media = self._tweet_media
-        sensitive = self._tweet['possibly_sensitive']
-        return id, author, author_id, text, media, sensitive
-
-    @property
-    def is_single_gif(self) -> bool:
-        return self._is_single_gif
-
-    @property
+    @cached_property
     def message_text(self) -> str:
+        tweet = self._tweet
         return message_raw_text.format(
-            url=self.url,
-            author_url=self.author_url,
-            author=html.escape(self.author),
-            text=html.escape(self.text)
+            url=tweet.url,
+            author_url=tweet.author_url,
+            author=html.escape(tweet.author),
+            text=html.escape(tweet.text)
         )
 
     @property
-    def inline_query_generator(self) -> Generator[
-        InlineQueryResultPhoto | InlineQueryResultVideo | InlineQueryResultMpeg4Gif, None, None
-    ]:
-        for tweet_media in self.media:
+    def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
+        tweet = self._tweet
+        for tweet_media in tweet.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
                 yield InlineQueryResultPhoto(
@@ -281,7 +225,7 @@ class TelegramTweet(Tweet):
                     video_url=tweet_media.url,
                     mime_type="video/mp4",
                     thumbnail_url=tweet_media.thumb,
-                    title=self.text,
+                    title=tweet.text,
                     caption=self.message_text
                 )
             elif tweet_media.type == "gif":
@@ -293,26 +237,46 @@ class TelegramTweet(Tweet):
                 )
 
     @property
-    def message_media_generator(self) -> Generator[InputMediaPhoto | InputMediaVideo | tuple[str, bool], None, None]:
-        for tweet_media in self.media:
+    def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
+        tweet = self._tweet
+        for tweet_media in tweet.media:
             logger.info(str(tweet_media))
             if tweet_media.type == "image":
                 yield InputMediaPhoto(
                     media=tweet_media.url,
-                    has_spoiler=self.sensitive
+                    has_spoiler=tweet.sensitive
                 )
             elif tweet_media.type == "video":
                 yield InputMediaVideo(
                     media=tweet_media.url,
-                    has_spoiler=self.sensitive,
+                    has_spoiler=tweet.sensitive,
                     thumbnail=tweet_media.thumb
                 )
             elif tweet_media.type == "gif":
-                if len(self.media) == 1:
-                    self._is_single_gif = True
-                    yield tweet_media.url, self.sensitive
+                if len(tweet.media) == 1:
+                    yield tweet_media.url, tweet.sensitive
                 yield InputMediaVideo(
                     media=tweet_media.url,
-                    has_spoiler=self.sensitive,
+                    has_spoiler=tweet.sensitive,
                     thumbnail=tweet_media.thumb
                 )
+
+
+class Telegram:
+    _httpx_client: AsyncClient
+
+    def __init__(self, url: str):
+        self._url = url
+
+    async def __aenter__(self):
+        if x_url_regex.match(self._url):
+            async with TelegramTweet(self._httpx_client, self._url) as tweet:
+                return tweet
+
+    @classmethod
+    def init_client(cls) -> None:
+        cls._httpx_client = create_client()
+
+    @classmethod
+    async def close_client(cls) -> None:
+        await close_client(cls._httpx_client)
