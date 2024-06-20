@@ -51,7 +51,7 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             media,
             caption=tweet.message_text,
             reply_to_message_id=update.message.message_id,
-        ) if not isinstance(tuple, media[0]) else await update.effective_message.reply_animation(
+        ) if not isinstance(media[0], tuple) else await update.effective_message.reply_animation(
             media[0][0],
             caption=tweet.message_text,
             reply_to_message_id=update.message.message_id,
