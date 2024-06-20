@@ -273,6 +273,9 @@ class Telegram:
             async with TelegramTweet(self._httpx_client, self._url) as tweet:
                 return tweet
 
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
     @classmethod
     def init_client(cls) -> None:
         cls._httpx_client = create_client()
