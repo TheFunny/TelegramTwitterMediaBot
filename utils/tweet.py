@@ -158,7 +158,7 @@ class ProcessTweet:
     async def _fetch_tweet(self) -> TweetInfo:
         match = x_url_regex.match(self._url)
         assert match, f"Invalid URL: {self._url}"
-        auther_id, tweet_id = match.group()
+        auther_id, tweet_id = match.groups()
         return await fetch_json(self._httpx_client, vx_api_url.format(auther_id, tweet_id))
 
     @property
