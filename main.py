@@ -10,7 +10,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandl
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
-from tweet import Telegram
+from utils.tweet import Telegram
 
 if TYPE_CHECKING:
     from telegram import Chat, Message, Update

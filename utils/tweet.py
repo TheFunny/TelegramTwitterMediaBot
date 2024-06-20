@@ -12,7 +12,7 @@ from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQ
 from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
 
 if TYPE_CHECKING:
-    from types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
+    from .types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
 
 logger = get_logger(__name__)
 
