@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN set -eux; \
 	apt-get update; \
-	apt-get install -y gosu; \
+	apt-get install -y git gosu; \
 	rm -rf /var/lib/apt/lists/*; \
 # verify that the binary works
 	gosu nobody true
