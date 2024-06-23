@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from .net import NetClient
+from common import PIXIV_REFRESH_TOKEN
 from .pixiv import TelegramPixiv
 from .regex import pixiv_url, x_url
 from .tweet import TelegramTweet
 
 
-class Telegram(NetClient):
+class Telegram:
     def __init__(self, url: str):
         self._url = url
 
@@ -14,7 +14,7 @@ class Telegram(NetClient):
         if x_url.match(self._url):
             async with TelegramTweet(self._url) as tweet:
                 return tweet
-        elif pixiv_url.match(self._url):
+        elif PIXIV_REFRESH_TOKEN and pixiv_url.match(self._url):
             async with TelegramPixiv(self._url) as pixiv:
                 return pixiv
 

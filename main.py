@@ -12,6 +12,8 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandl
 import common
 import utils.regex as regex
 from utils.logger import get_logger
+from utils.net import NetClient
+from utils.pixiv import ProcessPixiv
 from utils.telegram import Telegram
 
 if TYPE_CHECKING:
@@ -208,9 +210,9 @@ async def post_init(application: Application) -> None:
     DESCRIPTION = "A bot to fetch tweets from Twitter."
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
-    Telegram.init_client()
+    NetClient.init_client()
     if common.PIXIV_REFRESH_TOKEN:
-        await Pixiv.init_client(common.PIXIV_REFRESH_TOKEN)
+        await ProcessPixiv.init_client(common.PIXIV_REFRESH_TOKEN)
 
 
 async def post_stop(application: Application) -> None:
@@ -218,7 +220,7 @@ async def post_stop(application: Application) -> None:
 
 
 async def post_shutdown(application: Application) -> None:
-    await Telegram.close_client()
+    await NetClient.close_client()
 
 
 def main():
