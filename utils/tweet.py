@@ -5,11 +5,11 @@ from functools import cached_property
 from typing import Generator, TYPE_CHECKING
 from uuid import uuid4
 
-from httpx import AsyncClient
 from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
                       InputMediaVideo)
 
 from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
+from .net import NetClient
 
 if TYPE_CHECKING:
     from .types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
@@ -23,21 +23,6 @@ vx_api_url = 'https://api.vxtwitter.com/{0}/status/{1}'
 message_raw_text = """{url}
 <a href="{author_url}">{author}</a>: {text}
 """
-
-
-def create_client() -> AsyncClient:
-    return AsyncClient(http2=True)
-
-
-async def close_client(_client: AsyncClient) -> None:
-    await _client.aclose()
-
-
-async def fetch_json(_client: AsyncClient, url: str) -> dict:
-    logger.info(f"Fetching {url}")
-    response = await _client.get(url)
-    assert response.is_success, f"Failed to fetch {url}, status code {response.status_code}"
-    return response.json()
 
 
 class TweetMedia:
@@ -135,10 +120,9 @@ class Tweet:
 
 
 class ProcessTweet:
-    __slots__ = ('_httpx_client', '_url', '_tweet')
+    __slots__ = ('_url', '_tweet')
 
-    def __init__(self, httpx_client: AsyncClient, url: str):
-        self._httpx_client: AsyncClient = httpx_client
+    def __init__(self, url: str):
         self._url: str = url
 
     async def __aenter__(self):
@@ -159,7 +143,7 @@ class ProcessTweet:
         match = x_url_regex.match(self._url)
         assert match, f"Invalid URL: {self._url}"
         auther_id, tweet_id = match.groups()
-        return await fetch_json(self._httpx_client, vx_api_url.format(auther_id, tweet_id))
+        return await NetClient.fetch_json(vx_api_url.format(auther_id, tweet_id))
 
     @property
     def _tweet_text(self) -> str:
@@ -179,14 +163,13 @@ class ProcessTweet:
 
 
 class TelegramTweet:
-    __slots__ = ('_httpx_client', '_url', '_tweet', '__dict__')
+    __slots__ = ('_url', '_tweet', '__dict__')
 
-    def __init__(self, httpx_client: AsyncClient, url: str):
-        self._httpx_client: AsyncClient = httpx_client
+    def __init__(self, url: str):
         self._url: str = url
 
     async def __aenter__(self):
-        async with ProcessTweet(self._httpx_client, self._url) as tweet:
+        async with ProcessTweet(self._url) as tweet:
             self._tweet = tweet
         return self
 
@@ -207,7 +190,12 @@ class TelegramTweet:
             text=html.escape(tweet.text)
         )
 
-    @property
+    def inline_query_result(self) -> tuple[TypeInlineQueryResult, ...]:
+        return tuple(self.inline_query_generator())
+
+    def message_media_result(self) -> tuple[TypeMessageMediaResult, ...]:
+        return tuple(self.message_media_generator())
+
     def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
         tweet = self._tweet
         for tweet_media in tweet.media:
@@ -236,7 +224,6 @@ class TelegramTweet:
                     caption=self.message_text
                 )
 
-    @property
     def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
         tweet = self._tweet
         for tweet_media in tweet.media:
@@ -260,26 +247,3 @@ class TelegramTweet:
                     has_spoiler=tweet.sensitive,
                     thumbnail=tweet_media.thumb
                 )
-
-
-class Telegram:
-    _httpx_client: AsyncClient
-
-    def __init__(self, url: str):
-        self._url = url
-
-    async def __aenter__(self):
-        if x_url_regex.match(self._url):
-            async with TelegramTweet(self._httpx_client, self._url) as tweet:
-                return tweet
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    @classmethod
-    def init_client(cls) -> None:
-        cls._httpx_client = create_client()
-
-    @classmethod
-    async def close_client(cls) -> None:
-        await close_client(cls._httpx_client)
