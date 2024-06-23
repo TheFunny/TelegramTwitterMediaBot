@@ -11,6 +11,8 @@ except ImportError:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN = [int(i) for i in os.getenv("BOT_ADMIN").split(",")]
 
+PIXIV_REFRESH_TOKEN = os.getenv("PIXIV_REFRESH_TOKEN")
+
 WEBHOOK = os.getenv("WEBHOOK", False)
 if WEBHOOK:
     WEBHOOK_LISTEN = os.getenv("WEBHOOK_LISTEN", "0.0.0.0")

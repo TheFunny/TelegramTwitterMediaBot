@@ -1,12 +1,13 @@
 services:
   tgxmb: image: yoursfunny/telegram-twitter-media-bot: latest
     restart: always
-    ports:
-      - "8443:8443"
+#    ports:
+#      - "8443:8443"
     environment:
       LOCAL_USER_ID: '1000'
       BOT_TOKEN: ''
       BOT_ADMIN: ''
+      PIXIV_REFRESH_TOKEN: ''
       WEBHOOK: false
       WEBHOOK_LISTEN: '127.0.0.1'
       WEBHOOK_PORT: 8443
