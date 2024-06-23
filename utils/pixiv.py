@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import html
 from typing import Generator, Literal, TYPE_CHECKING
 from uuid import uuid4
