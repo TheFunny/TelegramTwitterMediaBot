@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from common import x_url_regex
 from .net import NetClient
+from .regex import x_url
 from .tweet import TelegramTweet
 
 
@@ -10,7 +10,7 @@ class Telegram(NetClient):
         self._url = url
 
     async def __aenter__(self):
-        if x_url_regex.match(self._url):
+        if x_url.match(self._url):
             async with TelegramTweet(self._url) as tweet:
                 return tweet
 

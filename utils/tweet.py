@@ -8,8 +8,9 @@ from uuid import uuid4
 from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
                       InputMediaVideo)
 
-from common import get_logger, x_media_regex, x_tco_regex, x_url_regex
+from .logger import get_logger
 from .net import NetClient
+from .regex import x_media_url, x_tco_url, x_url
 
 if TYPE_CHECKING:
     from .types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
@@ -38,7 +39,7 @@ class TweetMedia:
 
     @cached_property
     def _uri(self) -> str | None:
-        if match := x_media_regex.match(self._url):
+        if match := x_media_url.match(self._url):
             return match.group(2).removesuffix('.jpg').removesuffix('.png')
         return None
 
@@ -140,14 +141,14 @@ class ProcessTweet:
         pass
 
     async def _fetch_tweet(self) -> TweetInfo:
-        match = x_url_regex.match(self._url)
+        match = x_url.match(self._url)
         assert match, f"Invalid URL: {self._url}"
         auther_id, tweet_id = match.groups()
         return await NetClient.fetch_json(vx_api_url.format(auther_id, tweet_id))
 
     @property
     def _tweet_text(self) -> str:
-        match = x_tco_regex.search(self._tweet['text'])
+        match = x_tco_url.search(self._tweet['text'])
         return self._tweet['text'][:match.start()].strip(" ") if match else self._tweet['text']
 
     @property

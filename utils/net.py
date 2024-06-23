@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from httpx import AsyncClient
 
-from common import get_logger
-
-logger = get_logger(__name__)
-
 
 def create_client() -> AsyncClient:
     return AsyncClient(http2=True)
@@ -16,7 +12,6 @@ async def close_client(_client: AsyncClient) -> None:
 
 
 async def fetch_json(_client: AsyncClient, url: str) -> dict:
-    logger.info(f"Fetching {url}")
     response = await _client.get(url)
     assert response.is_success, f"Failed to fetch {url}, status code {response.status_code}"
     return response.json()
