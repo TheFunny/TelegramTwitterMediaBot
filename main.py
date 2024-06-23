@@ -242,8 +242,9 @@ def main():
     user_filter.add_user_ids(common.ADMIN)
 
     handlers = [
-        InlineQueryHandler(inline_query, regex.x_url),
-        MessageHandler(filters.Regex(regex.x_url) & filters.ChatType.PRIVATE, url_media),
+        InlineQueryHandler(inline_query),
+        MessageHandler((filters.Regex(regex.x_url) | filters.Regex(regex.pixiv_url)) & filters.ChatType.PRIVATE,
+                       url_media),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
