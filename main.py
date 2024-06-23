@@ -39,8 +39,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     logger.info(f"Query: {query}")
     async with Telegram(query) as tweet:
-        result = list(tweet.inline_query_generator)
-        await update.inline_query.answer(result)
+        await update.inline_query.answer(tweet.inline_query_result())
 
 
 @send_action(ChatAction.UPLOAD_PHOTO)
@@ -48,7 +47,10 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     url = update.message.text
     logger.info(f"Receiving url: {url}")
     async with Telegram(url) as tweet:
-        media = list(tweet.message_media_generator)
+        media = tweet.message_media_result()
+        if not media:
+            await update.effective_message.reply_text("No media found or media type is not supported.")
+            return
         message_to_send = await update.effective_message.reply_media_group(
             media,
             caption=tweet.message_text,
@@ -207,6 +209,8 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_description(DESCRIPTION)
     await application.bot.set_my_short_description(DESCRIPTION)
     Telegram.init_client()
+    if common.PIXIV_REFRESH_TOKEN:
+        await Pixiv.init_client(common.PIXIV_REFRESH_TOKEN)
 
 
 async def post_stop(application: Application) -> None:
