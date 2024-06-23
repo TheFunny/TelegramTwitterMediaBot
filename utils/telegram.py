@@ -17,6 +17,8 @@ class Telegram:
         elif PIXIV_REFRESH_TOKEN and pixiv_url.match(self._url):
             async with TelegramPixiv(self._url) as pixiv:
                 return pixiv
+        else:
+            return None
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass

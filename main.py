@@ -41,6 +41,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     logger.info(f"Query: {query}")
     async with Telegram(query) as tweet:
+        if not tweet:
+            return
         await update.inline_query.answer(tweet.inline_query_result())
 
 
