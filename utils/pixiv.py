@@ -205,7 +205,7 @@ class TelegramPixiv:
             logger.info(str(media))
             if pixiv.type in ("illust", "manga"):
                 yield InputMediaPhoto(
-                    media=media.url,
+                    media=media.large,
                     has_spoiler=pixiv.is_nsfw
                 )
             else:
