@@ -68,7 +68,7 @@ class Pixiv:
 
     @property
     def author_url(self) -> str:
-        return str(self._illust.user.link)
+        return str(self._illust.user.link).rstrip('/')
 
     @property
     def description(self) -> str:
@@ -192,6 +192,7 @@ class TelegramPixiv:
     def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
         pixiv = self._pixiv
         for media in pixiv.images:
+            logger.info(str(media))
             if pixiv.type in ("illust", "manga"):
                 yield InputMediaPhoto(
                     media=media.url,
