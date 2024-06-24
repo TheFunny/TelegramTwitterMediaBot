@@ -5,6 +5,7 @@ from typing import Generator, Literal, TYPE_CHECKING
 from uuid import uuid4
 
 from async_pixiv import PixivClient
+from async_pixiv.error import ApiError
 from telegram import InlineQueryResultPhoto, InputMediaPhoto
 
 from utils.logger import get_logger
@@ -118,10 +119,15 @@ class ProcessPixiv:
     async def init_client(cls, token: str) -> None:
         cls._client = PixivClient()
         await cls._client.login_with_token(token)
+        cls._token = token
 
     @classmethod
     async def close_client(cls) -> None:
         await cls._client.close()
+
+    @classmethod
+    async def refresh_token(cls):
+        await cls._client.login_with_token(cls._token)
 
     def __init__(self, url: str):
         self._url: str = url
@@ -135,7 +141,11 @@ class ProcessPixiv:
 
     async def _fetch_illust(self) -> Illust:
         illust_id = self._parse_illust_id()
-        return (await self._client.ILLUST.detail(illust_id)).illust
+        try:
+            return (await self._client.ILLUST.detail(illust_id)).illust
+        except ApiError:
+            await self.refresh_token()
+            return (await self._client.ILLUST.detail(illust_id)).illust  # TODO use retry here
 
     def _parse_illust_id(self) -> int:
         return int(self._url.split("/")[-1])
