@@ -18,7 +18,7 @@ class Telegram:
             async with TelegramPixiv(self._url) as pixiv:
                 return pixiv
         else:
-            return None
+            return None  # TODO add raise and catch
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass

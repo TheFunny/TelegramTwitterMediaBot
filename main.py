@@ -17,7 +17,7 @@ from utils.pixiv import ProcessPixiv
 from utils.telegram import Telegram
 
 if TYPE_CHECKING:
-    from telegram import Chat, Message, Update
+    from telegram import Message, Update
     from telegram.ext import Application, ContextTypes
 
 logger = get_logger(__name__)
@@ -141,7 +141,7 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
         return
     channel = context.args[0]
     try:
-        channel: Chat = await context.bot.get_chat(channel)
+        channel = await context.bot.get_chat(channel)
     except Exception as e:
         await update.effective_message.reply_text(str(e))
         return
@@ -152,6 +152,11 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
         channel_admin = await channel.get_administrators()
     except Exception as e:
         await update.effective_message.reply_text(str(e) + "\nPlease add the bot to the channel and set as admin")
+        return
+    user = filter(lambda x: x.user.id == update.effective_user.id, channel_admin)
+    user = next(user, None)
+    if not user:
+        await update.effective_message.reply_text("You are not an admin of the channel.")
         return
     user_bot = filter(lambda x: x.user.id == context.bot.id, channel_admin)
     user_bot = next(user_bot, None)
