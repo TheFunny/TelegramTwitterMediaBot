@@ -165,8 +165,9 @@ class TelegramPixiv:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
+    @property
     def url(self) -> str:
-        return self._url
+        return self._pixiv.url
 
     @property
     def message_text(self) -> str:
