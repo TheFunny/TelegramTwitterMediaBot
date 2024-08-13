@@ -104,15 +104,15 @@ async def forward_message(
 async def edit_message(update: Update, context: CustomContext) -> None:
     if not (reply := update.message.reply_to_message):
         return
-    if reply.id not in context.chat_data.edit_message:
+    _edit_message = context.chat_data.edit_message.get(reply.id, None)
+    if not _edit_message:
         return
-    _edit_message = context.chat_data.edit_message[reply.id]
     new_text = '<a href="{0}">{1}</a>'.format(
         _edit_message.url,
         html.escape(update.message.text)
     )
-    update_text = ori_text.replace("[]", new_text) if "[]" in (
-        ori_text := _edit_message.forward[0].caption) else new_text
+    update_text = context.chat_data.template[template].replace("[]", new_text) if (
+        template := _edit_message.template) else new_text
     await _edit_message.forward[0].edit_caption(update_text)
 
 
@@ -128,9 +128,9 @@ async def query_template(update: Update, context: CustomContext) -> None:
     query = update.callback_query
     await query.answer()
     name = query.data.split("|")[1]
-    await context.chat_data.edit_message[query.message.message_id].forward[0].edit_caption(
-        context.chat_data.template[name]
-    )
+    _edit_message = context.chat_data.edit_message[query.message.message_id]
+    _edit_message.template = name
+    await _edit_message.forward[0].edit_caption(context.chat_data.template[name])
 
 
 @send_action(ChatAction.TYPING)

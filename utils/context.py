@@ -9,6 +9,7 @@ from telegram.ext import Application, CallbackContext, ExtBot
 class EditMessage:
     url: str
     forward: tuple[Message, ...]
+    template: str = ""
 
     def __str__(self):
         forward = ", ".join(f"Message({f.id})" for f in self.forward)
