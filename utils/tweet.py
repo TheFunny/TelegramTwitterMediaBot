@@ -1,29 +1,16 @@
 from __future__ import annotations
 
-import html
 from functools import cached_property
-from typing import Generator, TYPE_CHECKING
-from uuid import uuid4
+from typing import TYPE_CHECKING
 
-from telegram import (InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, InputMediaPhoto,
-                      InputMediaVideo)
-
-from .logger import get_logger
 from .net import NetClient
 from .regex import x_media_url, x_tco_url, x_url
 
 if TYPE_CHECKING:
-    from .types import TweetInfo, TypeInlineQueryResult, TypeMessageMediaResult
-
-logger = get_logger(__name__)
-
+    from .types import TweetInfo
 
 twimg_url = 'https://pbs.twimg.com/'
 vx_api_url = 'https://api.vxtwitter.com/{0}/status/{1}'
-
-message_raw_text = """{url}
-<a href="{author_url}">{author}</a>: {text}
-"""
 
 
 class TweetMedia:
@@ -163,88 +150,3 @@ class ProcessTweet:
         ]
 
 
-class TelegramTweet:
-    __slots__ = ('_url', '_tweet', '__dict__')
-
-    def __init__(self, url: str):
-        self._url: str = url
-
-    async def __aenter__(self):
-        async with ProcessTweet(self._url) as tweet:
-            self._tweet = tweet
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    @cached_property
-    def url(self) -> str:
-        return self._tweet.url
-
-    @cached_property
-    def message_text(self) -> str:
-        tweet = self._tweet
-        return message_raw_text.format(
-            url=tweet.url,
-            author_url=tweet.author_url,
-            author=html.escape(tweet.author),
-            text=html.escape(tweet.text)
-        )
-
-    def inline_query_result(self) -> tuple[TypeInlineQueryResult, ...]:
-        return tuple(self.inline_query_generator())
-
-    def message_media_result(self) -> tuple[TypeMessageMediaResult, ...]:
-        return tuple(self.message_media_generator())
-
-    def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
-        tweet = self._tweet
-        for tweet_media in tweet.media:
-            logger.info(str(tweet_media))
-            if tweet_media.type == "image":
-                yield InlineQueryResultPhoto(
-                    id=str(uuid4()),
-                    photo_url=tweet_media.url,
-                    thumbnail_url=tweet_media.thumb,
-                    caption=self.message_text
-                )
-            elif tweet_media.type == "video":
-                yield InlineQueryResultVideo(
-                    id=str(uuid4()),
-                    video_url=tweet_media.url,
-                    mime_type="video/mp4",
-                    thumbnail_url=tweet_media.thumb,
-                    title=tweet.text,
-                    caption=self.message_text
-                )
-            elif tweet_media.type == "gif":
-                yield InlineQueryResultMpeg4Gif(
-                    id=str(uuid4()),
-                    mpeg4_url=tweet_media.url,
-                    thumbnail_url=tweet_media.thumb,
-                    caption=self.message_text
-                )
-
-    def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
-        tweet = self._tweet
-        for tweet_media in tweet.media:
-            logger.info(str(tweet_media))
-            if tweet_media.type == "image":
-                yield InputMediaPhoto(
-                    media=tweet_media.url,
-                    has_spoiler=tweet.sensitive
-                )
-            elif tweet_media.type == "video":
-                yield InputMediaVideo(
-                    media=tweet_media.url,
-                    has_spoiler=tweet.sensitive,
-                    thumbnail=tweet_media.thumb
-                )
-            elif tweet_media.type == "gif":
-                if len(tweet.media) == 1:
-                    yield tweet_media.url, tweet.sensitive
-                yield InputMediaVideo(
-                    media=tweet_media.url,
-                    has_spoiler=tweet.sensitive,
-                    thumbnail=tweet_media.thumb
-                )

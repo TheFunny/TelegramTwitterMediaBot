@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-import html
-from typing import Generator, Literal, TYPE_CHECKING
-from uuid import uuid4
+from typing import Literal, TYPE_CHECKING
 
 from async_pixiv import PixivClient
 from async_pixiv.error import ApiError
-from telegram import InlineQueryResultPhoto, InputMediaPhoto
-
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from async_pixiv.model.illust import Illust
-    from utils.types import TypeInlineQueryResult, TypeMessageMediaResult
-
-logger = get_logger(__name__)
-
-message_raw_text = """<a href="{url}">{text}</a> / <a href="{author_url}">{author}</a>
-{tags}
-"""
 
 
 class PixivMedia:
@@ -110,10 +98,8 @@ class Pixiv:
             ]
 
 
-class ProcessPixiv:
+class _ProcessPixiv:
     _client: PixivClient
-
-    __slots__ = ('_url', '_illust')
 
     @classmethod
     async def init_client(cls, token: str) -> None:
@@ -128,6 +114,10 @@ class ProcessPixiv:
     @classmethod
     async def refresh_token(cls):
         await cls._client.login_with_token(cls._token)
+
+
+class ProcessPixiv(_ProcessPixiv):
+    __slots__ = ('_url', '_illust')
 
     def __init__(self, url: str):
         self._url: str = url
@@ -149,65 +139,3 @@ class ProcessPixiv:
 
     def _parse_illust_id(self) -> int:
         return int(self._url.split("/")[-1])
-
-
-class TelegramPixiv:
-    __slots__ = ('_url', '_pixiv')
-
-    def __init__(self, url: str):
-        self._url = url
-
-    async def __aenter__(self):
-        async with ProcessPixiv(self._url) as pixiv:
-            self._pixiv = pixiv
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    @property
-    def url(self) -> str:
-        return self._pixiv.url
-
-    @property
-    def message_text(self) -> str:
-        pixiv = self._pixiv
-        return message_raw_text.format(
-            url=pixiv.url,
-            author_url=pixiv.author_url,
-            author=html.escape(pixiv.author),
-            text=html.escape(pixiv.title),
-            tags=html.escape(" ".join(f"#{name}" for name in pixiv.tags))
-        )
-
-    def inline_query_result(self) -> tuple[TypeInlineQueryResult, ...]:
-        return tuple(self.inline_query_generator())
-
-    def message_media_result(self) -> tuple[TypeMessageMediaResult, ...]:
-        return tuple(self.message_media_generator())
-
-    def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
-        pixiv = self._pixiv
-        for media in pixiv.images:
-            logger.info(str(media))
-            if pixiv.type in ("illust", "manga"):
-                yield InlineQueryResultPhoto(
-                    id=str(uuid4()),
-                    photo_url=media.large,
-                    thumbnail_url=media.thumb,
-                    caption=self.message_text
-                )
-            else:
-                yield
-
-    def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
-        pixiv = self._pixiv
-        for media in pixiv.images:
-            logger.info(str(media))
-            if pixiv.type in ("illust", "manga"):
-                yield InputMediaPhoto(
-                    media=media.large,
-                    has_spoiler=pixiv.is_nsfw
-                )
-            else:
-                yield
