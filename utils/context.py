@@ -5,10 +5,16 @@ from telegram import Message
 from telegram.ext import Application, CallbackContext, ExtBot
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(repr=False)
 class EditMessage:
     url: str
     forward: tuple[Message, ...]
+
+    def __str__(self):
+        forward = ", ".join(f"Message({f.id})" for f in self.forward)
+        return f"EditMessage(url={self.url}, forward={forward})"
+
+    __repr__ = __str__
 
 
 class ChatData:
@@ -21,6 +27,8 @@ class ChatData:
     def __str__(self):
         return f"ChatData(forward_channel_id={self.forward_channel_id}, edit_before_forward={self.edit_before_forward}, " \
                f"edit_message={self.edit_message}, template={self.template})"
+
+    __repr__ = __str__
 
 
 class CustomContext(CallbackContext[ExtBot, dict, ChatData, dict]):
