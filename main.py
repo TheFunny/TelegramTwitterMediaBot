@@ -73,10 +73,8 @@ async def url_media(update: Update, context: CustomContext) -> None:
         message_reply = await update.effective_message.reply_text(
             "Reply to edit message.",
             reply_markup=InlineKeyboardMarkup.from_column(
-                [InlineKeyboardButton("↩️ Confirm", callback_data="forward")] + [
-                    InlineKeyboardButton(name, callback_data=f"template|{name}") for name in
-                    context.chat_data.template.keys()
-                ]
+                [InlineKeyboardButton(name, callback_data=f"template|{name}") for name in
+                 context.chat_data.template.keys()] + [InlineKeyboardButton("↩️ Confirm", callback_data="forward")]
             ),
             reply_to_message_id=update.message.message_id,
         )
@@ -104,9 +102,11 @@ async def forward_message(
 
 
 async def edit_message(update: Update, context: CustomContext) -> None:
-    if (reply_id := update.message.reply_to_message.id) not in context.chat_data.edit_message:
+    if not (reply := update.message.reply_to_message):
         return
-    _edit_message = context.chat_data.edit_message[reply_id]
+    if reply.id not in context.chat_data.edit_message:
+        return
+    _edit_message = context.chat_data.edit_message[reply.id]
     new_text = '<a href="{0}">{1}</a>'.format(
         _edit_message.url,
         html.escape(update.message.text)
@@ -195,13 +195,16 @@ async def cmd_set_template(update: Update, context: CustomContext) -> None:
     if '[]' not in (template := reply.text_html):
         await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
         return
+    if not context.args:
+        await update.effective_message.reply_text("Please provide a name for the template.")
+        return
     context.chat_data.template[''.join(context.args)] = template
     await update.effective_message.reply_text("Template set.")
 
 
 @send_action(ChatAction.TYPING)
 async def cmd_user_dict(update: Update, context: CustomContext) -> None:
-    await update.effective_message.reply_text(str(context.chat_data) + str(context.user_data))
+    await update.effective_message.reply_text(f"{context.user_data}\n{context.chat_data}")
 
 
 async def post_init(application: Application) -> None:

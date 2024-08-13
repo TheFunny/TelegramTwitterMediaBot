@@ -18,6 +18,10 @@ class ChatData:
         self.edit_message: dict[int, EditMessage] = {}
         self.template: dict[str, str] = {}
 
+    def __str__(self):
+        return f"ChatData(forward_channel_id={self.forward_channel_id}, edit_before_forward={self.edit_before_forward}, " \
+               f"edit_message={self.edit_message}, template={self.template})"
+
 
 class CustomContext(CallbackContext[ExtBot, dict, ChatData, dict]):
     def __init__(
