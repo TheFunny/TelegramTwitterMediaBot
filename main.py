@@ -111,7 +111,8 @@ async def edit_message(update: Update, context: CustomContext) -> None:
         _edit_message.url,
         html.escape(update.message.text)
     )
-    update_text = ori_text.replace("[]", new_text) if "[]" in (ori_text := _edit_message.forward[0].text) else new_text
+    update_text = ori_text.replace("[]", new_text) if "[]" in (
+        ori_text := _edit_message.forward[0].caption) else new_text
     await _edit_message.forward[0].edit_caption(update_text)
 
 
