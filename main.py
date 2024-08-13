@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ChatType, ParseMode
-from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler, Defaults,
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults,
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
 
 import common
@@ -19,7 +19,7 @@ from utils.telegram import Telegram
 
 if TYPE_CHECKING:
     from telegram import Message, Update
-    from telegram.ext import Application, ContextTypes
+    from telegram.ext import Application
 
 logger = get_logger(__name__)
 
