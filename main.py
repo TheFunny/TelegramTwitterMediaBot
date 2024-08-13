@@ -204,7 +204,7 @@ async def cmd_set_template(update: Update, context: CustomContext) -> None:
 
 @send_action(ChatAction.TYPING)
 async def cmd_user_dict(update: Update, context: CustomContext) -> None:
-    await update.effective_message.reply_text(html.escape(str(context.chat_data))
+    await update.effective_message.reply_text(html.escape(str(context.chat_data)))
 
 
 async def post_init(application: Application) -> None:
