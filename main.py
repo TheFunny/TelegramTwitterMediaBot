@@ -11,6 +11,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandl
 
 import common
 import utils.regex as regex
+from utils.context import ChatData, CustomContext, EditMessage
 from utils.logger import get_logger
 from utils.net import NetClient
 from utils.pixiv import ProcessPixiv
@@ -26,7 +27,7 @@ logger = get_logger(__name__)
 def send_action(action):
     def decorator(func):
         @wraps(func)
-        async def command_func(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        async def command_func(update: Update, context: CustomContext, *args, **kwargs):
             await update.effective_chat.send_action(action)
             return await func(update, context, *args, **kwargs)
 
@@ -35,7 +36,7 @@ def send_action(action):
     return decorator
 
 
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def inline_query(update: Update, context: CustomContext) -> None:
     query = update.inline_query.query
     if query == "":
         return
@@ -47,7 +48,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @send_action(ChatAction.UPLOAD_PHOTO)
-async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def url_media(update: Update, context: CustomContext) -> None:
     url = update.message.text
     logger.info(f"Receiving url: {url}")
     async with Telegram(url) as tweet:
@@ -68,7 +69,7 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not isinstance(message_to_send, tuple):
             message_to_send = (message_to_send,)
         url = tweet.url
-    if context.user_data.get('edit_before_forward', False):
+    if context.chat_data.edit_before_forward:
         message_reply = await update.effective_message.reply_text(
             "Reply to edit message. [URL]",
             reply_markup=InlineKeyboardMarkup.from_button(
@@ -76,39 +77,38 @@ async def url_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ),
             reply_to_message_id=update.message.message_id,
         )
-        context.user_data['message_reply'] = message_reply
-        context.user_data['message_to_send'] = message_to_send
-        context.user_data['message_url'] = url
+        context.chat_data.edit_message[message_reply.id] = EditMessage(
+            url=url,
+            forward=message_to_send
+        )
         return
-    if 'forward_channel_id' in context.user_data:
+    if context.chat_data.forward_channel_id:
         await forward_message(update, context, message_to_send)
 
 
 async def forward_message(
         update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
+        context: CustomContext,
         message_to_send: tuple[Message, ...],
 ) -> None:
     try:
         await update.effective_chat.copy_messages(
-            context.user_data['forward_channel_id'],
+            context.chat_data.forward_channel_id,
             [m.id for m in message_to_send]
         )
     except Exception as e:
         await update.effective_message.reply_text(str(e))
 
 
-async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if 'message_reply' not in context.user_data:
+async def edit_message(update: Update, context: CustomContext) -> None:
+    if (reply_id := update.message.reply_to_message.id) not in context.chat_data.edit_message:
         return
-    if update.message.reply_to_message != context.user_data['message_reply']:
-        return
-    template = context.user_data.get('template', None)
+    template = context.chat_data.template
     message_url = '<a href="{0}">{1}</a>'
-    url = context.user_data['message_url']
+    _edit_message = context.chat_data.edit_message[reply_id]
     if template:
         update_text = template.replace("[]", message_url.format(
-            url,
+            _edit_message.url,
             html.escape(update.message.text)
         ))
     else:
@@ -117,25 +117,22 @@ async def edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if match:
             match = match.span()
             update_text = update_text[:match[0]] + message_url.format(
-                url,
+                _edit_message.url,
                 update_text[match[0] + 1:match[1] - 1]
             ) + update_text[match[1]:]
-    message_to_send = context.user_data['message_to_send']
-    await message_to_send[0].edit_caption(update_text)
+    await _edit_message.forward[0].edit_caption(update_text)
 
 
-async def query_forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message_to_send = context.user_data['message_to_send']
-    await forward_message(update, context, message_to_send)
+async def query_forward_message(update: Update, context: CustomContext) -> None:
+    _edit_message = context.chat_data.edit_message[update.effective_message.id]
+    await forward_message(update, context, _edit_message.forward)
     await update.callback_query.answer('✅ Forwarded')
     await update.callback_query.delete_message()
-    del context.user_data['message_reply']
-    del context.user_data['message_to_send']
-    del context.user_data['message_url']
+    del _edit_message
 
 
 @send_action(ChatAction.TYPING)
-async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_set_forward_channel(update: Update, context: CustomContext) -> None:
     if not context.args:
         await update.effective_message.reply_text("Please provide a channel username or id.")
         return
@@ -161,38 +158,35 @@ async def cmd_set_forward_channel(update: Update, context: ContextTypes.DEFAULT_
     user_bot = filter(lambda x: x.user.id == context.bot.id, channel_admin)
     user_bot = next(user_bot, None)
     if user_bot.can_post_messages:
-        context.user_data['forward_channel_id'] = channel.id
+        context.chat_data.forward_channel_id = channel.id
         await update.effective_message.reply_text("Add successfully.")
 
 
 @send_action(ChatAction.TYPING)
-async def cmd_remove_forward_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if 'forward_channel_id' in context.user_data:
-        del context.user_data['forward_channel_id']
+async def cmd_remove_forward_channel(update: Update, context: CustomContext) -> None:
+    if context.chat_data.forward_channel_id:
+        context.chat_data.forward_channel_id = None
         await update.effective_message.reply_text("Remove successfully.")
         return
     await update.effective_message.reply_text("No channel to remove.")
 
 
 @send_action(ChatAction.TYPING)
-async def cmd_edit_before_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get('forward_channel_id', None) is None:
+async def cmd_edit_before_forward(update: Update, context: CustomContext) -> None:
+    if context.chat_data.forward_channel_id is None:
         await update.effective_message.reply_text("Please enable forward channel first.")
         return
-    ebf_status = context.user_data.get('edit_before_forward', False)
-    if ebf_status:
-        context.user_data['edit_before_forward'] = False
-        context.user_data.pop('message_reply', None)
-        context.user_data.pop('message_to_send', None)
-        context.user_data.pop('message_url', None)
+    if context.chat_data.edit_before_forward:
+        context.chat_data.edit_before_forward = False
+        context.chat_data.edit_message.clear()
         await update.effective_message.reply_text("Disable edit before forward.")
         return
-    context.user_data['edit_before_forward'] = True
+    context.chat_data.edit_before_forward = True
     await update.effective_message.reply_text("Enable edit before forward.")
 
 
 @send_action(ChatAction.TYPING)
-async def cmd_set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_set_template(update: Update, context: CustomContext) -> None:
     reply = update.effective_message.reply_to_message
     if not reply:
         await update.effective_message.reply_text("Please reply to a message to set as template.")
@@ -200,13 +194,13 @@ async def cmd_set_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if '[]' not in reply.text_html:
         await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
         return
-    context.user_data['template'] = reply.text_html
+    context.chat_data.template = reply.text_html
     await update.effective_message.reply_text("Template set.")
 
 
 @send_action(ChatAction.TYPING)
-async def cmd_user_dict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(str(context.user_data))
+async def cmd_user_dict(update: Update, context: CustomContext) -> None:
+    await update.effective_message.reply_text(str(context.chat_data) + str(context.user_data))
 
 
 async def post_init(application: Application) -> None:
@@ -237,6 +231,7 @@ def main():
                    .token(common.BOT_TOKEN)
                    .defaults(defaults)
                    .persistence(persistence)
+                   .context_types(ContextTypes(context=CustomContext, chat_data=ChatData))
                    .post_init(post_init)
                    .post_stop(post_stop)
                    .post_shutdown(post_shutdown)
