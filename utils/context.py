@@ -16,7 +16,7 @@ class ChatData:
         self.forward_channel_id: Optional[int] = None
         self.edit_before_forward: bool = False
         self.edit_message: dict[int, EditMessage] = {}
-        self.template: Optional[str] = None
+        self.template: dict[str, str] = {}
 
 
 class CustomContext(CallbackContext[ExtBot, dict, ChatData, dict]):

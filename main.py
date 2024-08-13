@@ -71,9 +71,12 @@ async def url_media(update: Update, context: CustomContext) -> None:
         url = tweet.url
     if context.chat_data.edit_before_forward:
         message_reply = await update.effective_message.reply_text(
-            "Reply to edit message. [URL]",
-            reply_markup=InlineKeyboardMarkup.from_button(
-                InlineKeyboardButton("↩️ Confirm", callback_data="forward")
+            "Reply to edit message.",
+            reply_markup=InlineKeyboardMarkup.from_column(
+                [InlineKeyboardButton("↩️ Confirm", callback_data="forward")] + [
+                    InlineKeyboardButton(name, callback_data=f"template|{name}") for name in
+                    context.chat_data.template.keys()
+                ]
             ),
             reply_to_message_id=update.message.message_id,
         )
@@ -103,23 +106,12 @@ async def forward_message(
 async def edit_message(update: Update, context: CustomContext) -> None:
     if (reply_id := update.message.reply_to_message.id) not in context.chat_data.edit_message:
         return
-    template = context.chat_data.template
-    message_url = '<a href="{0}">{1}</a>'
     _edit_message = context.chat_data.edit_message[reply_id]
-    if template:
-        update_text = template.replace("[]", message_url.format(
-            _edit_message.url,
-            html.escape(update.message.text)
-        ))
-    else:
-        update_text = html.escape(update.message.text)
-        match = regex.message_url.search(update_text)
-        if match:
-            match = match.span()
-            update_text = update_text[:match[0]] + message_url.format(
-                _edit_message.url,
-                update_text[match[0] + 1:match[1] - 1]
-            ) + update_text[match[1]:]
+    new_text = '<a href="{0}">{1}</a>'.format(
+        _edit_message.url,
+        html.escape(update.message.text)
+    )
+    update_text = ori_text.replace("[]", new_text) if "[]" in (ori_text := _edit_message.forward[0].text) else new_text
     await _edit_message.forward[0].edit_caption(update_text)
 
 
@@ -129,6 +121,15 @@ async def query_forward_message(update: Update, context: CustomContext) -> None:
     await update.callback_query.answer('✅ Forwarded')
     await update.callback_query.delete_message()
     del _edit_message
+
+
+async def query_template(update: Update, context: CustomContext) -> None:
+    query = update.callback_query
+    await query.answer()
+    name = query.data.split("|")[1]
+    await context.chat_data.edit_message[query.message.message_id].forward[0].edit_caption(
+        context.chat_data.template[name]
+    )
 
 
 @send_action(ChatAction.TYPING)
@@ -191,10 +192,10 @@ async def cmd_set_template(update: Update, context: CustomContext) -> None:
     if not reply:
         await update.effective_message.reply_text("Please reply to a message to set as template.")
         return
-    if '[]' not in reply.text_html:
+    if '[]' not in (template := reply.text_html):
         await update.effective_message.reply_text("Please reply to a message with [] to set as template.")
         return
-    context.chat_data.template = reply.text_html
+    context.chat_data.template[''.join(context.args)] = template
     await update.effective_message.reply_text("Template set.")
 
 
@@ -253,6 +254,7 @@ def main():
         CommandHandler("set_template", cmd_set_template),
         MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
+        CallbackQueryHandler(query_template, pattern=r"^template\|"),
         CommandHandler("bot_dict", cmd_user_dict, filters=user_filter),
     ]
 
