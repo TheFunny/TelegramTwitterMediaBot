@@ -205,7 +205,7 @@ async def cmd_set_template(update: Update, context: CustomContext) -> None:
 
 @send_action(ChatAction.TYPING)
 async def cmd_user_dict(update: Update, context: CustomContext) -> None:
-    await update.effective_message.reply_text(html.escape(str(context.chat_data)))
+    await update.effective_message.reply_text(html.escape(str(context.chat_data)), disable_web_page_preview=True)
 
 
 async def post_init(application: Application) -> None:
@@ -259,7 +259,7 @@ def main():
         MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
         CallbackQueryHandler(query_template, pattern=r"^template\|"),
-        CommandHandler("bot_dict", cmd_user_dict, filters=user_filter),
+        CommandHandler("bot_dict", cmd_user_dict),
     ]
 
     application.add_handlers(handlers)
