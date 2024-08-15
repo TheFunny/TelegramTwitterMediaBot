@@ -280,7 +280,7 @@ def main():
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
         CommandHandler("set_template", cmd_set_template),
-        MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, edit_message),
+        MessageHandler(~filters.COMMAND & filters.ChatType.PRIVATE, handle_message),
         CallbackQueryHandler(query_forward_message, pattern="forward"),
         CallbackQueryHandler(query_template, pattern=r"^template\|"),
         CommandHandler("bot_dict", cmd_user_dict),
