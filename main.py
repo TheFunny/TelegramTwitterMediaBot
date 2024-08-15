@@ -4,7 +4,7 @@ import html
 from functools import wraps
 from typing import TYPE_CHECKING
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, Defaults,
                           InlineQueryHandler, MessageHandler, PicklePersistence, filters)
@@ -36,6 +36,14 @@ def send_action(action):
     return decorator
 
 
+def extract_urls(message: Message) -> set[str]:
+    types = [MessageEntity.URL, MessageEntity.TEXT_LINK]
+    res = message.parse_entities(types)
+    res.update(message.parse_caption_entities(types))
+    res.update({key: key.url for key in res if key.type == MessageEntity.TEXT_LINK})
+    return set(res.values())
+
+
 async def inline_query(update: Update, context: CustomContext) -> None:
     query = update.inline_query.query
     if query == "":
@@ -48,10 +56,10 @@ async def inline_query(update: Update, context: CustomContext) -> None:
 
 
 @send_action(ChatAction.UPLOAD_PHOTO)
-async def url_media(update: Update, context: CustomContext) -> None:
-    url = update.message.text
-    logger.info(f"Receiving url: {url}")
+async def url_media(update: Update, context: CustomContext, url: str) -> None:
     async with Telegram(url) as tweet:
+        if not tweet:
+            return
         media = tweet.message_media_result()
         if not media:
             await update.effective_message.reply_text("No media found or media type is not supported.")
@@ -87,6 +95,12 @@ async def url_media(update: Update, context: CustomContext) -> None:
         await forward_message(update, context, message_to_send)
 
 
+async def handel_url_media(update: Update, context: CustomContext) -> None:
+    url = update.message.text
+    logger.info(f"Receiving url: {url}")
+    await url_media(update, context, url)
+
+
 async def forward_message(
         update: Update,
         context: CustomContext,
@@ -101,12 +115,12 @@ async def forward_message(
         await update.effective_message.reply_text(str(e))
 
 
-async def edit_message(update: Update, context: CustomContext) -> None:
+async def edit_message(update: Update, context: CustomContext) -> bool:
     if not (reply := update.message.reply_to_message):
-        return
+        return False
     _edit_message = context.chat_data.edit_message.get(reply.id, None)
     if not _edit_message:
-        return
+        return False
     new_text = '<a href="{0}">{1}</a>'.format(
         _edit_message.url,
         html.escape(update.message.text)
@@ -114,6 +128,16 @@ async def edit_message(update: Update, context: CustomContext) -> None:
     update_text = context.chat_data.template[template].replace("[]", new_text) if (
         template := _edit_message.template) else new_text
     await _edit_message.forward[0].edit_caption(update_text)
+    return True
+
+
+async def handle_message(update: Update, context: CustomContext) -> None:
+    if edit_message(update, context):
+        return
+    if not (urls := extract_urls(update.message)):
+        return
+    for url in urls:
+        await url_media(update, context, url)
 
 
 async def query_forward_message(update: Update, context: CustomContext) -> None:
@@ -251,7 +275,7 @@ def main():
     handlers = [
         InlineQueryHandler(inline_query),
         MessageHandler((filters.Regex(regex.x_url) | filters.Regex(regex.pixiv_url)) & filters.ChatType.PRIVATE,
-                       url_media),
+                       handel_url_media),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
