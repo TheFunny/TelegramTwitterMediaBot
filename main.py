@@ -132,7 +132,7 @@ async def edit_message(update: Update, context: CustomContext) -> bool:
 
 
 async def handle_message(update: Update, context: CustomContext) -> None:
-    if edit_message(update, context):
+    if await edit_message(update, context):
         return
     if not (urls := extract_urls(update.message)):
         return
