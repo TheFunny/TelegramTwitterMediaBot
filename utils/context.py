@@ -13,7 +13,7 @@ class EditMessage:
 
     def __str__(self):
         forward = ", ".join(f"Message({f.id})" for f in self.forward)
-        return f"EditMessage(url={self.url}, forward={forward})"
+        return f"EditMessage(url={self.url}, forward={forward}, template={self.template})"
 
     __repr__ = __str__
 
