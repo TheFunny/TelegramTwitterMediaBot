@@ -4,3 +4,10 @@ cert/
 data/
 docker-compose.yml
 utils/x.py
+
+.env
+
+
+# Added by cargo
+
+/target

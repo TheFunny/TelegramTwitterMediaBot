@@ -1,0 +1,12 @@
+[package]
+name = "TelegramXMediaBot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dotenv = "0.15.0"
+log = "0.4.22"
+pretty_env_logger = "0.5.0"
+teloxide = { version = "0.13.0", features = ["webhooks-axum", "macros"] }
+tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }
+url = "2.5.2"
