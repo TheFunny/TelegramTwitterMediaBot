@@ -7,6 +7,7 @@ try:
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     uvloop = None
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN = [int(i) for i in os.getenv("BOT_ADMIN", "").split(",") if i]
 
