@@ -9,9 +9,10 @@ from telegram import InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQu
     InputMediaVideo
 
 from common import PIXIV_REFRESH_TOKEN
+from .bsky import ProcessBsky
 from .logger import get_logger
 from .pixiv import ProcessPixiv
-from .regex import pixiv_url, x_url
+from .regex import bsky_url, pixiv_url, x_url
 from .tweet import ProcessTweet
 
 if TYPE_CHECKING:
@@ -39,6 +40,9 @@ class Telegram:
         elif PIXIV_REFRESH_TOKEN and pixiv_url.match(self._url):
             async with TelegramPixiv(self._url) as pixiv:
                 return pixiv
+        elif bsky_url.match(self._url):
+            async with TelegramBsky(self._url) as bsky:
+                return bsky
         else:
             return None  # TODO add raise and catch
 
@@ -61,7 +65,7 @@ class TelegramTweet:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
-    @cached_property
+    @property
     def url(self) -> str:
         return self._tweet.url
 
@@ -165,10 +169,10 @@ class TelegramPixiv:
         )
 
     def inline_query_result(self) -> tuple[TypeInlineQueryResult, ...]:
-        return tuple(self.inline_query_generator())
+        return tuple(i for i in self.inline_query_generator() if i)
 
     def message_media_result(self) -> tuple[TypeMessageMediaResult, ...]:
-        return tuple(self.message_media_generator())
+        return tuple(i for i in self.message_media_generator() if i)
 
     def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
         pixiv = self._pixiv
@@ -195,3 +199,89 @@ class TelegramPixiv:
                 )
             else:
                 yield
+
+
+class TelegramBsky:
+    message_raw_text = message_raw_text_tweet
+    __slots__ = ('_url', '_bsky', '__dict__')
+
+    def __init__(self, url: str):
+        self._url: str = url
+
+    async def __aenter__(self):
+        async with ProcessBsky(self._url) as bsky:
+            self._bsky = bsky
+            return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    @property
+    def url(self) -> str:
+        return self._bsky.url
+
+    @cached_property
+    def message_text(self) -> str:
+        bsky = self._bsky
+        return self.message_raw_text.format(
+            url=bsky.url,
+            author_url=bsky.author_url,
+            author=html.escape(bsky.author),
+            text=html.escape(bsky.text)
+        )
+
+    def inline_query_result(self) -> tuple[TypeInlineQueryResult, ...]:
+        return tuple(i for i in self.inline_query_generator() if i)
+
+    def message_media_result(self) -> tuple[TypeMessageMediaResult, ...]:
+        return tuple(i for i in self.message_media_generator() if i)
+
+    def inline_query_generator(self) -> Generator[TypeInlineQueryResult, None, None]:
+        bsky = self._bsky
+        for bsky_media in bsky.media:
+            logger.info(str(bsky_media))
+            if bsky_media.type == "image":
+                yield InlineQueryResultPhoto(
+                    id=str(uuid4()),
+                    photo_url=bsky_media.url,
+                    thumbnail_url=bsky_media.thumb,
+                    caption=self.message_text
+                )
+            elif bsky_media.type == "video":
+                # yield InlineQueryResultVideo(
+                #     id=str(uuid4()),
+                #     video_url=bsky_media.url,
+                #     mime_type="video/mp4",
+                #     thumbnail_url=bsky_media.thumb,
+                #     title=bsky.text,
+                #     caption=self.message_text
+                # )
+                yield
+            elif bsky_media.type == "external":
+                yield InlineQueryResultVideo(
+                    id=str(uuid4()),
+                    video_url=bsky_media.url,
+                    mime_type="image/gif",
+                    thumbnail_url=bsky_media.thumb,
+                    title=bsky.text,
+                    caption=self.message_text
+                )
+
+    def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
+        bsky = self._bsky
+        for bsky_media in bsky.media:
+            logger.info(str(bsky_media))
+            if bsky_media.type == "image":
+                yield InputMediaPhoto(
+                    media=bsky_media.url,
+                    has_spoiler=bsky.sensitive
+                )
+            elif bsky_media.type == "video":
+                # yield InputMediaVideo(
+                #     media=bsky_media.url,
+                #     has_spoiler=bsky.sensitive,
+                #     thumbnail=bsky_media.thumb
+                # )
+                yield
+            elif bsky_media.type == "external":
+                yield bsky_media.url, bsky.sensitive

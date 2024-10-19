@@ -64,7 +64,10 @@ async def url_media(update: Update, context: CustomContext, url: str) -> None:
             return
         media = tweet.message_media_result()
         if not media:
-            await update.effective_message.reply_text("No media found or media type is not supported.")
+            await update.effective_message.reply_text(
+                "No media found or media type is not supported.",
+                reply_to_message_id=update.message.message_id,
+            )
             return
         message_to_send = await update.effective_message.reply_media_group(
             media,
@@ -277,7 +280,8 @@ def main():
 
     handlers = [
         InlineQueryHandler(inline_query),
-        MessageHandler((filters.Regex(regex.x_url) | filters.Regex(regex.pixiv_url)) & filters.ChatType.PRIVATE,
+        MessageHandler((filters.Regex(regex.x_url) | filters.Regex(regex.pixiv_url)) | filters.Regex(
+            regex.bsky_url) & filters.ChatType.PRIVATE,
                        handel_url_media),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
