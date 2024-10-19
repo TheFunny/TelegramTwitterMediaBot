@@ -28,8 +28,10 @@ def send_action(action):
     def decorator(func):
         @wraps(func)
         async def command_func(update: Update, context: CustomContext, *args, **kwargs):
-            await update.effective_chat.send_action(action)
-            return await func(update, context, *args, **kwargs)
+            try:
+                await update.effective_chat.send_action(action)
+            finally:
+                return await func(update, context, *args, **kwargs)
 
         return command_func
 
