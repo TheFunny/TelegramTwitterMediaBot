@@ -11,8 +11,8 @@ async def close_client(_client: AsyncClient) -> None:
     return await _client.aclose()
 
 
-async def fetch_json(_client: AsyncClient, url: str) -> dict:
-    response = await _client.get(url)
+async def fetch_json(_client: AsyncClient, url: str, params: dict = None) -> dict:
+    response = await _client.get(url, params=params)
     assert response.is_success, f"Failed to fetch {url}, status code {response.status_code}"
     return response.json()
 
@@ -33,5 +33,5 @@ class NetClient:
         return cls._httpx_client
 
     @classmethod
-    async def fetch_json(cls, url: str) -> dict:
-        return await fetch_json(cls._httpx_client, url)
+    async def fetch_json(cls, url: str, params: dict = None) -> dict:
+        return await fetch_json(cls._httpx_client, url, params)
