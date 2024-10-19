@@ -246,7 +246,8 @@ async def post_init(application: Application) -> None:
 
 
 async def post_stop(application: Application) -> None:
-    await application.bot.send_message(common.ADMIN[0], "Shutting down...")
+    if common.ADMIN:
+        await application.bot.send_message(common.ADMIN[0], "Shutting down...")
 
 
 async def post_shutdown(application: Application) -> None:
