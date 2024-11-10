@@ -258,14 +258,15 @@ class TelegramBsky:
                 # )
                 yield
             elif bsky_media.type == "external":
-                yield InlineQueryResultVideo(
-                    id=str(uuid4()),
-                    video_url=bsky_media.url,
-                    mime_type="image/gif",
-                    thumbnail_url=bsky_media.thumb,
-                    title=bsky.text,
-                    caption=self.message_text
-                )
+                # yield InlineQueryResultVideo(
+                #     id=str(uuid4()),
+                #     video_url=bsky_media.url,
+                #     mime_type="image/gif",
+                #     thumbnail_url=bsky_media.thumb,
+                #     title=bsky.text,
+                #     caption=self.message_text
+                # )
+                yield
 
     def message_media_generator(self) -> Generator[TypeMessageMediaResult, None, None]:
         bsky = self._bsky
