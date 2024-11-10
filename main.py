@@ -237,6 +237,12 @@ async def cmd_user_dict(update: Update, context: CustomContext) -> None:
     await update.effective_message.reply_text(html.escape(str(context.chat_data)), disable_web_page_preview=True)
 
 
+@send_action(ChatAction.TYPING)
+async def cmd_clear_edit_message(update: Update, context: CustomContext) -> None:
+    context.chat_data.edit_message.clear()
+    await update.effective_message.reply_text("Edit message cleared.")
+
+
 async def post_init(application: Application) -> None:
     # commands = [
     #     BotCommand('start', CMD_START),
@@ -291,6 +297,7 @@ def main():
         CallbackQueryHandler(query_forward_message, pattern="forward"),
         CallbackQueryHandler(query_template, pattern=r"^template\|"),
         CommandHandler("bot_dict", cmd_user_dict),
+        CommandHandler("clear_edit_message", cmd_clear_edit_message),
     ]
 
     application.add_handlers(handlers)
