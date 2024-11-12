@@ -136,7 +136,7 @@ class ProcessTweet:
     @property
     def _tweet_text(self) -> str:
         match = x_tco_url.search(self._tweet['text'])
-        return self._tweet['text'][:match.start()].strip(" ") if match else self._tweet['text']
+        return self._tweet['text'][:match.start()].strip() if match else self._tweet['text']
 
     @property
     def _tweet_media(self) -> list[TweetMedia]:

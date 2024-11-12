@@ -151,4 +151,4 @@ class ProcessBsky:
                     )
                 ]
             case _:
-                raise NotImplementedError(f"Unknown Bsky embed type: {embed['type']}")
+                raise NotImplementedError(f"Unknown Bsky embed type: {embed['$type']}")
