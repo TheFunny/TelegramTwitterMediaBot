@@ -157,6 +157,7 @@ class ProcessBsky:
     @property
     def _sensitive(self) -> bool:
         return any(
-            tag in self._bsky['labels']
+            tag in label['val']
+            for label in self._bsky['labels']
             for tag in SENSITIVE_TAG
         )
