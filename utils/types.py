@@ -31,6 +31,7 @@ class BskyPost(TypedDict):
     author: BskyAuthor
     record: BskyPostRecord
     embed: BskyEmbedImages | BskyEmbedVideo | BskyEmbedExternal
+    labels: list[BskyLabel]
 
 
 class BskyAuthor(TypedDict):
@@ -40,6 +41,10 @@ class BskyAuthor(TypedDict):
 
 class BskyPostRecord(TypedDict):
     text: str
+
+
+class BskyLabel(TypedDict):
+    val: str
 
 
 class BskyEmbedImage(TypedDict):

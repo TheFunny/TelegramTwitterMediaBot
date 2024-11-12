@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 bsky_api_url = 'https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread'
 
+SENSITIVE_TAG = {'sexual', 'nudity', 'porn', 'graphic-media'}
 
 class BskyMedia:
     __slots__ = ('_url', '_thumb', '_type', '__dict__')
@@ -101,7 +102,7 @@ class ProcessBsky:
             author_id=self._bsky['author']['handle'],
             text=self._bsky['record']['text'],
             media=self._bsky_media,
-            sensitive=False  # TODO: implement sensitive
+            sensitive=self._sensitive
         )
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -152,3 +153,10 @@ class ProcessBsky:
                 ]
             case _:
                 raise NotImplementedError(f"Unknown Bsky embed type: {embed['$type']}")
+
+    @property
+    def _sensitive(self) -> bool:
+        return any(
+            tag in self._bsky['labels']
+            for tag in SENSITIVE_TAG
+        )
