@@ -305,6 +305,7 @@ def main():
         MessageHandler((filters.Regex(regex.x_url) | filters.Regex(regex.pixiv_url)) | filters.Regex(
             regex.bsky_url) & filters.ChatType.PRIVATE,
                        handel_url_media),
+        CommandHandler("start", cmd_set_template),
         CommandHandler("set_forward_channel", cmd_set_forward_channel),
         CommandHandler("remove_forward_channel", cmd_remove_forward_channel),
         CommandHandler("edit_before_forward", cmd_edit_before_forward),
