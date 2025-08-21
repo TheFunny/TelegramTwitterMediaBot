@@ -163,6 +163,22 @@ async def query_template(update: Update, context: CustomContext) -> None:
 
 
 @send_action(ChatAction.TYPING)
+async def cmd_start(update: Update, context: CustomContext) -> None:
+    await update.effective_message.reply_text(
+        "Welcome to the Twitter Fetcher Bot!\n"
+        "You can use this bot to fetch tweets from Twitter and forward them to a channel.\n"
+        "Use /set_forward_channel to set a channel to forward tweets.\n"
+        "Use /remove_forward_channel to remove the channel.\n"
+        "Use /edit_before_forward to enable or disable edit before forward.\n"
+        "Use /set_template to set a template for the forwarded message.\n"
+        "Use /bot_dict to see the bot's data.\n"
+        "Use /clear_edit_message to clear the edit message cache.\n"
+        "You can also reply to a message with a tweet URL to fetch the tweet and forward it to the channel.\n"
+        "You can also use inline query to search for tweets."
+    )
+
+
+@send_action(ChatAction.TYPING)
 async def cmd_set_forward_channel(update: Update, context: CustomContext) -> None:
     if not context.args:
         await update.effective_message.reply_text("Please provide a channel username or id.")
