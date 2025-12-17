@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]~=22.3
+python-telegram-bot[webhooks]~=22.5
 httpx[http2]~=0.27
-uvloop~=0.21; sys_platform != 'win32'
+uvloop~=0.22; sys_platform != 'win32'
 async-pixiv @ git+https://github.com/TheFunny/async-pixiv@main
