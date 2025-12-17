@@ -84,7 +84,7 @@ class Tweet:
 
     @cached_property
     def url(self) -> str:
-        return f"https://twitter.com/{self._author_id}/status/{self._id}"
+        return f"https://x.com/{self._author_id}/status/{self._id}"
 
     @property
     def author(self) -> str:
@@ -92,7 +92,7 @@ class Tweet:
 
     @cached_property
     def author_url(self) -> str:
-        return f"https://twitter.com/{self._author_id}"
+        return f"https://x.com/{self._author_id}"
 
     @property
     def text(self) -> str:
