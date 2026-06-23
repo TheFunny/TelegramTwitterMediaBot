@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal, TYPE_CHECKING
 
 from async_pixiv import PixivClient
-from async_pixiv.error import ApiError
+from async_pixiv.error import APIError
 
 if TYPE_CHECKING:
     from async_pixiv.model.illust import Illust
@@ -133,7 +133,7 @@ class ProcessPixiv(_ProcessPixiv):
         illust_id = self._parse_illust_id()
         try:
             return (await self._client.ILLUST.detail(illust_id)).illust
-        except ApiError:
+        except APIError:
             await self.refresh_token()
             return (await self._client.ILLUST.detail(illust_id)).illust  # TODO use retry here
 
