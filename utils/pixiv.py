@@ -73,27 +73,27 @@ class Pixiv:
 
     @property
     def is_nsfw(self) -> bool:
-        return self._illust.is_nsfw
+        return self._illust.sanity_level > 5
 
     @property
     def is_ai(self) -> bool:
-        return self._illust.ai_type.value == 2
+        return self._illust.ai_type == 2
 
     @property
     def images(self) -> list[PixivMedia]:
         if self.is_multiple_pages:
             return [
                 PixivMedia(
-                    url=page.image_urls.original,
-                    thumb=page.image_urls.medium
+                    url=str(page.image_urls.original),
+                    thumb=str(page.image_urls.medium)
                 )
                 for page in self._illust.meta_pages
             ]
         else:
             return [
                 PixivMedia(  # should observe if image_url.original is always None for single page
-                    url=self._illust.image_urls.original or self._illust.meta_single_page.original,
-                    thumb=self._illust.image_urls.medium
+                    url=str(self._illust.image_urls.original or self._illust.meta_single_page.original),
+                    thumb=str(self._illust.image_urls.medium)
                 )
             ]
 
