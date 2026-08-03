@@ -127,7 +127,7 @@ impl Tweet {
             match item.media_type.as_str() {
                 "photo" => media.push(Media::Illustration {
                     title: None,
-                    url: item.media_url_https,
+                    url: original_twimg_url(&item.media_url_https),
                     thumbnail_url: None,
                     fallback_url: None,
                 }),
@@ -196,6 +196,20 @@ fn expand_links(text: &str, urls: &[model::SyndicationEntityUrl]) -> String {
         }
     }
     out
+}
+
+/// pbs.twimg.com serves a reduced default size without size params; `name=orig`
+/// returns the original file (fxtwitter used to hand out the original
+/// directly, the syndication API does not). Non-twimg URLs pass through
+/// unchanged.
+fn original_twimg_url(url: &str) -> String {
+    if url.starts_with("https://pbs.twimg.com/")
+        && (url.ends_with(".jpg") || url.ends_with(".png"))
+    {
+        format!("{url}?name=orig")
+    } else {
+        url.to_string()
+    }
 }
 
 fn mp4_variant(item: &model::SyndicationMedia) -> String {
@@ -302,6 +316,16 @@ mod tests {
         assert_eq!(fetched.title, "a & b <c>");
         assert!(fetched.sensitive);
         assert_eq!(fetched.media.len(), 2);
+        match &fetched.media[0] {
+            Media::Illustration { url, .. } => {
+                // Photo URL is rewritten to request the original file.
+                assert_eq!(
+                    url,
+                    "https://pbs.twimg.com/media/photo.jpg?name=orig"
+                );
+            }
+            other => panic!("expected illustration, got {other:?}"),
+        }
         match &fetched.media[1] {
             Media::Video { url, thumbnail_url, .. } => {
                 assert_eq!(url, "https://video.twimg.com/v.mp4");
@@ -433,6 +457,27 @@ mod tests {
         });
         let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
         assert_eq!(tweet.text, text, "full text kept intact");
+    }
+
+    #[test]
+    fn original_twimg_url_rewrites_photo_urls() {
+        assert_eq!(
+            original_twimg_url("https://pbs.twimg.com/media/C_UdnvPUwAE3Dnn.jpg"),
+            "https://pbs.twimg.com/media/C_UdnvPUwAE3Dnn.jpg?name=orig"
+        );
+        assert_eq!(
+            original_twimg_url("https://pbs.twimg.com/media/abc.png"),
+            "https://pbs.twimg.com/media/abc.png?name=orig"
+        );
+        // Non-twimg URLs (videos, animated gifs) pass through unchanged.
+        assert_eq!(
+            original_twimg_url("https://video.twimg.com/v.mp4"),
+            "https://video.twimg.com/v.mp4"
+        );
+        assert_eq!(
+            original_twimg_url("https://pbs.twimg.com/media/abc.webp"),
+            "https://pbs.twimg.com/media/abc.webp"
+        );
     }
 
     #[test]
