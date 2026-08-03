@@ -1,22 +1,30 @@
 services:
-  tgxmb: image: yoursfunny/telegram-twitter-media-bot: latest
+  tgxmb:
+    image: yoursfunny/telegram-twitter-media-bot:latest
     restart: always
 #    ports:
 #      - "8443:8443"
     environment:
+      # docker-entrypoint.sh drops privileges to this uid.
       LOCAL_USER_ID: '1000'
-      BOT_TOKEN: ''
+      # Bot token (BotFather). Required.
+      TELOXIDE_TOKEN: ''
+      # Comma-separated admin chat ids; receives startup/shutdown notices.
       BOT_ADMIN: ''
+      # Required for pixiv support; pixiv is disabled when unset.
       PIXIV_REFRESH_TOKEN: ''
-      WEBHOOK: false
-      WEBHOOK_LISTEN: '127.0.0.1'
-      WEBHOOK_PORT: 8443
+      # Edit-before-forward records expire after this many seconds (default 86400 = 24h).
+      EDIT_MESSAGE_TTL_SECONDS: '86400'
+      RUST_LOG: 'info'
+      # Webhook mode is off by default (polling). The listener binds inside the
+      # container, so use 0.0.0.0 and publish the port if you enable it.
+      WEBHOOK: 'false'
+      WEBHOOK_LISTEN: '0.0.0.0'
+      WEBHOOK_PORT: '8443'
       WEBHOOK_URL: 'https://example.com'
-      WEBHOOK_KEY: './cert/private.key'
       WEBHOOK_CERT: './cert/cert.pem'
       WEBHOOK_SECRET_TOKEN: 'secret-token'
-#      LOG_LEVEL: 'WARNING'
-volumes:
-      - ./data: /app/data
+    volumes:
+      - ./data:/app/data
 #      - ./cert:/app/cert
     container_name: tgxmb

@@ -3,7 +3,6 @@ __pycache__/
 cert/
 data/
 docker-compose.yml
-utils/x.py
 
 .env
 

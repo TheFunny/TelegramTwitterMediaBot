@@ -10,7 +10,9 @@ then
    chown -R `id -u user`:`id -u user` /app > /dev/null 2>&1
 
    export HOME=/home/user
-   exec gosu user "$0" "$@"
+   # setpriv (util-linux, present in bookworm-slim) replaces gosu: drop to the
+   # target user and exec, keeping the process as PID 1.
+   exec setpriv --reuid=`id -u user` --regid=`id -g user` --init-groups "$@"
 fi
 
 exec "$@"
