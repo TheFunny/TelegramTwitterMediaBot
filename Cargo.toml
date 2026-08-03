@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/x-media", "crates/xmedia-bot"]
+resolver = "3"

@@ -1,0 +1,917 @@
+//! Typed task payloads and send/forward executors with retry classification
+//! and the download-and-reupload fallback (Telegram's own fetch of a media
+//! URL is blocked by hotlink protection; the bot downloads the file itself
+//! and uploads it via multipart).
+
+use crate::handlers::{CHAT_STORE, TASK_QUEUE};
+use crate::queue::QueueError;
+use crate::state::{EditMessage, unix_now};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tempfile::NamedTempFile;
+use teloxide::prelude::*;
+use teloxide::types::{
+    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMedia,
+    InputMediaAnimation, InputMediaPhoto, InputMediaVideo, Message, MessageId, ParseMode,
+    ReplyParameters,
+};
+use teloxide::{ApiError, RequestError};
+use x_media::site::FetchError;
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaItemPayload {
+    Photo {
+        media: String,
+        has_spoiler: bool,
+    },
+    Video {
+        media: String,
+        has_spoiler: bool,
+        thumbnail: Option<String>,
+    },
+    Animation {
+        media: String,
+        has_spoiler: bool,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Task {
+    SendMediaSequence {
+        chat_id: i64,
+        reply_to_message_id: i64,
+        caption: String,
+        media_batches: Vec<Vec<MediaItemPayload>>,
+        batch_index: usize,
+        sent_message_ids: Vec<i64>,
+        source_url: String,
+        edit_before_forward: bool,
+        forward_channel_id: Option<i64>,
+        notify_chat_id: Option<i64>,
+        notify_message_id: Option<i64>,
+    },
+    SendAnimation {
+        chat_id: i64,
+        reply_to_message_id: i64,
+        caption: String,
+        animation: MediaItemPayload,
+        source_url: String,
+        edit_before_forward: bool,
+        forward_channel_id: Option<i64>,
+        notify_chat_id: Option<i64>,
+        notify_message_id: Option<i64>,
+    },
+    ForwardMessages {
+        from_chat_id: i64,
+        to_chat_id: i64,
+        message_ids: Vec<i64>,
+        notify_chat_id: Option<i64>,
+        notify_message_id: Option<i64>,
+    },
+}
+
+pub const MAX_MEDIA_GROUP: usize = 9;
+pub const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024; // Telegram Bot API upload cap
+
+/// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items.
+pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
+    items.chunks(MAX_MEDIA_GROUP).map(|chunk| chunk.to_vec()).collect()
+}
+
+/// Exponential backoff with jitter, capped at 30s.
+pub fn retry_delay_seconds(attempts: u32) -> f64 {
+    let jitter: f64 = rand::thread_rng().gen_range(0.2..0.8);
+    (2f64.powi(attempts as i32) + jitter).min(30.0)
+}
+
+/// Telegram's servers failed to fetch a media URL (hotlink protection etc.):
+/// these errors are handled by the download-and-reupload fallback, NOT by a
+/// queue retry (resending the URL cannot succeed).
+pub fn is_media_fetch_failure(e: &ApiError) -> bool {
+    const MARKERS: [&str; 5] = [
+        "webpage_media_empty",
+        "media_empty",
+        "empty_web_media",
+        "webpage_curl_failed",
+        "timeout",
+    ];
+    let description = e.to_string().to_lowercase();
+    MARKERS.iter().any(|marker| description.contains(marker))
+}
+
+/// Task-free classification of a Telegram request error. The callers attach
+/// the (updated) task when building a [`SendError`].
+pub enum Classification {
+    Retryable { delay_seconds: f64 },
+    Permanent { message: String },
+    /// Handled by the download fallback, not a queue retry.
+    MediaFetchFailure,
+}
+
+pub fn classify_request_error(e: &RequestError) -> Classification {
+    match e {
+        RequestError::RetryAfter(seconds) => {
+            Classification::Retryable { delay_seconds: seconds.seconds() as f64 }
+        }
+        RequestError::Network(_) => Classification::Retryable {
+            delay_seconds: retry_delay_seconds(0),
+        },
+        RequestError::Api(api) if is_media_fetch_failure(api) => Classification::MediaFetchFailure,
+        RequestError::Api(api) => Classification::Permanent { message: api.to_string() },
+        RequestError::MigrateToChatId(_)
+        | RequestError::InvalidJson { .. }
+        | RequestError::Io(_) => Classification::Permanent { message: e.to_string() },
+    }
+}
+
+pub enum SendError {
+    Retryable { delay_seconds: f64, task: Task },
+    Permanent { message: String, task: Task },
+}
+
+fn classify_to_send_error(e: &RequestError, task: Task) -> SendError {
+    match classify_request_error(e) {
+        Classification::Retryable { delay_seconds } => SendError::Retryable {
+            delay_seconds,
+            task,
+        },
+        Classification::Permanent { message } => SendError::Permanent { message, task },
+        Classification::MediaFetchFailure => SendError::Permanent {
+            message: "media fetch failed".into(),
+            task,
+        },
+    }
+}
+
+fn parse_media_url(s: &str) -> Result<url::Url, String> {
+    url::Url::parse(s).map_err(|e| format!("invalid media URL: {e}"))
+}
+
+fn item_url(item: &MediaItemPayload) -> &str {
+    match item {
+        MediaItemPayload::Photo { media, .. }
+        | MediaItemPayload::Video { media, .. }
+        | MediaItemPayload::Animation { media, .. } => media,
+    }
+}
+
+/// Remote http(s) URLs are handed to Telegram to fetch; everything else
+/// (e.g. a locally encoded ugoira MP4) is uploaded directly.
+fn input_file_for(media: &str) -> Result<InputFile, String> {
+    if media.starts_with("http://") || media.starts_with("https://") {
+        Ok(InputFile::url(parse_media_url(media)?))
+    } else {
+        Ok(InputFile::file(media))
+    }
+}
+
+fn photo_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
+    let mut photo = InputMediaPhoto::new(file).parse_mode(ParseMode::Html);
+    if let Some(caption) = caption {
+        photo = photo.caption(caption);
+    }
+    if spoiler {
+        photo = photo.spoiler();
+    }
+    InputMedia::Photo(photo)
+}
+
+fn video_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
+    let mut video = InputMediaVideo::new(file).parse_mode(ParseMode::Html);
+    if let Some(caption) = caption {
+        video = video.caption(caption);
+    }
+    if spoiler {
+        video = video.spoiler();
+    }
+    InputMedia::Video(video)
+}
+
+fn animation_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
+    let mut animation = InputMediaAnimation::new(file).parse_mode(ParseMode::Html);
+    if let Some(caption) = caption {
+        animation = animation.caption(caption);
+    }
+    if spoiler {
+        animation = animation.spoiler();
+    }
+    InputMedia::Animation(animation)
+}
+
+/// Builds a media group from payloads; only the first item of the batch gets
+/// the caption (Telegram rejects captions on later items).
+fn build_media_group(
+    batch: &[MediaItemPayload],
+    caption: Option<&str>,
+) -> Result<Vec<InputMedia>, String> {
+    batch
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let item_caption = if i == 0 { caption } else { None };
+            Ok(match item {
+                MediaItemPayload::Photo {
+                    media,
+                    has_spoiler,
+                } => photo_media(input_file_for(media)?, item_caption, *has_spoiler),
+                MediaItemPayload::Video {
+                    media,
+                    has_spoiler,
+                    thumbnail,
+                } => {
+                    let mut video = video_media(input_file_for(media)?, item_caption, *has_spoiler);
+                    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut video) {
+                        *v = v.clone().thumbnail(input_file_for(thumb)?);
+                    }
+                    video
+                }
+                MediaItemPayload::Animation {
+                    media,
+                    has_spoiler,
+                } => animation_media(input_file_for(media)?, item_caption, *has_spoiler),
+            })
+        })
+        .collect()
+}
+
+/// Infers a file extension from magic bytes so Telegram detects the mime type
+/// on multipart uploads.
+fn sniff_ext(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        "jpg"
+    } else if bytes.starts_with(b"\x89PNG") {
+        "png"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        "mp4"
+    } else {
+        "bin"
+    }
+}
+
+enum FallbackError {
+    Retryable { delay_seconds: f64 },
+    Permanent { message: String },
+}
+
+/// Downloads one media item to a temp file (deleted on drop). Network errors
+/// are retryable; size over the upload cap and other download errors are not.
+async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, FallbackError> {
+    let media_url = match item {
+        MediaItemPayload::Photo { media, .. }
+        | MediaItemPayload::Video { media, .. }
+        | MediaItemPayload::Animation { media, .. } => media,
+    };
+    let bytes = match x_media::site::download_media(media_url).await {
+        Ok(bytes) => bytes,
+        Err(FetchError::Http(_)) => {
+            return Err(FallbackError::Retryable {
+                delay_seconds: retry_delay_seconds(0),
+            });
+        }
+        Err(e) => {
+            return Err(FallbackError::Permanent {
+                message: format!("download failed: {e}"),
+            });
+        }
+    };
+    if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+        return Err(FallbackError::Permanent {
+            message: "media too large".into(),
+        });
+    }
+    let ext = sniff_ext(&bytes);
+    let mut file = tempfile::Builder::new()
+        .suffix(&format!(".{ext}"))
+        .tempfile()
+        .map_err(|e| FallbackError::Permanent {
+            message: format!("temp file failed: {e}"),
+        })?;
+    use std::io::Write;
+    file.as_file_mut()
+        .write_all(&bytes)
+        .map_err(|e| FallbackError::Permanent {
+            message: format!("temp file write failed: {e}"),
+        })?;
+    Ok(file)
+}
+
+/// Download-and-reupload fallback for one media batch.
+async fn send_batch_via_upload(
+    bot: &Bot,
+    chat_id: i64,
+    reply_to: i64,
+    batch: &[MediaItemPayload],
+    caption: Option<&str>,
+) -> Result<Vec<Message>, FallbackError> {
+    let mut files = Vec::new();
+    let mut items = Vec::new();
+    for (i, item) in batch.iter().enumerate() {
+        let file = download_to_temp(item).await?;
+        let path = file.path().to_path_buf();
+        let item_caption = if i == 0 { caption } else { None };
+        let media = match item {
+            MediaItemPayload::Photo { has_spoiler, .. } => {
+                photo_media(InputFile::file(path), item_caption, *has_spoiler)
+            }
+            MediaItemPayload::Video { has_spoiler, .. } => {
+                video_media(InputFile::file(path), item_caption, *has_spoiler)
+            }
+            MediaItemPayload::Animation { has_spoiler, .. } => {
+                animation_media(InputFile::file(path), item_caption, *has_spoiler)
+            }
+        };
+        items.push(media);
+        files.push(file);
+    }
+    let result = bot
+        .send_media_group(ChatId(chat_id), items)
+        .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply())
+        .await;
+    match result {
+        Ok(messages) => Ok(messages),
+        Err(e) => Err(match classify_request_error(&e) {
+            Classification::Retryable { delay_seconds } => FallbackError::Retryable {
+                delay_seconds,
+            },
+            Classification::Permanent { message } => FallbackError::Permanent { message },
+            Classification::MediaFetchFailure => FallbackError::Permanent {
+                message: "upload failed".into(),
+            },
+        }),
+    }
+}
+
+fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<i64>) -> Task {
+    match task {
+        Task::SendMediaSequence {
+            chat_id,
+            reply_to_message_id,
+            caption,
+            media_batches,
+            source_url,
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            notify_message_id,
+            ..
+        } => Task::SendMediaSequence {
+            chat_id: *chat_id,
+            reply_to_message_id: *reply_to_message_id,
+            caption: caption.clone(),
+            media_batches: media_batches.clone(),
+            batch_index,
+            sent_message_ids,
+            source_url: source_url.clone(),
+            edit_before_forward: *edit_before_forward,
+            forward_channel_id: *forward_channel_id,
+            notify_chat_id: *notify_chat_id,
+            notify_message_id: *notify_message_id,
+        },
+        _ => unreachable!("updated_sequence_task requires a SendMediaSequence task"),
+    }
+}
+
+/// Sends the media batches starting at `task.batch_index`, extending
+/// `sent_message_ids`. Returns all sent message ids on full success; on
+/// failure returns a [`SendError`] whose task carries the resumed state.
+pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendError> {
+    let Task::SendMediaSequence {
+        chat_id,
+        reply_to_message_id,
+        caption,
+        media_batches,
+        batch_index,
+        sent_message_ids,
+        ..
+    } = task
+    else {
+        unreachable!("send_media_sequence requires a SendMediaSequence task")
+    };
+    let chat_id = *chat_id;
+    let reply_to = *reply_to_message_id;
+    let mut sent = sent_message_ids.clone();
+    for idx in *batch_index..media_batches.len() {
+        let batch = &media_batches[idx];
+        let caption = if idx == 0 { Some(caption.as_str()) } else { None };
+        let items = match build_media_group(batch, caption) {
+            Ok(items) => items,
+            Err(message) => {
+                return Err(SendError::Permanent {
+                    message,
+                    task: updated_sequence_task(task, idx, sent),
+                });
+            }
+        };
+        match bot
+            .send_media_group(ChatId(chat_id), items)
+            .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply())
+            .await
+        {
+            Ok(messages) => {
+                log::info!(
+                    "media group batch {idx}/{} sent ({} item(s))",
+                    media_batches.len(),
+                    batch.len()
+                );
+                sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
+            }
+            Err(RequestError::Api(api)) if is_media_fetch_failure(&api) => {
+                log::info!(
+                    "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
+                    batch
+                        .first()
+                        .map(|item| item_url(item))
+                        .unwrap_or("?")
+                );
+                match send_batch_via_upload(bot, chat_id, reply_to, batch, caption).await {
+                    Ok(messages) => sent.extend(messages.into_iter().map(|m| m.id.0 as i64)),
+                    Err(FallbackError::Retryable { delay_seconds }) => {
+                        return Err(SendError::Retryable {
+                            delay_seconds,
+                            task: updated_sequence_task(task, idx, sent),
+                        });
+                    }
+                    Err(FallbackError::Permanent { message }) => {
+                        return Err(SendError::Permanent {
+                            message,
+                            task: updated_sequence_task(task, idx, sent),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(classify_to_send_error(
+                    &e,
+                    updated_sequence_task(task, idx, sent),
+                ));
+            }
+        }
+    }
+    Ok(sent)
+}
+
+async fn send_animation_inner(
+    bot: &Bot,
+    chat_id: i64,
+    reply_to: i64,
+    caption: &str,
+    spoiler: bool,
+    file: InputFile,
+) -> Result<Message, RequestError> {
+    let mut request = bot
+        .send_animation(ChatId(chat_id), file)
+        .caption(caption)
+        .parse_mode(ParseMode::Html)
+        .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply());
+    if spoiler {
+        request = request.has_spoiler(true);
+    }
+    request.await
+}
+
+/// Sends a lone animation (gif), URL first with the download fallback.
+pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendError> {
+    let Task::SendAnimation {
+        chat_id,
+        reply_to_message_id,
+        caption,
+        animation,
+        ..
+    } = task
+    else {
+        unreachable!("send_animation requires a SendAnimation task")
+    };
+    let chat_id = *chat_id;
+    let reply_to = *reply_to_message_id;
+    let (media_url, has_spoiler) = match animation {
+        MediaItemPayload::Animation {
+            media,
+            has_spoiler,
+        } => (media, *has_spoiler),
+        MediaItemPayload::Photo { .. } | MediaItemPayload::Video { .. } => {
+            unreachable!("SendAnimation carries an Animation payload")
+        }
+    };
+    let url_file = match input_file_for(media_url) {
+        Ok(file) => file,
+        Err(message) => return Err(SendError::Permanent { message, task: task.clone() }),
+    };
+    match send_animation_inner(bot, chat_id, reply_to, caption, has_spoiler, url_file)
+        .await
+    {
+        Ok(message) => Ok(vec![message.id.0 as i64]),
+        Err(RequestError::Api(api)) if is_media_fetch_failure(&api) => {
+            log::info!(
+                "Telegram could not fetch animation URL, downloading and reuploading: {}",
+                media_url
+            );
+            let file = match download_to_temp(animation).await {
+                Ok(file) => file,
+                Err(FallbackError::Retryable { delay_seconds }) => {
+                    return Err(SendError::Retryable { delay_seconds, task: task.clone() });
+                }
+                Err(FallbackError::Permanent { message }) => {
+                    return Err(SendError::Permanent { message, task: task.clone() });
+                }
+            };
+            let path = file.path().to_path_buf();
+            match send_animation_inner(
+                bot,
+                chat_id,
+                reply_to,
+                caption,
+                has_spoiler,
+                InputFile::file(path),
+            )
+            .await
+            {
+                Ok(message) => Ok(vec![message.id.0 as i64]),
+                Err(e) => Err(classify_to_send_error(&e, task.clone())),
+            }
+        }
+        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+    }
+}
+
+/// Copies already-sent messages to the forward channel. No download fallback:
+/// the files are already on Telegram's servers.
+pub async fn forward_messages(bot: &Bot, task: &Task) -> Result<(), SendError> {
+    let Task::ForwardMessages {
+        from_chat_id,
+        to_chat_id,
+        message_ids,
+        ..
+    } = task
+    else {
+        unreachable!("forward_messages requires a ForwardMessages task")
+    };
+    let message_ids = message_ids
+        .iter()
+        .map(|id| MessageId(*id as i32))
+        .collect::<Vec<_>>();
+    match bot
+        .copy_messages(ChatId(*to_chat_id), ChatId(*from_chat_id), message_ids.clone())
+        .await
+    {
+        Ok(_) => {
+            log::info!(
+                "copied {} message(s) from {} to {}",
+                message_ids.len(),
+                from_chat_id,
+                to_chat_id
+            );
+            Ok(())
+        }
+        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+    }
+}
+
+/// One button per template name (column layout), then the confirm button.
+pub fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    for name in templates.keys() {
+        rows.push(vec![InlineKeyboardButton::callback(
+            name.clone(),
+            format!("template|{name}"),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback(
+        "↩️ Confirm",
+        "forward",
+    )]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// Notifies a chat about a dead-lettered task (skips when `notify_chat_id` is
+/// absent).
+pub async fn notify_failure(bot: &Bot, chat_id: Option<i64>, message_id: Option<i64>, message: &str) {
+    let Some(chat_id) = chat_id else { return };
+    let mut request = bot.send_message(ChatId(chat_id), message);
+    if let Some(message_id) = message_id {
+        request = request
+            .reply_parameters(ReplyParameters::new(MessageId(message_id as i32)).allow_sending_without_reply());
+    }
+    if let Err(e) = request.await {
+        log::error!("failed to notify about failed task: {e}");
+    }
+}
+
+/// After a successful send: either open the edit-before-forward prompt or
+/// forward to the configured channel (with retry/queue handling).
+pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
+    let (chat_id, reply_to, source_url, edit_before_forward, forward_channel_id, notify_chat_id, notify_message_id) =
+        match task {
+            Task::SendMediaSequence {
+                chat_id,
+                reply_to_message_id,
+                source_url,
+                edit_before_forward,
+                forward_channel_id,
+                notify_chat_id,
+                notify_message_id,
+                ..
+            }
+            | Task::SendAnimation {
+                chat_id,
+                reply_to_message_id,
+                source_url,
+                edit_before_forward,
+                forward_channel_id,
+                notify_chat_id,
+                notify_message_id,
+                ..
+            } => (
+                *chat_id,
+                *reply_to_message_id,
+                source_url.clone(),
+                *edit_before_forward,
+                *forward_channel_id,
+                *notify_chat_id,
+                *notify_message_id,
+            ),
+            Task::ForwardMessages { .. } => return,
+        };
+
+    if edit_before_forward {
+        let mut chat_data = CHAT_STORE.get(chat_id).await;
+        let keyboard = build_edit_markup(&chat_data.template);
+        match bot
+            .send_message(ChatId(chat_id), "Reply to edit message.")
+            .reply_markup(keyboard)
+            .reply_parameters(
+                ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply(),
+            )
+            .await
+        {
+            Ok(prompt) => {
+                log::info!(
+                    "edit-before-forward prompt {} opened for {} message(s)",
+                    prompt.id.0,
+                    message_ids.len()
+                );
+                chat_data.edit_message.insert(
+                    prompt.id.0 as i64,
+                    EditMessage {
+                        url: source_url,
+                        chat_id,
+                        forward_message_ids: message_ids,
+                        template: String::new(),
+                        created_at: unix_now(),
+                    },
+                );
+                CHAT_STORE.set(chat_id, &chat_data).await;
+            }
+            Err(e) => log::error!("failed to send edit prompt: {e}"),
+        }
+        return;
+    }
+
+    if let Some(channel_id) = forward_channel_id {
+        log::info!("forwarding {} message(s) to channel {channel_id}", message_ids.len());
+        let forward_task = Task::ForwardMessages {
+            from_chat_id: chat_id,
+            to_chat_id: channel_id,
+            message_ids,
+            notify_chat_id,
+            notify_message_id,
+        };
+        match forward_messages(bot, &forward_task).await {
+            Ok(()) => {}
+            Err(SendError::Retryable { delay_seconds, task }) => {
+                let payload = serde_json::to_value(task).expect("task serializes");
+                let run_after = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0)
+                    + delay_seconds;
+                if let Err(e) = TASK_QUEUE.enqueue(payload, run_after).await {
+                    log::error!("failed to enqueue forward retry: {e}");
+                }
+            }
+            Err(SendError::Permanent { message, .. }) => {
+                notify_failure(
+                    bot,
+                    notify_chat_id,
+                    notify_message_id,
+                    &format!("Task failed after retries: {message}"),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Queue entry point: parses the stored task and dispatches.
+pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
+    let task: Task = match serde_json::from_value(payload.clone()) {
+        Ok(task) => task,
+        Err(e) => {
+            return Err(QueueError::Permanent {
+                message: format!("invalid task payload: {e}"),
+                payload,
+            });
+        }
+    };
+    let bot = Bot::from_env();
+    match task {
+        Task::SendMediaSequence { .. } | Task::SendAnimation { .. } => {
+            let message_ids = match send_media_or_animation(&bot, &task).await {
+                Ok(ids) => ids,
+                Err(SendError::Retryable { delay_seconds, task }) => {
+                    return Err(QueueError::Retryable {
+                        delay_seconds,
+                        payload: serde_json::to_value(task).expect("task serializes"),
+                    });
+                }
+                Err(SendError::Permanent { message, task }) => {
+                    return Err(QueueError::Permanent {
+                        message,
+                        payload: serde_json::to_value(task).expect("task serializes"),
+                    });
+                }
+            };
+            post_send_actions(&bot, &task, message_ids).await;
+            Ok(())
+        }
+        Task::ForwardMessages { .. } => match forward_messages(&bot, &task).await {
+            Ok(()) => Ok(()),
+            Err(SendError::Retryable { delay_seconds, task }) => Err(QueueError::Retryable {
+                delay_seconds,
+                payload: serde_json::to_value(task).expect("task serializes"),
+            }),
+            Err(SendError::Permanent { message, task }) => Err(QueueError::Permanent {
+                message,
+                payload: serde_json::to_value(task).expect("task serializes"),
+            }),
+        },
+    }
+}
+
+async fn send_media_or_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendError> {
+    match task {
+        Task::SendMediaSequence { .. } => send_media_sequence(bot, task).await,
+        Task::SendAnimation { .. } => send_animation(bot, task).await,
+        Task::ForwardMessages { .. } => unreachable!(),
+    }
+}
+
+/// Dead-letter callback wired to the queue in main: notifies the task's chat.
+pub async fn dead_letter_notify(payload: serde_json::Value, message: String) {
+    let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
+    let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
+    if notify_chat_id.is_some() {
+        let bot = Bot::from_env();
+        notify_failure(
+            &bot,
+            notify_chat_id,
+            notify_message_id,
+            &format!("Task failed after retries: {message}"),
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_media_items_sizes() {
+        assert_eq!(chunk_media_items::<i32>(vec![]), Vec::<Vec<i32>>::new());
+        assert_eq!(chunk_media_items((0..9).collect()).len(), 1);
+        assert_eq!(chunk_media_items((0..10).collect()).len(), 2);
+        assert_eq!(chunk_media_items((0..25).collect()).len(), 3);
+        assert_eq!(chunk_media_items((0..25).collect())[2].len(), 7);
+        assert!(chunk_media_items((0..25).collect()).iter().all(|c| c.len() <= 9));
+    }
+
+    #[test]
+    fn retry_delay_seconds_bounds() {
+        for attempts in 0..10 {
+            let delay = retry_delay_seconds(attempts);
+            assert!(delay >= 1.0, "attempts={attempts}: {delay}");
+            assert!(delay <= 30.0, "attempts={attempts}: {delay}");
+        }
+    }
+
+    #[test]
+    fn is_media_fetch_failure_matches_markers() {
+        for description in [
+            "Bad Request: WEBPAGE_MEDIA_EMPTY",
+            "Bad Request: media_empty",
+            "Bad Request: EMPTY_WEB_MEDIA",
+            "Bad Request: webpage_curl_failed",
+            "Bad Request: request timeout",
+        ] {
+            let api = ApiError::Unknown(description.to_string());
+            assert!(is_media_fetch_failure(&api), "{description}");
+        }
+        for description in ["Bad Request: message is not modified", "Forbidden: bot was blocked by the user"] {
+            let api = ApiError::Unknown(description.to_string());
+            assert!(!is_media_fetch_failure(&api), "{description}");
+        }
+    }
+
+    #[test]
+    fn classification_mapping() {
+        use teloxide::types::Seconds;
+        // RetryAfter -> Retryable with its delay
+        let e = RequestError::RetryAfter(Seconds::from_seconds(7));
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Retryable { delay_seconds } if delay_seconds == 7.0
+        ));
+        // Api error -> Permanent
+        let e = RequestError::Api(ApiError::Unknown("Bad Request: something".into()));
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Permanent { .. }
+        ));
+        // Api media-fetch marker -> MediaFetchFailure
+        let e = RequestError::Api(ApiError::Unknown("Bad Request: WEBPAGE_MEDIA_EMPTY".into()));
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::MediaFetchFailure
+        ));
+        // MigrateToChatId -> Permanent
+        let e = RequestError::MigrateToChatId(ChatId(123));
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Permanent { .. }
+        ));
+    }
+
+    #[test]
+    fn task_serde_round_trip_preserves_resume_state() {
+        let task = Task::SendMediaSequence {
+            chat_id: 111,
+            reply_to_message_id: 222,
+            caption: "cap".into(),
+            media_batches: vec![
+                vec![MediaItemPayload::Photo {
+                    media: "https://a/b.jpg".into(),
+                    has_spoiler: true,
+                }],
+                vec![MediaItemPayload::Video {
+                    media: "https://a/v.mp4".into(),
+                    has_spoiler: false,
+                    thumbnail: Some("https://a/t.jpg".into()),
+                }],
+            ],
+            batch_index: 1,
+            sent_message_ids: vec![11, 12],
+            source_url: "https://x.com/u/status/1".into(),
+            edit_before_forward: true,
+            forward_channel_id: Some(333),
+            notify_chat_id: Some(111),
+            notify_message_id: Some(222),
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        assert_eq!(json["type"], "send_media_sequence");
+        assert_eq!(json["batch_index"], 1);
+        let decoded: Task = serde_json::from_value(json).unwrap();
+        match decoded {
+            Task::SendMediaSequence {
+                batch_index,
+                sent_message_ids,
+                forward_channel_id,
+                media_batches,
+                ..
+            } => {
+                assert_eq!(batch_index, 1);
+                assert_eq!(sent_message_ids, vec![11, 12]);
+                assert_eq!(forward_channel_id, Some(333));
+                assert_eq!(media_batches.len(), 2);
+                assert!(matches!(media_batches[0][0], MediaItemPayload::Photo { has_spoiler: true, .. }));
+            }
+            other => panic!("expected SendMediaSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn media_item_payload_serde_tags() {
+        let photo = MediaItemPayload::Photo {
+            media: "https://a/b.jpg".into(),
+            has_spoiler: false,
+        };
+        let json = serde_json::to_value(&photo).unwrap();
+        assert_eq!(json["kind"], "photo");
+    }
+
+    #[test]
+    fn sniff_ext_detects_formats() {
+        assert_eq!(sniff_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpg");
+        assert_eq!(sniff_ext(b"\x89PNG\r\n\x1a\n"), "png");
+        assert_eq!(sniff_ext(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "webp");
+        assert_eq!(sniff_ext(b"GIF89a"), "gif");
+        assert_eq!(sniff_ext(b"\x00\x00\x00\x18ftypisom"), "mp4");
+        assert_eq!(sniff_ext(b"something else"), "bin");
+    }
+}

@@ -24,8 +24,9 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 *.db
-.python-version
 LICENSE
 README.md
 data/
 cert/
+**/target/
+.idea/

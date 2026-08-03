@@ -1,4 +1,0 @@
-python-telegram-bot[webhooks]~=22.8
-httpx[http2]~=0.27
-uvloop~=0.22; sys_platform != 'win32'
-async-pixiv~=1.1.2
