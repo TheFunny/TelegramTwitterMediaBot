@@ -29,9 +29,14 @@ RUN wget -q -O /tmp/ffmpeg.tar.xz "$FFMPEG_URL" \
     && rm /tmp/ffmpeg.tar.xz \
     && /usr/local/bin/ffmpeg -version >/dev/null
 
-# 3. Real sources last: only our crates recompile on source changes.
+# 3. Real sources last: only our crates recompile on source changes. The
+#    COPY preserves host mtimes, which predate the stub artifacts from step 1;
+#    cargo's mtime-based freshness check would otherwise treat the stub build
+#    as up-to-date and never compile the real sources. `touch` forces cargo to
+#    see the real files as newer.
 COPY crates/ ./crates/
-RUN cargo build --release -p xmedia-bot
+RUN find crates -type f -name '*.rs' -exec touch {} + \
+    && cargo build --release -p xmedia-bot
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim
