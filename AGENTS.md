@@ -73,7 +73,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 | `Dockerfile` | Multi-stage: cached dep layer via stub sources + `touch *.rs` mtime hack, static ffmpeg from ffmpeg.martin-riedl.de (`FFMPEG_URL` arg, `unzip -t` integrity check), `debian:bookworm-slim` runtime, entrypoint |
 | `docker-entrypoint.sh` | Privilege drop: `useradd` with `LOCAL_USER_ID` (default 9001) + `setpriv` (no gosu on bookworm-slim) |
 | `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored) |
-| `.github/workflows/docker.yml` | CI: build+push to Docker Hub on tag `v*`/master; **no test step** |
+| `.github/workflows/docker.yml` | CI: build+push to Docker Hub on tag `v*`/master; **no test step**; buildx gha cache (`cache-from`/`cache-to`, scope `tgxmb-build`, `mode=max`) so cargo deps + ffmpeg layers are restored across runs |
 | `README.md` | Feature docs + command table (Chinese) |
 
 ## Runtime/Tooling Preferences

@@ -61,6 +61,12 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Buildkit cache via the GitHub Actions cache backend (uses the
+      # automatic GITHUB_TOKEN, no extra secrets). mode=max keeps every
+      # stage's layers so the cargo-deps and ffmpeg layers are restored
+      # instead of re-downloaded/recompiled. The scope must be pinned to a
+      # fixed string: the gha backend defaults to the current git ref, which
+      # would give every new tag a cold cache on release builds.
       -
         name: Build and push
         uses: docker/build-push-action@v7
@@ -70,3 +76,5 @@ jobs:
             APP_NAME=${{ env.APP_NAME }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=tgxmb-build
+          cache-to: type=gha,mode=max,scope=tgxmb-build
