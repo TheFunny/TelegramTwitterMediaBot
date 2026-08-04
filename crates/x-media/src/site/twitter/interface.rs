@@ -205,21 +205,17 @@ impl Tweet {
 }
 
 /// The raw syndication `text` ends with the appended media short link
-/// (" https://t.co/wmI8McgXul"). `display_text_range` (UTF-16 indices) marks
-/// the visible text; a regex strips any remaining trailing t.co link when the
-/// range is absent or a tweet ends in a URL short link.
+/// (" https://t.co/wmI8McgXul"). `display_text_range` marks the visible text;
+/// a regex strips any remaining trailing t.co link when the range is absent
+/// or a tweet ends in a URL short link.
+///
+/// X reports these indices in Unicode **code points**, not UTF-16 units
+/// (verified against GraphQL responses containing emoji: cutting an emoji
+/// tweet by UTF-16 units silently drops the character after the emoji).
 fn strip_trailing_short_links(text: &str, display_text_range: Option<[usize; 2]>) -> String {
     let mut out = match display_text_range {
         Some([start, end]) if start < end => {
-            let units: Vec<u16> = text
-                .encode_utf16()
-                .skip(start)
-                .take(end - start)
-                .collect();
-            // Drop the replacement char that a surrogate cut at the boundary
-            // would produce (the range end is a valid UTF-16 boundary in
-            // practice, so this is just a safety net).
-            String::from_utf16_lossy(&units).replace('\u{FFFD}', "")
+            text.chars().skip(start).take(end - start).collect()
         }
         _ => text.to_string(),
     };
