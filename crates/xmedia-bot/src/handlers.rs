@@ -5,6 +5,7 @@ use crate::state::{ChatStore, unix_now};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use teloxide::prelude::*;
+use tokio::sync::Semaphore;
 use teloxide::types::{
     CallbackQuery, ChatAction, ChatId, ChatKind, InlineQuery, InlineQueryResult,
     InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, Message,
@@ -20,6 +21,14 @@ pub static CHAT_STORE: LazyLock<ChatStore> = LazyLock::new(|| {
 pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
     LazyLock::new(|| PersistentTaskQueue::new("data/task_queue.db"));
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
+
+/// Cap on concurrent per-URL processing. teloxide dispatches updates to a
+/// per-chat worker that handles them sequentially, so a batch-forward of many
+/// messages would otherwise be processed one at a time (fetch + send each,
+/// roughly a second per message). Moving the work into spawned tasks trades
+/// per-chat reply ordering for throughput; the semaphore bounds how many run
+/// at once so a big burst cannot hammer Telegram's rate limits.
+static URL_TASKS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "snake_case", description = "")]
@@ -481,7 +490,13 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
             log::info!("extracted {} URL(s): {urls:?}", urls.len());
         }
         for url in urls {
-            url_media(bot.clone(), &message, &url).await;
+            let bot = bot.clone();
+            let message = message.clone();
+            tokio::spawn(async move {
+                // Held for the whole task; the semaphore is never closed.
+                let _permit = URL_TASKS.acquire().await.expect("URL semaphore closed");
+                url_media(bot, &message, &url).await;
+            });
         }
     }
     respond(())

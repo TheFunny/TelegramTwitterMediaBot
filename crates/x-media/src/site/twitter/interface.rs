@@ -90,7 +90,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     {
         return Err(FetchError::Sensitive);
     }
-    Ok(Tweet::from_syndication_json(&text).map_err(FetchError::Json)?)
+    Tweet::from_syndication_json(&text).map_err(FetchError::Json)
 }
 
 /// The syndication token: JS `((id / 1e15) * PI).toString(36)` (the

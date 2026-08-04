@@ -6,7 +6,7 @@
 //! replaced by dedicated columns.
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,6 +17,12 @@ use tokio::task::JoinHandle;
 
 pub const MAX_RETRIES: u32 = 2;
 pub const LOCK_TTL_SECONDS: f64 = 120.0;
+
+/// Number of concurrent worker loops. Tasks are independent (retries and
+/// forward resumes); leases serialize row claims via SQLite transactions, so
+/// extra workers drain backlogs faster. Each worker can be mid-send to
+/// Telegram at the same time as handler tasks, so keep this modest.
+const QUEUE_WORKERS: usize = 4;
 
 /// What a handler returns instead of throwing. The payload it carries is the
 /// (possibly updated) task state to persist for the next attempt.
@@ -42,7 +48,7 @@ pub struct PersistentTaskQueue {
     db_path: String,
     notify: Arc<Notify>,
     stop: Arc<AtomicBool>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Mutex<Vec<JoinHandle<()>>>,
     counter: AtomicU64,
 }
 
@@ -66,6 +72,15 @@ fn now_f64() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+/// Opens the queue DB with a busy timeout. Handler tasks enqueue while
+/// workers lease/update rows concurrently; without the timeout a concurrent
+/// write fails immediately with SQLITE_BUSY and the operation is lost.
+fn open_db(path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
 }
 
 fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -96,12 +111,12 @@ impl PersistentTaskQueue {
             db_path: db_path.to_string(),
             notify: Arc::new(Notify::new()),
             stop: Arc::new(AtomicBool::new(false)),
-            worker: Mutex::new(None),
+            worker: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
         }
     }
 
-    /// Starts the worker loop. Also recovers rows left `in_progress` by a
+    /// Starts the worker loops. Also recovers rows left `in_progress` by a
     /// previous process (lease expired).
     pub async fn start<H, F, D, G>(&self, handler: H, dead_letter: D)
     where
@@ -114,21 +129,25 @@ impl PersistentTaskQueue {
         let dead_letter: Arc<DeadLetter> =
             Arc::new(move |payload, message| Box::pin(dead_letter(payload, message)));
         self.recover_stale().await;
-        let worker = QueueWorker {
-            db_path: self.db_path.clone(),
-            notify: Arc::clone(&self.notify),
-            stop: Arc::clone(&self.stop),
-            handler,
-            dead_letter,
-        };
-        let worker = tokio::spawn(worker.run_loop());
-        *self.worker.lock() = Some(worker);
+        let mut handles = Vec::with_capacity(QUEUE_WORKERS);
+        for _ in 0..QUEUE_WORKERS {
+            let worker = QueueWorker {
+                db_path: self.db_path.clone(),
+                notify: Arc::clone(&self.notify),
+                stop: Arc::clone(&self.stop),
+                handler: Arc::clone(&handler),
+                dead_letter: Arc::clone(&dead_letter),
+            };
+            handles.push(tokio::spawn(worker.run_loop()));
+        }
+        *self.worker.lock() = handles;
     }
 
     pub async fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.notify.notify_one();
-        if let Some(handle) = self.worker.lock().take() {
+        self.notify.notify_waiters();
+        let handles = std::mem::take(&mut *self.worker.lock());
+        for handle in handles {
             let _ = handle.await;
         }
     }
@@ -145,8 +164,8 @@ impl PersistentTaskQueue {
         let payload = payload.to_string();
         let db_path = self.db_path.clone();
         log::info!("enqueued {id} (run_after {run_after:.1})");
-        let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = Connection::open(&db_path)?;
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let conn = open_db(&db_path)?;
             conn.execute(
                 "INSERT OR REPLACE INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
                  VALUES (?1, ?2, ?3, 0, 'pending', 0, ?4)",
@@ -156,14 +175,16 @@ impl PersistentTaskQueue {
         })
         .await
         .expect("queue insert worker panicked")?;
-        self.notify.notify_one();
-        Ok(result)
+        // Wake every sleeping worker: with several workers the one that finds
+        // nothing due must not starve the newly inserted row.
+        self.notify.notify_waiters();
+        Ok(())
     }
 
     async fn recover_stale(&self) {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_db(&db_path)?;
             conn.execute(
                 "UPDATE tasks SET status='pending', locked_until=0 WHERE status='in_progress' AND locked_until < ?1",
                 params![now_f64()],
@@ -206,11 +227,15 @@ impl QueueWorker {
     async fn lease_next(&self) -> Option<LeasedRow> {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<LeasedRow>> {
-            let mut conn = Connection::open(&db_path)?;
-            let tx = conn.transaction()?;
+            let mut conn = open_db(&db_path)?;
+            // BEGIN IMMEDIATE: with several workers, a deferred transaction
+            // that read before another worker's lease commit would fail with
+            // SQLITE_BUSY_SNAPSHOT. Taking the write lock up front serializes
+            // leases and re-reads the freshest committed state.
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let now = now_f64();
             let row = tx.query_row(
-                "SELECT id, payload, attempts FROM tasks WHERE status='pending' AND run_after <= ?1 \
+                "SELECT id, payload, attempts FROM tasks WHERE status='pending' AND run_after <= ?1 AND locked_until <= ?1 \
                  ORDER BY run_after LIMIT 1",
                 params![now],
                 |r| {
@@ -251,7 +276,7 @@ impl QueueWorker {
     async fn earliest_run_after(&self) -> Option<f64> {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<f64>> {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_db(&db_path)?;
             let mut stmt = conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
             let mut rows = stmt.query([])?;
             match rows.next()? {
@@ -314,7 +339,7 @@ impl QueueWorker {
         let db_path = self.db_path.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_db(&db_path)?;
             conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
             Ok(())
         })
@@ -328,7 +353,7 @@ impl QueueWorker {
         let id = id.to_string();
         let payload = payload.to_string();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_db(&db_path)?;
             conn.execute(
                 "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
                 params![payload, now_f64() + delay_seconds, attempts, id],
@@ -338,7 +363,7 @@ impl QueueWorker {
         .await
         .expect("queue reschedule worker panicked")
         .unwrap_or_else(|e| log::error!("queue reschedule failed: {e}"));
-        self.notify.notify_one();
+        self.notify.notify_waiters();
     }
 }
 

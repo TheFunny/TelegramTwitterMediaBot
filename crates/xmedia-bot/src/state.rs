@@ -74,6 +74,10 @@ impl ChatStore {
         let db_path = self.db_path.clone();
         let payload = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<String>> {
             let conn = Connection::open(&db_path)?;
+            // Concurrent handler tasks (batch-forwards) may write chat_state
+            // while this read runs; without a busy timeout a write lock
+            // collision fails the query immediately.
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
             let mut stmt = conn.prepare("SELECT payload FROM chat_state WHERE chat_id = ?1")?;
             let mut rows = stmt.query(params![chat_id.to_string()])?;
             match rows.next()? {
@@ -100,6 +104,7 @@ impl ChatStore {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
             let conn = Connection::open(&db_path)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
             conn.execute(
                 "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
                 params![chat_id.to_string(), payload],

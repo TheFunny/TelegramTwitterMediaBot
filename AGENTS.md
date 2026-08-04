@@ -30,9 +30,9 @@ The `x-media` library: `site::fetch(url)` dispatches (in order) twitter → bsky
 | `crates/x-media/src/site/<twitter\|pixiv\|bsky>/` | One directory per site: `mod.rs` (re-exports), `interface.rs` (PATTERN, `enabled()`, `fetch_from_url()`, site struct, `From<SiteStruct> for Fetched`), `model.rs` (serde DTOs). Pixiv adds `api.rs` (auth + transport); twitter adds `auth.rs` (logged-in GraphQL `TweetDetail` fallback for NSFW tweets, gated on `TWITTER_AUTH_TOKEN`) |
 | `crates/xmedia-bot/src/main.rs` | Entry point: env/log init, queue worker start, pixiv validation, 300 s edit-expiry sweep, dptree handler tree, webhook vs polling dispatch |
 | `crates/xmedia-bot/src/config.rs` | Manual env parsing into `Config` |
-| `crates/xmedia-bot/src/handlers.rs` | `Command` enum (teloxide `BotCommands`), message/inline/callback handlers, URL extraction, global statics |
+| `crates/xmedia-bot/src/handlers.rs` | `Command` enum (teloxide `BotCommands`), message/inline/callback handlers, URL extraction, global statics; per-URL work spawned with a `Semaphore(8)` cap (teloxide's per-chat workers are sequential — batch-forwards need concurrency) |
 | `crates/xmedia-bot/src/state.rs` | `ChatStore`: parking_lot `Mutex<HashMap>` cache + SQLite write-through (`chat_state` table) |
-| `crates/xmedia-bot/src/queue.rs` | `PersistentTaskQueue`: SQLite-backed single-worker queue (`tasks` table) |
+| `crates/xmedia-bot/src/queue.rs` | `PersistentTaskQueue`: SQLite-backed queue (`tasks` table), `QUEUE_WORKERS = 4` concurrent workers (lease via `BEGIN IMMEDIATE` + `locked_until` TTL), retry→dead-letter, `Notify::notify_waiters` wakeup, `busy_timeout` on all connections |
 | `crates/xmedia-bot/src/send.rs` | Media senders, upload fallback, error classification, queue task handlers |
 
 ## Development Commands
