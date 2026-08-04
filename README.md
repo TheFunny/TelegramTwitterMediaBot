@@ -28,7 +28,9 @@ docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 ```
 
-环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`RUST_LOG`、`WEBHOOK*`。
+环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`RUST_LOG`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）。
+
+NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTER_AUTH_TOKEN`（登录 x.com 后浏览器 Cookie 里的 `auth_token` 值）后，bot 会仅在遇到 NSFW 推文时以登录态获取媒体；未设置则提示无媒体。
 
 ### Webhook 部署（需要反向代理）
 

@@ -19,7 +19,44 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str())
         .ok_or(FetchError::NotFound)?;
-    Ok(fetch(id).await?.into())
+    match fetch(id).await {
+        Ok(tweet) => Ok(tweet.into()),
+        // Syndication withholds NSFW/age-restricted tweets (empty `{}`).
+        // Retry as the logged-in user when TWITTER_AUTH_TOKEN is set;
+        // otherwise degrade to an empty result (the bot replies
+        // "No media found").
+        Err(FetchError::Sensitive) => {
+            if super::auth::enabled() {
+                match super::auth::fetch(id).await {
+                    Ok(tweet) => Ok(tweet.into()),
+                    Err(e) => {
+                        log::warn!("twitter auth fallback failed for {id}: {e}");
+                        Ok(empty_fetched(url))
+                    }
+                }
+            } else {
+                log::info!(
+                    "tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media"
+                );
+                Ok(empty_fetched(url))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// A Fetched with no media for withheld tweets: the bot replies
+/// "No media found" and moves on instead of erroring.
+fn empty_fetched(url: &str) -> Fetched {
+    Fetched {
+        source_url: url.to_string(),
+        caption: url.to_string(),
+        title: String::new(),
+        media: vec![],
+        sensitive: true,
+        render_data: None,
+        _keep_alive: None,
+    }
 }
 
 /// Fetches a tweet from the syndication endpoint. Deleted/blocked tweets
@@ -43,6 +80,15 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         .unwrap_or(false)
     {
         return Err(FetchError::NotFound);
+    }
+    // NSFW / age-restricted tweets exist but are served as an empty `{}` —
+    // they surface as FetchError::Sensitive so the caller can retry as a
+    // logged-in user.
+    if serde_json::from_str::<serde_json::Value>(&text)
+        .map(|v| v.get("id_str").is_none())
+        .unwrap_or(false)
+    {
+        return Err(FetchError::Sensitive);
     }
     Ok(Tweet::from_syndication_json(&text).map_err(FetchError::Json)?)
 }

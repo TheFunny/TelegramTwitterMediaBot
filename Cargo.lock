@@ -3302,6 +3302,7 @@ dependencies = [
  "dotenv",
  "html-escape",
  "log",
+ "rand 0.8.6",
  "regex",
  "reqwest 0.13.3",
  "serde",

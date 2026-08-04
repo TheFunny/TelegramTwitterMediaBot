@@ -89,6 +89,9 @@ pub enum FetchError {
     Pixiv(PixivError),
     NotFound,
     Blocked,
+    /// The post exists but its content is withheld (twitter NSFW /
+    /// age-restricted tweets come back as an empty `{}` from syndication).
+    Sensitive,
 }
 
 impl fmt::Display for FetchError {
@@ -99,6 +102,7 @@ impl fmt::Display for FetchError {
             FetchError::Pixiv(e) => write!(f, "pixiv error: {e}"),
             FetchError::NotFound => write!(f, "not found"),
             FetchError::Blocked => write!(f, "blocked"),
+            FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
         }
     }
 }
@@ -109,7 +113,7 @@ impl std::error::Error for FetchError {
             FetchError::Http(e) => Some(e),
             FetchError::Json(e) => Some(e),
             FetchError::Pixiv(e) => Some(e),
-            FetchError::NotFound | FetchError::Blocked => None,
+            FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
         }
     }
 }
