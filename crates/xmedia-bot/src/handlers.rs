@@ -1,7 +1,8 @@
 use crate::config::Config;
+use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
 use crate::queue::PersistentTaskQueue;
 use crate::send::{self, MediaItemPayload, Task};
-use crate::state::{ChatStore, unix_now};
+use crate::state::{ChatData, ChatStore, unix_now};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use teloxide::prelude::*;
@@ -20,6 +21,8 @@ pub static CHAT_STORE: LazyLock<ChatStore> = LazyLock::new(|| {
 });
 pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
     LazyLock::new(|| PersistentTaskQueue::new("data/task_queue.db"));
+pub static LINK_CACHE: LazyLock<LinkCache> =
+    LazyLock::new(|| LinkCache::open("data/task_queue.db"));
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 
 /// Cap on concurrent per-URL processing. teloxide dispatches updates to a
@@ -339,18 +342,21 @@ fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
             media: media.url().to_string(),
             has_spoiler: sensitive,
             fallback_url,
+            file_id: false,
         },
         Media::Video { .. } => MediaItemPayload::Video {
             media: media.url().to_string(),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
+            file_id: false,
         },
         Media::Animated { .. } => MediaItemPayload::Video {
             media: media.url().to_string(),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
+            file_id: false,
         },
     }
 }
@@ -363,11 +369,148 @@ async fn enqueue_retry(task: Task, delay_seconds: f64) {
     }
 }
 
+/// Sends a task and handles the outcome: post-send actions on success, retry
+/// enqueue on retryable failure, reply + link-cache invalidation on
+/// permanent failure (a stale cached file id must not repeat forever).
+async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
+    let result = match task {
+        Task::SendAnimation { .. } => send::send_animation(&bot, task).await,
+        Task::SendMediaSequence { .. } => send::send_media_sequence(&bot, task).await,
+        Task::ForwardMessages { .. } => unreachable!(),
+    };
+    match result {
+        Ok(message_ids) => {
+            log::info!("sent {} message(s) for {url}", message_ids.len());
+            send::post_send_actions(&bot, task, message_ids).await;
+        }
+        Err(send::SendError::Retryable { delay_seconds, task }) => {
+            log::info!("send for {url} failed, queued for retry in {delay_seconds:.1}s");
+            enqueue_retry(task, delay_seconds).await;
+            let _ = reply(bot, message.clone(), "Send failed. Task queued for retry.").await;
+        }
+        Err(send::SendError::Permanent {
+            message: err_message,
+            task,
+        }) => {
+            send::invalidate_cache(&task).await;
+            log::error!("send for {url} failed permanently: {err_message}");
+            let _ = reply(bot, message.clone(), format!("Send failed: {err_message}")).await;
+        }
+    }
+}
+
+/// Builds the send task from ready-made items, sharing the payload shape
+/// between the fresh-fetch and link-cache paths.
+#[allow(clippy::too_many_arguments)]
+fn build_send_task(
+    chat_data: &ChatData,
+    message: &Message,
+    source_url: String,
+    caption: String,
+    items: Vec<MediaItemPayload>,
+    cache_data: Option<CachedPost>,
+) -> Task {
+    let chat_id = message.chat.id.0;
+    if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
+        Task::SendAnimation {
+            chat_id,
+            reply_to_message_id: message.id.0 as i64,
+            caption,
+            animation: items.into_iter().next().unwrap(),
+            source_url,
+            edit_before_forward: chat_data.edit_before_forward,
+            forward_channel_id: chat_data.forward_channel_id,
+            notify_chat_id: Some(chat_id),
+            notify_message_id: Some(message.id.0 as i64),
+            cache_data,
+        }
+    } else {
+        Task::SendMediaSequence {
+            chat_id,
+            reply_to_message_id: message.id.0 as i64,
+            caption,
+            media_batches: send::chunk_media_items(items),
+            batch_index: 0,
+            sent_message_ids: vec![],
+            source_url,
+            edit_before_forward: chat_data.edit_before_forward,
+            forward_channel_id: chat_data.forward_channel_id,
+            notify_chat_id: Some(chat_id),
+            notify_message_id: Some(message.id.0 as i64),
+            cache_data,
+        }
+    }
+}
+
 async fn url_media(bot: Bot, message: &Message, url: &str) {
     let chat_id = message.chat.id.0;
     if let Err(e) = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await {
         log::error!("send_chat_action failed: {e}");
     }
+
+    // Link cache: a post sent before is re-sent from Telegram file ids —
+    // no source-site request, no download, no upload. Keyed by the
+    // normalized post id so x.com / fxtwitter / /photo/N variants collide.
+    if let Some(key) = x_media::site::cache_key(url)
+        && let Some(cached) = LINK_CACHE.get(&key, CONFIG.link_cache_ttl).await
+    {
+        log::info!("link cache hit for {url}");
+        let chat_data = CHAT_STORE.get(chat_id).await;
+        let site = key.split(':').next().unwrap_or("unknown");
+        let format = chat_data
+            .message_format
+            .get(site)
+            .cloned()
+            .unwrap_or_default();
+        let caption = if format.is_empty() {
+            cached.caption.clone()
+        } else {
+            x_media::site::caption_from_fields(
+                &format,
+                "",
+                &cached.url,
+                &cached.author,
+                &cached.author_url,
+                &cached.title,
+                &cached.tags,
+            )
+        };
+        let items: Vec<MediaItemPayload> = cached
+            .media
+            .iter()
+            .map(|m| match m.kind {
+                CachedMediaKind::Photo => MediaItemPayload::Photo {
+                    media: m.file_id.clone(),
+                    has_spoiler: cached.sensitive,
+                    fallback_url: None,
+                    file_id: true,
+                },
+                CachedMediaKind::Video => MediaItemPayload::Video {
+                    media: m.file_id.clone(),
+                    has_spoiler: cached.sensitive,
+                    thumbnail: None,
+                    fallback_url: None,
+                    file_id: true,
+                },
+                CachedMediaKind::Animation => MediaItemPayload::Animation {
+                    media: m.file_id.clone(),
+                    has_spoiler: cached.sensitive,
+                    file_id: true,
+                },
+            })
+            .collect();
+        let task = build_send_task(
+            &chat_data,
+            message,
+            cached.url.clone(),
+            caption,
+            items,
+            Some(cached),
+        );
+        dispatch_send(bot, message, &task, url).await;
+        return;
+    }
+
     log::info!("fetching {url}");
     match x_media::site::fetch(url).await {
         // Unsupported links are ignored silently (Python parity).
@@ -397,66 +540,34 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
                 .cloned()
                 .unwrap_or_default();
             let caption = fetched.caption_with(&format);
-            let task = if fetched.media.len() == 1
-                && matches!(fetched.media[0], Media::Animated { .. })
-            {
-                Task::SendAnimation {
-                    chat_id,
-                    reply_to_message_id: message.id.0 as i64,
-                    caption: caption.clone(),
-                    animation: MediaItemPayload::Animation {
-                        media: fetched.media[0].url().to_string(),
-                        has_spoiler: fetched.sensitive,
-                    },
-                    source_url: fetched.source_url.clone(),
-                    edit_before_forward: chat_data.edit_before_forward,
-                    forward_channel_id: chat_data.forward_channel_id,
-                    notify_chat_id: Some(chat_id),
-                    notify_message_id: Some(message.id.0 as i64),
+            // Raw render data for the link cache; the send fills in the
+            // Telegram file ids and persists the entry.
+            let cache_data = fetched.render_fields().map(|(author, author_url, title, tags)| {
+                CachedPost {
+                    url: fetched.source_url.clone(),
+                    caption: fetched.caption.clone(),
+                    title: title.to_string(),
+                    author: author.to_string(),
+                    author_url: author_url.to_string(),
+                    tags: tags.to_string(),
+                    sensitive: fetched.sensitive,
+                    media: vec![],
                 }
-            } else {
-                let items: Vec<MediaItemPayload> = fetched
-                    .media
-                    .iter()
-                    .map(|media| media_to_payload(media, fetched.sensitive))
-                    .collect();
-                Task::SendMediaSequence {
-                    chat_id,
-                    reply_to_message_id: message.id.0 as i64,
-                    caption: caption.clone(),
-                    media_batches: send::chunk_media_items(items),
-                    batch_index: 0,
-                    sent_message_ids: vec![],
-                    source_url: fetched.source_url.clone(),
-                    edit_before_forward: chat_data.edit_before_forward,
-                    forward_channel_id: chat_data.forward_channel_id,
-                    notify_chat_id: Some(chat_id),
-                    notify_message_id: Some(message.id.0 as i64),
-                }
-            };
-            let result = match &task {
-                Task::SendAnimation { .. } => send::send_animation(&bot, &task).await,
-                Task::SendMediaSequence { .. } => send::send_media_sequence(&bot, &task).await,
-                Task::ForwardMessages { .. } => unreachable!(),
-            };
-            match result {
-                Ok(message_ids) => {
-                    log::info!("sent {} message(s) for {url}", message_ids.len());
-                    send::post_send_actions(&bot, &task, message_ids).await;
-                }
-                Err(send::SendError::Retryable { delay_seconds, task }) => {
-                    log::info!("send for {url} failed, queued for retry in {delay_seconds:.1}s");
-                    enqueue_retry(task, delay_seconds).await;
-                    let _ = reply(bot, message.clone(), "Send failed. Task queued for retry.").await;
-                }
-                Err(send::SendError::Permanent {
-                    message: err_message,
-                    ..
-                }) => {
-                    log::error!("send for {url} failed permanently: {err_message}");
-                    let _ = reply(bot, message.clone(), format!("Send failed: {err_message}")).await;
-                }
-            }
+            });
+            let items: Vec<MediaItemPayload> = fetched
+                .media
+                .iter()
+                .map(|media| media_to_payload(media, fetched.sensitive))
+                .collect();
+            let task = build_send_task(
+                &chat_data,
+                message,
+                fetched.source_url.clone(),
+                caption,
+                items,
+                cache_data,
+            );
+            dispatch_send(bot, message, &task, url).await;
         }
     }
 }

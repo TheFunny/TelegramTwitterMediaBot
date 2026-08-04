@@ -9,11 +9,12 @@ use x_media::site;
 
 mod config;
 mod handlers;
+mod link_cache;
 mod queue;
 mod send;
 mod state;
 
-use handlers::{CHAT_STORE, CONFIG, TASK_QUEUE};
+use handlers::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
 
 /// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc
 /// handler (SIGINT only) never sees — without this the process would die
@@ -85,6 +86,10 @@ async fn main() {
                 }
                 let ttl = CONFIG.edit_message_ttl;
                 let removed = CHAT_STORE.prune_expired(ttl).await;
+                let pruned = LINK_CACHE.prune(CONFIG.link_cache_ttl).await;
+                if pruned > 0 {
+                    log::info!("link cache: pruned {pruned} expired entr(ies)");
+                }
                 for (chat_id, prompt_message_id) in removed {
                     // If the prompt was already deleted, this fails with a
                     // 400 "message to edit not found" — log and ignore.

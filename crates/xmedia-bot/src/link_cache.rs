@@ -1,0 +1,230 @@
+//! Persistent cache of successfully sent posts.
+//!
+//! After a media send succeeds, the raw render data plus the Telegram
+//! `file_id`s of the sent items are stored keyed by [`crate::site` cache
+//! key]. A repeated link is then answered entirely from local state — no
+//! re-fetch of the source site, no re-upload — and no media file is stored
+//! on disk (the file ids point at Telegram's servers). Entries expire after
+//! [`Config::link_cache_ttl`]; a stale entry is dropped lazily on read and
+//! by the periodic prune in `main`.
+
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CachedMediaKind {
+    Photo,
+    Video,
+    Animation,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CachedMedia {
+    pub kind: CachedMediaKind,
+    pub file_id: String,
+}
+
+/// Everything needed to re-send a post without touching the source site:
+/// the canonical URL, pre-escaped caption fields, and the file ids produced
+/// by the original successful send.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CachedPost {
+    pub url: String,
+    /// The site's built-in caption (used when the chat has no format
+    /// override).
+    pub caption: String,
+    pub title: String,
+    pub author: String,
+    pub author_url: String,
+    pub tags: String,
+    pub sensitive: bool,
+    pub media: Vec<CachedMedia>,
+}
+
+/// SQLite-backed cache sharing `data/task_queue.db` with the queue and chat
+/// state (same `open_db` pattern: busy timeout, `spawn_blocking` I/O).
+pub struct LinkCache {
+    db_path: String,
+}
+
+fn open_db(path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+impl LinkCache {
+    pub fn open(db_path: &str) -> Self {
+        if let Ok(conn) = Connection::open(db_path)
+            && let Err(e) = conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS link_cache (url TEXT PRIMARY KEY, \
+                 payload TEXT NOT NULL, created_at REAL NOT NULL);",
+            )
+        {
+            log::error!("failed to initialize link cache schema: {e}");
+        }
+        Self {
+            db_path: db_path.to_string(),
+        }
+    }
+
+    /// Returns the cached post if present and not expired; a stale entry is
+    /// removed on the spot.
+    pub async fn get(&self, key: &str, ttl: Duration) -> Option<CachedPost> {
+        let db_path = self.db_path.clone();
+        let key = key.to_string();
+        let ttl = ttl.as_secs_f64();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<CachedPost>> {
+            let conn = open_db(&db_path)?;
+            let mut stmt =
+                conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
+            let mut rows = stmt.query(params![key])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            let payload: String = row.get(0)?;
+            let created_at: f64 = row.get(1)?;
+            if now_f64() - created_at > ttl {
+                conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
+                return Ok(None);
+            }
+            serde_json::from_str(&payload).map(Some).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            })
+        })
+        .await
+        .expect("link cache read worker panicked")
+        .unwrap_or_else(|e| {
+            log::error!("link cache read failed: {e}");
+            None
+        })
+    }
+
+    pub async fn put(&self, key: &str, post: &CachedPost) {
+        let db_path = self.db_path.clone();
+        let key = key.to_string();
+        let payload = serde_json::to_string(post).expect("cached post serializes");
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let conn = open_db(&db_path)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
+                params![key, payload, now_f64()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("link cache write worker panicked")
+        .unwrap_or_else(|e| log::error!("link cache write failed: {e}"));
+    }
+
+    /// Drops an entry (e.g. a cached file id that turned out invalid).
+    pub async fn remove(&self, key: &str) {
+        let db_path = self.db_path.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
+            let conn = open_db(&db_path)?;
+            conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
+            Ok(())
+        })
+        .await
+        .expect("link cache delete worker panicked")
+        .unwrap_or_else(|e| log::error!("link cache delete failed: {e}"));
+    }
+
+    /// Removes expired entries; returns how many were deleted.
+    pub async fn prune(&self, ttl: Duration) -> usize {
+        let db_path = self.db_path.clone();
+        let cutoff = now_f64() - ttl.as_secs_f64();
+        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
+            let conn = open_db(&db_path)?;
+            conn.execute(
+                "DELETE FROM link_cache WHERE created_at < ?1",
+                params![cutoff],
+            )
+        })
+        .await
+        .expect("link cache prune worker panicked")
+        .unwrap_or_else(|e| {
+            log::error!("link cache prune failed: {e}");
+            0
+        })
+    }
+}
+
+fn now_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry() -> CachedPost {
+        CachedPost {
+            url: "https://x.com/u/status/1".into(),
+            caption: "cap".into(),
+            title: "t".into(),
+            author: "a".into(),
+            author_url: "au".into(),
+            tags: "".into(),
+            sensitive: true,
+            media: vec![CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "AgAC...".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn put_get_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        cache.put("twitter:1", &entry()).await;
+        let got = cache.get("twitter:1", Duration::from_secs(3600)).await;
+        assert!(got.is_some());
+        let got = got.unwrap();
+        assert_eq!(got.url, "https://x.com/u/status/1");
+        assert_eq!(got.media[0].file_id, "AgAC...");
+    }
+
+    #[tokio::test]
+    async fn expired_entry_removed_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        cache.put("twitter:1", &entry()).await;
+        // Force the row into the past so a 1s TTL expires it.
+        {
+            let conn = Connection::open(dir.path().join("c.db")).unwrap();
+            conn.execute(
+                "UPDATE link_cache SET created_at = created_at - 100",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(cache.get("twitter:1", Duration::from_secs(1)).await.is_none());
+        assert!(cache.get("twitter:1", Duration::from_secs(3600)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_and_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        cache.put("twitter:1", &entry()).await;
+        cache.put("pixiv:2", &entry()).await;
+        cache.remove("twitter:1").await;
+        assert!(cache.get("twitter:1", Duration::from_secs(3600)).await.is_none());
+        assert!(cache.get("pixiv:2", Duration::from_secs(3600)).await.is_some());
+        {
+            let conn = Connection::open(dir.path().join("c.db")).unwrap();
+            conn.execute("UPDATE link_cache SET created_at = created_at - 100", [])
+                .unwrap();
+        }
+        assert_eq!(cache.prune(Duration::from_secs(1)).await, 1);
+        assert!(cache.get("pixiv:2", Duration::from_secs(3600)).await.is_none());
+    }
+}

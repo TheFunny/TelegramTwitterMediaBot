@@ -46,6 +46,8 @@ services:
       # that the public syndication endpoint withholds.
       TWITTER_AUTH_TOKEN: ''
       EDIT_MESSAGE_TTL_SECONDS: '86400'
+      # Link-result cache TTL (default 604800 = 7 days).
+      LINK_CACHE_TTL_SECONDS: '604800'
       RUST_LOG: 'info'
       VIRTUAL_HOST: 'bot.example.com'
       VIRTUAL_PORT: '8443'

@@ -10,6 +10,7 @@ Telegram 机器人，将 X / Twitter、Pixiv、Bluesky 的帖子链接转换为�
 - 可绑定转发频道自动转发；支持转发前编辑 caption 与自定义模板
 - 发送失败自动重试并持久化，重试耗尽后通知用户
 - Pixiv ugoira 动图自动转码为 MP4
+- 链接结果本地缓存：成功发送后缓存 Telegram file id 与 caption 等，再次收到相同链接直接本地重发，不再请求源站、不保存媒体文件（`LINK_CACHE_TTL_SECONDS` 控制过期，默认 7 天）
 
 ## 快速开始
 
@@ -28,7 +29,7 @@ docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 ```
 
-环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`RUST_LOG`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）。
+环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`LINK_CACHE_TTL_SECONDS`、`RUST_LOG`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）。
 
 NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTER_AUTH_TOKEN`（登录 x.com 后浏览器 Cookie 里的 `auth_token` 值）后，bot 会仅在遇到 NSFW 推文时以登录态获取媒体；未设置则提示无媒体。
 
@@ -60,6 +61,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `PIXIV_REFRESH_TOKEN` | Pixiv 刷新令牌；未设置则禁用 Pixiv |
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
+| `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
 | `RUST_LOG` | 日志级别 |
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |
 | `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由 |

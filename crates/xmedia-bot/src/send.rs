@@ -3,7 +3,8 @@
 //! URL is blocked by hotlink protection; the bot downloads the file itself
 //! and uploads it via multipart).
 
-use crate::handlers::{CHAT_STORE, TASK_QUEUE};
+use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE};
+use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::queue::QueueError;
 use crate::state::{EditMessage, unix_now};
 use rand::Rng;
@@ -29,6 +30,9 @@ pub enum MediaItemPayload {
         /// size limits.
         #[serde(default)]
         fallback_url: Option<String>,
+        /// `media` is a Telegram file id (link-cache hit), not a URL.
+        #[serde(default)]
+        file_id: bool,
     },
     Video {
         media: String,
@@ -36,10 +40,16 @@ pub enum MediaItemPayload {
         thumbnail: Option<String>,
         #[serde(default)]
         fallback_url: Option<String>,
+        /// `media` is a Telegram file id (link-cache hit), not a URL.
+        #[serde(default)]
+        file_id: bool,
     },
     Animation {
         media: String,
         has_spoiler: bool,
+        /// `media` is a Telegram file id (link-cache hit), not a URL.
+        #[serde(default)]
+        file_id: bool,
     },
 }
 
@@ -68,6 +78,10 @@ pub enum Task {
         forward_channel_id: Option<i64>,
         notify_chat_id: Option<i64>,
         notify_message_id: Option<i64>,
+        /// Raw render data captured on a cache miss; the send fills in the
+        /// Telegram file ids and persists the entry (see `link_cache`).
+        #[serde(default)]
+        cache_data: Option<CachedPost>,
     },
     SendAnimation {
         chat_id: i64,
@@ -79,6 +93,10 @@ pub enum Task {
         forward_channel_id: Option<i64>,
         notify_chat_id: Option<i64>,
         notify_message_id: Option<i64>,
+        /// Raw render data captured on a cache miss; the send fills in the
+        /// Telegram file id and persists the entry (see `link_cache`).
+        #[serde(default)]
+        cache_data: Option<CachedPost>,
     },
     ForwardMessages {
         from_chat_id: i64,
@@ -87,6 +105,108 @@ pub enum Task {
         notify_chat_id: Option<i64>,
         notify_message_id: Option<i64>,
     },
+}
+
+impl Task {
+    fn cache_data(&self) -> Option<&CachedPost> {
+        match self {
+            Task::SendMediaSequence { cache_data, .. }
+            | Task::SendAnimation { cache_data, .. } => cache_data.as_ref(),
+            Task::ForwardMessages { .. } => None,
+        }
+    }
+
+    fn source_url(&self) -> Option<&str> {
+        match self {
+            Task::SendMediaSequence { source_url, .. }
+            | Task::SendAnimation { source_url, .. } => Some(source_url),
+            Task::ForwardMessages { .. } => None,
+        }
+    }
+
+    /// True when the media payloads are Telegram file ids from the link cache
+    /// (a cached file id that goes permanently bad should be dropped so the
+    /// next request re-fetches).
+    fn is_cached_send(&self) -> bool {
+        self.cache_data().is_some_and(|c| !c.media.is_empty())
+    }
+}
+
+/// Telegram file id of the message's media, matched to the payload kind.
+fn file_id_of_message(message: &Message, item: &MediaItemPayload) -> Option<String> {
+    match item {
+        // `photo()` returns all sizes, smallest first — the largest carries
+        // the file id of the sent media.
+        MediaItemPayload::Photo { .. } => {
+            message.photo().and_then(|sizes| sizes.last()).map(|p| p.file.id.to_string())
+        }
+        MediaItemPayload::Video { .. } => message.video().map(|v| v.file.id.to_string()),
+        MediaItemPayload::Animation { .. } => message.animation().map(|a| a.file.id.to_string()),
+    }
+}
+
+fn kind_of_item(item: &MediaItemPayload) -> CachedMediaKind {
+    match item {
+        MediaItemPayload::Photo { .. } => CachedMediaKind::Photo,
+        MediaItemPayload::Video { .. } => CachedMediaKind::Video,
+        MediaItemPayload::Animation { .. } => CachedMediaKind::Animation,
+    }
+}
+
+/// Collects the Telegram file ids of a sent media group, aligned to the
+/// batch's items.
+fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut Vec<CachedMedia>) {
+    for (message, item) in messages.iter().zip(batch.iter()) {
+        if let Some(file_id) = file_id_of_message(message, item) {
+            out.push(CachedMedia {
+                kind: kind_of_item(item),
+                file_id,
+            });
+        }
+    }
+}
+
+/// Persists a successful send under the post's cache key. Only runs for a
+/// fresh (non-resumed) task that carried raw cache data with no file ids yet.
+async fn cache_sent_task(task: &Task, media: Vec<CachedMedia>) {
+    let Some(cache_data) = task.cache_data() else {
+        return;
+    };
+    if !cache_data.media.is_empty() || media.is_empty() {
+        return;
+    }
+    let mut post = cache_data.clone();
+    post.media = media;
+    if let Some(key) = x_media::site::cache_key(&post.url) {
+        LINK_CACHE.put(&key, &post).await;
+        log::info!("cached send for {}", post.url);
+    }
+}
+
+/// Persists a lone animation send under the post's cache key.
+async fn cache_animation_send(task: &Task, message: &Message) {
+    if let Some(file_id) = message.animation().map(|a| a.file.id.to_string()) {
+        cache_sent_task(
+            task,
+            vec![CachedMedia {
+                kind: CachedMediaKind::Animation,
+                file_id,
+            }],
+        )
+        .await;
+    }
+}
+
+/// A cached Telegram file id failed permanently (stale/expired); drop the
+/// cache entry so the next request re-fetches instead of repeating it.
+pub async fn invalidate_cache(task: &Task) {
+    if task.is_cached_send()
+        && let Some(url) = task.source_url()
+        && let Some(key) = x_media::site::cache_key(url)
+    {
+        log::info!("removing stale link cache entry for {url}");
+        LINK_CACHE.remove(&key).await;
+    }
 }
 
 pub const MAX_MEDIA_GROUP: usize = 9;
@@ -198,6 +318,32 @@ fn input_file_for(media: &str) -> Result<InputFile, String> {
     }
 }
 
+impl MediaItemPayload {
+    /// The input for a send: a cached file id goes out as `InputFile::file_id`
+    /// (no fetch, no upload), URLs go to Telegram, anything else is a local
+    /// path (transient upload fallback).
+    fn input_file(&self) -> Result<InputFile, String> {
+        match self {
+            MediaItemPayload::Photo {
+                media,
+                file_id: true,
+                ..
+            }
+            | MediaItemPayload::Video {
+                media,
+                file_id: true,
+                ..
+            }
+            | MediaItemPayload::Animation {
+                media,
+                file_id: true,
+                ..
+            } => Ok(InputFile::file_id(media.clone().into())),
+            _ => input_file_for(item_url(self)),
+        }
+    }
+}
+
 fn photo_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
     let mut photo = InputMediaPhoto::new(file).parse_mode(ParseMode::Html);
     if let Some(caption) = caption {
@@ -244,27 +390,22 @@ fn build_media_group(
             let item_caption = if i == 0 { caption } else { None };
             Ok(match item {
                 MediaItemPayload::Photo {
-                    media,
-                    has_spoiler,
-                    ..
-                } => photo_media(input_file_for(media)?, item_caption, *has_spoiler),
+                    has_spoiler, ..
+                } => photo_media(item.input_file()?, item_caption, *has_spoiler),
                 MediaItemPayload::Video {
-                    media,
                     has_spoiler,
                     thumbnail,
                     ..
                 } => {
-                    let mut video = video_media(input_file_for(media)?, item_caption, *has_spoiler);
+                    let mut video = video_media(item.input_file()?, item_caption, *has_spoiler);
                     if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut video) {
                         *v = v.clone().thumbnail(input_file_for(thumb)?);
                     }
                     video
                 }
                 MediaItemPayload::Animation {
-                    media,
-                    has_spoiler,
-                    ..
-                } => animation_media(input_file_for(media)?, item_caption, *has_spoiler),
+                    has_spoiler, ..
+                } => animation_media(item.input_file()?, item_caption, *has_spoiler),
             })
         })
         .collect()
@@ -459,12 +600,14 @@ fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<
             reply_to_message_id,
             caption,
             media_batches,
+            batch_index: _,
+            sent_message_ids: _,
             source_url,
             edit_before_forward,
             forward_channel_id,
             notify_chat_id,
             notify_message_id,
-            ..
+            cache_data,
         } => Task::SendMediaSequence {
             chat_id: *chat_id,
             reply_to_message_id: *reply_to_message_id,
@@ -477,6 +620,7 @@ fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<
             forward_channel_id: *forward_channel_id,
             notify_chat_id: *notify_chat_id,
             notify_message_id: *notify_message_id,
+            cache_data: cache_data.clone(),
         },
         _ => unreachable!("updated_sequence_task requires a SendMediaSequence task"),
     }
@@ -501,6 +645,10 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
     let chat_id = *chat_id;
     let reply_to = *reply_to_message_id;
     let mut sent = sent_message_ids.clone();
+    // File ids accumulated across batches for the link cache. Only a fresh
+    // (non-resumed) full send populates the cache.
+    let mut cached_media: Vec<CachedMedia> = Vec::new();
+    let fresh_send = *batch_index == 0 && sent.is_empty();
     for idx in *batch_index..media_batches.len() {
         let batch = &media_batches[idx];
         let caption = if idx == 0 { Some(caption.as_str()) } else { None };
@@ -524,6 +672,7 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                     media_batches.len(),
                     batch.len()
                 );
+                collect_file_ids(&messages, batch, &mut cached_media);
                 sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
             }
             Err(RequestError::Api(api))
@@ -531,13 +680,13 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
             {
                 log::info!(
                     "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
-                    batch
-                        .first()
-                        .map(|item| item_url(item))
-                        .unwrap_or("?")
+                    batch.first().map(item_url).unwrap_or("?")
                 );
                 match send_batch_via_upload(bot, chat_id, reply_to, batch, caption).await {
-                    Ok(messages) => sent.extend(messages.into_iter().map(|m| m.id.0 as i64)),
+                    Ok(messages) => {
+                        collect_file_ids(&messages, batch, &mut cached_media);
+                        sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
+                    }
                     Err(FallbackError::Retryable { delay_seconds }) => {
                         return Err(SendError::Retryable {
                             delay_seconds,
@@ -560,6 +709,9 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                 ));
             }
         }
+    }
+    if fresh_send {
+        cache_sent_task(task, cached_media).await;
     }
     Ok(sent)
 }
@@ -601,6 +753,7 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
         MediaItemPayload::Animation {
             media,
             has_spoiler,
+            ..
         } => (media, *has_spoiler),
         MediaItemPayload::Photo { .. } | MediaItemPayload::Video { .. } => {
             unreachable!("SendAnimation carries an Animation payload")
@@ -613,7 +766,11 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
     match send_animation_inner(bot, chat_id, reply_to, caption, has_spoiler, url_file)
         .await
     {
-        Ok(message) => Ok(vec![message.id.0 as i64]),
+        Ok(message) => {
+            let id = message.id.0 as i64;
+            cache_animation_send(task, &message).await;
+            Ok(vec![id])
+        }
         Err(RequestError::Api(api))
             if is_media_fetch_failure(&api) || is_size_error(&api) =>
         {
@@ -634,7 +791,11 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                     )
                     .await
                     {
-                        Ok(message) => Ok(vec![message.id.0 as i64]),
+                        Ok(message) => {
+                            let id = message.id.0 as i64;
+                            cache_animation_send(task, &message).await;
+                            Ok(vec![id])
+                        }
                         Err(e) => Err(classify_to_send_error(&e, task.clone())),
                     }
                 }
@@ -652,7 +813,11 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                             )
                             .await
                             {
-                                Ok(message) => Ok(vec![message.id.0 as i64]),
+                                Ok(message) => {
+                                    let id = message.id.0 as i64;
+                                    cache_animation_send(task, &message).await;
+                                    Ok(vec![id])
+                                }
                                 Err(e) => Err(classify_to_send_error(&e, task.clone())),
                             }
                         }
@@ -868,6 +1033,7 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                     });
                 }
                 Err(SendError::Permanent { message, task }) => {
+                    invalidate_cache(&task).await;
                     return Err(QueueError::Permanent {
                         message,
                         payload: serde_json::to_value(task).expect("task serializes"),
@@ -1026,12 +1192,14 @@ mod tests {
                     media: "https://a/b.jpg".into(),
                     has_spoiler: true,
                     fallback_url: Some("https://a/b_small.jpg".into()),
+                    file_id: false,
                 }],
                 vec![MediaItemPayload::Video {
                     media: "https://a/v.mp4".into(),
                     has_spoiler: false,
                     thumbnail: Some("https://a/t.jpg".into()),
                     fallback_url: None,
+                    file_id: false,
                 }],
             ],
             batch_index: 1,
@@ -1041,6 +1209,7 @@ mod tests {
             forward_channel_id: Some(333),
             notify_chat_id: Some(111),
             notify_message_id: Some(222),
+            cache_data: None,
         };
         let json = serde_json::to_value(&task).unwrap();
         assert_eq!(json["type"], "send_media_sequence");
@@ -1070,6 +1239,7 @@ mod tests {
             media: "https://a/b.jpg".into(),
             has_spoiler: false,
             fallback_url: None,
+            file_id: false,
         };
         let json = serde_json::to_value(&photo).unwrap();
         assert_eq!(json["kind"], "photo");

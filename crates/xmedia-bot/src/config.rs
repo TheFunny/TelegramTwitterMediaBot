@@ -10,6 +10,8 @@ pub struct Config {
     pub admin_ids: Vec<i64>,
     /// EDIT_MESSAGE_TTL_SECONDS, default 86400 (24h).
     pub edit_message_ttl: Duration,
+    /// LINK_CACHE_TTL_SECONDS, default 604800 (7 days).
+    pub link_cache_ttl: Duration,
     // Webhook settings (moved out of main; names/defaults unchanged).
     pub webhook_enabled: bool,
     pub webhook_url: Option<url::Url>,
@@ -36,6 +38,12 @@ impl Config {
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(86400));
 
+    let link_cache_ttl = env::var("LINK_CACHE_TTL_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(7 * 24 * 3600));
+
     let webhook_enabled = env::var("WEBHOOK")
         .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"));
     let webhook_url = env::var("WEBHOOK_URL").ok().and_then(|s| s.parse().ok());
@@ -53,6 +61,7 @@ impl Config {
         Config {
             admin_ids,
             edit_message_ttl,
+            link_cache_ttl,
             webhook_enabled,
             webhook_url,
             webhook_listen,

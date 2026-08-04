@@ -68,18 +68,73 @@ impl Fetched {
     /// caption.
     pub fn caption_with(&self, format: &str) -> String {
         match (&self.render_data, format.is_empty()) {
-            (Some(data), false) => {
-                let escaped = html_escape::encode_text(format).into_owned();
-                escaped
-                    .replace("{url}", &data.url)
-                    .replace("{author}", &data.author)
-                    .replace("{author_url}", &data.author_url)
-                    .replace("{title}", &data.title)
-                    .replace("{tags}", &data.tags)
-            }
+            (Some(data), false) => caption_from_fields(
+                format,
+                "",
+                &data.url,
+                &data.author,
+                &data.author_url,
+                &data.title,
+                &data.tags,
+            ),
             _ => self.caption.clone(),
         }
     }
+
+    /// The pre-escaped placeholder values (author, author_url, title, tags)
+    /// a caller needs to rebuild a caption later, e.g. for a cached post
+    /// where the [`Fetched`] is no longer available.
+    pub fn render_fields(&self) -> Option<(&str, &str, &str, &str)> {
+        self.render_data.as_ref().map(|d| {
+            (
+                d.author.as_str(),
+                d.author_url.as_str(),
+                d.title.as_str(),
+                d.tags.as_str(),
+            )
+        })
+    }
+}
+
+/// Renders a user-supplied caption format from raw (already-escaped) field
+/// values with the same escaping/substitution rules as
+/// [`Fetched::caption_with`]. An empty format returns `built_in` unchanged.
+pub fn caption_from_fields(
+    format: &str,
+    built_in: &str,
+    url: &str,
+    author: &str,
+    author_url: &str,
+    title: &str,
+    tags: &str,
+) -> String {
+    if format.is_empty() {
+        return built_in.to_string();
+    }
+    let escaped = html_escape::encode_text(format).into_owned();
+    escaped
+        .replace("{url}", url)
+        .replace("{author}", author)
+        .replace("{author_url}", author_url)
+        .replace("{title}", title)
+        .replace("{tags}", tags)
+}
+
+/// Stable per-post cache key derived from any supported URL, so variant
+/// domains (x.com / twitter.com / fxtwitter.com, mobile, `/photo/N`
+/// suffixes) map to the same post. Returns `"twitter:<id>"`,
+/// `"pixiv:<id>"` or `"bsky:<handle>/<rkey>"`.
+pub fn cache_key(url: &str) -> Option<String> {
+    if let Some(caps) = twitter::PATTERN.captures(url) {
+        return Some(format!("twitter:{}", &caps[1]));
+    }
+    if let Some(caps) = pixiv::PATTERN.captures(url) {
+        return Some(format!("pixiv:{}", &caps[1]));
+    }
+    if let Some(caps) = bsky::PATTERN.captures(url) {
+        return Some(format!("bsky:{}/{}", &caps[1], &caps[2]));
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -225,6 +280,55 @@ pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_key_normalizes_domain_variants() {
+        assert_eq!(
+            cache_key("https://x.com/user/status/1234567890/photo/1"),
+            Some("twitter:1234567890".into())
+        );
+        assert_eq!(
+            cache_key("https://mobile.twitter.com/user/status/1234567890"),
+            Some("twitter:1234567890".into())
+        );
+        assert_eq!(
+            cache_key("https://fxtwitter.com/user/status/1234567890"),
+            Some("twitter:1234567890".into())
+        );
+        assert_eq!(
+            cache_key("https://www.pixiv.net/artworks/123456"),
+            Some("pixiv:123456".into())
+        );
+        assert_eq!(
+            cache_key("https://bsky.app/profile/handle.example/post/3lorem"),
+            Some("bsky:handle.example/3lorem".into())
+        );
+        assert_eq!(cache_key("https://example.com/not-a-post"), None);
+    }
+
+    #[test]
+    fn caption_from_fields_substitutes_and_escapes() {
+        // The format string is escaped, the field values are substituted
+        // verbatim (callers pass the already-escaped render data).
+        let out = caption_from_fields(
+            "see {author} at {url} — {title}",
+            "",
+            "https://x.com/u/status/1",
+            "A &amp; B",
+            "https://x.com/u",
+            "hello <world>",
+            "",
+        );
+        assert_eq!(
+            out,
+            "see A &amp; B at https://x.com/u/status/1 — hello <world>"
+        );
+        // Empty format keeps the built-in caption untouched.
+        assert_eq!(
+            caption_from_fields("", "built-in", "u", "a", "au", "t", "g"),
+            "built-in"
+        );
+    }
 
     #[tokio::test]
     async fn unsupported_url_returns_none() {
