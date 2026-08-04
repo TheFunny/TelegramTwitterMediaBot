@@ -1,12 +1,16 @@
 # ---------- build stage ----------
 # rust:1-bookworm (full, not slim) ships the C toolchain needed by
-# rusqlite's bundled SQLite, plus wget/xz for the ffmpeg download.
+# rusqlite's bundled SQLite, plus wget/unzip for the ffmpeg download.
 FROM rust:1-bookworm AS builder
 
 ARG APP_NAME=telegram-twitter-media-bot
-# Statically compiled ffmpeg (ugoira MP4 encoding). amd64 by default; override
-# for other platforms or pin a different johnvansickle build.
-ARG FFMPEG_URL=https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz
+# Prebuilt static ffmpeg (glibc-linked, includes libx264) for ugoira MP4
+# encoding. Served from https://ffmpeg.martin-riedl.de (Cloudflare CDN,
+# built on Debian 12 — glibc-compatible with the bookworm-slim runtime).
+# johnvansickle.com throttles datacenter IPs and served garbage from GitHub
+# runners. `/redirect/latest/` floats to the newest release build; each build
+# also ships a .sha256. Swap `amd64` for `arm64` when building arm64 images.
+ARG FFMPEG_URL=https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip
 
 WORKDIR /build
 
@@ -22,11 +26,14 @@ RUN mkdir -p crates/x-media/src crates/xmedia-bot/src \
     && cargo build --release -p xmedia-bot
 
 # 2. Static ffmpeg next (cached unless FFMPEG_URL changes), so source edits
-#    never re-download it. The johnvansickle tarball has a
-#    `{build}/ffmpeg` layout, so strip one path component.
-RUN wget -q -O /tmp/ffmpeg.tar.xz "$FFMPEG_URL" \
-    && tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=1 --wildcards '*/ffmpeg' \
-    && rm /tmp/ffmpeg.tar.xz \
+#    never re-download it. The zip contains a single `ffmpeg` binary at the
+#    root. `unzip -t` verifies the archive before extraction so a bad
+#    download fails loudly here instead of a cryptic later error.
+RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
+    && unzip -tq /tmp/ffmpeg.zip \
+    && unzip -q /tmp/ffmpeg.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/ffmpeg \
+    && rm /tmp/ffmpeg.zip \
     && /usr/local/bin/ffmpeg -version >/dev/null
 
 # 3. Real sources last: only our crates recompile on source changes. The

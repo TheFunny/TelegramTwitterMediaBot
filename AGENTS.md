@@ -70,7 +70,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 | `crates/xmedia-bot/src/send.rs` | Constants `MAX_MEDIA_GROUP = 9`, `MAX_UPLOAD_BYTES = 10 MiB`; fallback chain; `classify_request_error` |
 | `crates/x-media/src/site/mod.rs` | Dispatcher, `Fetched`/`FetchError`, shared `CLIENT`, `download_media` (adds `Referer: https://www.pixiv.net/` for `pximg.net` hotlink protection) |
 | `crates/x-media/src/site/pixiv/api.rs` | OAuth token exchange (hardcoded app client id/secret), access-token cache, ugoira zip→MP4 via ffmpeg in `spawn_blocking` |
-| `Dockerfile` | Multi-stage: cached dep layer via stub sources + `touch *.rs` mtime hack, static ffmpeg 7.0.2 (johnvansickle), `debian:bookworm-slim` runtime, entrypoint |
+| `Dockerfile` | Multi-stage: cached dep layer via stub sources + `touch *.rs` mtime hack, static ffmpeg from ffmpeg.martin-riedl.de (`FFMPEG_URL` arg, `unzip -t` integrity check), `debian:bookworm-slim` runtime, entrypoint |
 | `docker-entrypoint.sh` | Privilege drop: `useradd` with `LOCAL_USER_ID` (default 9001) + `setpriv` (no gosu on bookworm-slim) |
 | `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored) |
 | `.github/workflows/docker.yml` | CI: build+push to Docker Hub on tag `v*`/master; **no test step** |
