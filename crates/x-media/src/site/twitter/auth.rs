@@ -12,10 +12,14 @@
 //!
 //! # Caveats
 //! - X rotates the GraphQL query id when it rolls the web app; if requests
-//!   start failing, update [`TWEET_DETAIL_QUERY_ID`].
-//! - X may require an `x-client-transaction-id` (derived from the home page
-//!   `<meta name="twitter-site-verification">` key + the ondemand JS bundle);
-//!   if requests 403, add that step (see nazurin's `_generate_transaction_id`).
+//!   start failing, update [`TWEET_DETAIL_QUERY_ID`]. Fresh references from
+//!   the actively maintained FxEmbed/FxEmbed: TweetDetail
+//!   `R9IzzyzQBV87-DOWpcvDmw`, TweetResultByRestId `f2sagi1jweVHFkTUIHzmMQ`
+//!   (the latter is anonymous and surfaces NSFW tweets as
+//!   `reason: NsfwLoggedOut`).
+//! - `x-client-transaction-id` is only required for `SearchTimeline`
+//!   (verified against FxEmbed's `proxy/allowlist.ts`) — TweetDetail works
+//!   without it; no need for the nazurin home-page/JS-bundle derivation.
 
 use std::sync::LazyLock;
 
@@ -39,7 +43,8 @@ static AUTH_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
 const LOGGED_IN_BEARER: &str =
     "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
-/// `TweetDetail` query id (from nazurin; rotates when X rolls the app).
+/// `TweetDetail` query id (from nazurin; still valid as of 2026-08,
+/// corroborated by the current FxEmbed build — see module caveats).
 const TWEET_DETAIL_QUERY_ID: &str = "_8aYOgEDz35BrBcBal1-_w";
 
 fn variables(id: &str) -> Value {
