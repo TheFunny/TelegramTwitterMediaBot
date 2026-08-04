@@ -2,6 +2,10 @@
 __pycache__/
 cert/
 data/
+nginx-certs/
+nginx-vhost.d/
+nginx-html/
+nginx-acme/
 docker-compose.yml
 
 .env

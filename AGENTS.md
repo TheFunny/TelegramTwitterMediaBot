@@ -72,7 +72,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 | `crates/x-media/src/site/pixiv/api.rs` | OAuth token exchange (hardcoded app client id/secret), access-token cache, ugoira zip→MP4 via ffmpeg in `spawn_blocking` |
 | `Dockerfile` | Multi-stage: cached dep layer via stub sources + `touch *.rs` mtime hack, static ffmpeg from ffmpeg.martin-riedl.de (`FFMPEG_URL` arg, `unzip -t` integrity check), `debian:bookworm-slim` runtime, entrypoint |
 | `docker-entrypoint.sh` | Privilege drop: `useradd` with `LOCAL_USER_ID` (default 9001) + `setpriv` (no gosu on bookworm-slim) |
-| `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored) |
+| `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored). Ships nginx-proxy + acme-companion: webhook mode needs TLS termination in front (teloxide's axum listener is HTTP-only; `WEBHOOK_CERT` only feeds `set_webhook`), bot exposes `VIRTUAL_HOST`/`VIRTUAL_PORT` on the shared `proxy` network, no host port |
 | `.github/workflows/docker.yml` | CI: build+push to Docker Hub on tag `v*`/master; **no test step**; buildx gha cache (`cache-from`/`cache-to`, scope `tgxmb-build`, `mode=max`) so cargo deps + ffmpeg layers are restored across runs |
 | `README.md` | Feature docs + command table (Chinese) |
 
@@ -81,7 +81,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 - **Rust, stable, edition 2024**, workspace resolver 3. No `rust-version`/MSRV pin, no `rust-toolchain.toml` — recent stable is assumed. No nightly features.
 - Package manager: **Cargo** (workspace with path dep `x-media` ← `xmedia-bot`). No `[workspace.package]`/shared deps — each crate lists deps independently.
 - **Two reqwest versions coexist in the lock** (0.12.28 via teloxide, 0.13.3 in x-media) — don't unify casually.
-- Config is **environment-variable driven** (dotenv loads `.env`, gitignored; no `.env.example` exists). Key vars: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN` (comma-separated ids), `EDIT_MESSAGE_TTL_SECONDS` (default 86400), `WEBHOOK`/`WEBHOOK_URL`/`WEBHOOK_LISTEN`/`WEBHOOK_PORT`/`WEBHOOK_CERT`/`WEBHOOK_SECRET_TOKEN` (webhook mode requires cert + port, `.expect`ed), `RUST_LOG`, `TELOXIDE_PROXY`, `LOCAL_USER_ID` (entrypoint only).
+- Config is **environment-variable driven** (dotenv loads `.env`, gitignored; no `.env.example` exists). Key vars: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN` (comma-separated ids), `EDIT_MESSAGE_TTL_SECONDS` (default 86400), `WEBHOOK`/`WEBHOOK_URL`/`WEBHOOK_LISTEN`/`WEBHOOK_PORT`/`WEBHOOK_CERT`/`WEBHOOK_SECRET_TOKEN` (webhook mode requires URL/listen/port, `.expect`ed; `WEBHOOK_CERT` is Telegram-facing self-signed validation only — TLS must be terminated by a reverse proxy), `RUST_LOG`, `TELOXIDE_PROXY`, `LOCAL_USER_ID` (entrypoint only).
 - SQLite via `rusqlite` with `bundled` feature (no system libsqlite needed). DB file `data/task_queue.db` is CWD-relative — run from the workspace root, or `/app` in Docker. Mount `./data` and `./cert` volumes.
 - `.gitattributes` enforces LF for `*.sh` (CRLF breaks shebangs in containers). `.gitignore`: `.env`, `data/`, `cert/`, `docker-compose.yml`, `/target`, `.idea/`.
 - Docs are in Chinese; user-facing bot strings too. Keep that convention when editing captions/templates/docs.

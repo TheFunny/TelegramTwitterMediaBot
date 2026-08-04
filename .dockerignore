@@ -28,5 +28,9 @@ LICENSE
 README.md
 data/
 cert/
+nginx-certs/
+nginx-vhost.d/
+nginx-html/
+nginx-acme/
 **/target/
 .idea/
