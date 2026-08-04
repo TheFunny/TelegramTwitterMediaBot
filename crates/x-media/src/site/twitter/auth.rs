@@ -26,9 +26,12 @@ use crate::site::FetchError;
 use super::interface::Tweet;
 
 /// `auth_token` cookie of a logged-in x.com session; enables the fallback.
+/// Trimmed: a CRLF `.env` (Windows) leaves a trailing `\r` on the value,
+/// which would make the Cookie header invalid.
 static AUTH_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
     std::env::var("TWITTER_AUTH_TOKEN")
         .ok()
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 });
 
