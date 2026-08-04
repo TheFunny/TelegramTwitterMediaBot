@@ -3296,7 +3296,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "x-media"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "bytes",
  "dotenv",
@@ -3315,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "xmedia-bot"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "dotenv",
  "html-escape",
