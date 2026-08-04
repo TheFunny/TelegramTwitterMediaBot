@@ -322,22 +322,26 @@ fn thumbnail_for(media: &Media) -> Option<String> {
 }
 
 fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
+    let fallback_url = media.smaller_url().map(str::to_string);
     match media {
         // A gif inside a group becomes a video item; a lone gif takes the
         // animation path (see url_media).
         Media::Illustration { .. } => MediaItemPayload::Photo {
             media: media.url().to_string(),
             has_spoiler: sensitive,
+            fallback_url,
         },
         Media::Video { .. } => MediaItemPayload::Video {
             media: media.url().to_string(),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
+            fallback_url,
         },
         Media::Animated { .. } => MediaItemPayload::Video {
             media: media.url().to_string(),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
+            fallback_url,
         },
     }
 }
@@ -502,11 +506,19 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
                     .unwrap_or_else(|| url.clone());
                 let caption = fetched.caption.clone();
                 let result = match media {
-                    Media::Illustration { .. } => InlineQueryResult::Photo(
-                        InlineQueryResultPhoto::new(id, url, thumbnail)
-                            .caption(caption)
-                            .parse_mode(ParseMode::Html),
-                    ),
+                    Media::Illustration { .. } => {
+                        // Inline photo results have their own (smaller) size
+                        // cap; use the reduced variant when one exists.
+                        let photo_url = media
+                            .smaller_url()
+                            .and_then(|u| url::Url::parse(u).ok())
+                            .unwrap_or_else(|| url.clone());
+                        InlineQueryResult::Photo(
+                            InlineQueryResultPhoto::new(id, photo_url, thumbnail)
+                                .caption(caption)
+                                .parse_mode(ParseMode::Html),
+                        )
+                    }
                     Media::Video { .. } => InlineQueryResult::Video(
                         InlineQueryResultVideo::new(
                             id,

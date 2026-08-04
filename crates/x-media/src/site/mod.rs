@@ -195,6 +195,19 @@ async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
 /// fetch of a media URL is blocked (hotlink protection), the bot downloads
 /// the file itself and uploads it via multipart. Site-appropriate headers:
 /// pixiv image hosts need the `Referer` header.
+/// Returns the Content-Length of a media URL, or `None` when the server does
+/// not report one. Used to check whether a file fits Telegram's size limits
+/// before downloading/uploading it.
+pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
+    let mut request = CLIENT.get(url);
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("pximg.net") {
+        request = request.header("Referer", "https://www.pixiv.net/");
+    }
+    let response = request.send().await?;
+    Ok(response.content_length())
+}
+
 pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
     let mut request = CLIENT.get(url);
     let lower = url.to_ascii_lowercase();

@@ -129,7 +129,9 @@ impl Tweet {
                     title: None,
                     url: original_twimg_url(&item.media_url_https),
                     thumbnail_url: None,
-                    fallback_url: None,
+                    // The param-less base URL is a reduced-size variant;
+                    // used as the fallback when the original is too large.
+                    fallback_url: Some(item.media_url_https.clone()),
                 }),
                 "video" => media.push(Media::Video {
                     title: None,

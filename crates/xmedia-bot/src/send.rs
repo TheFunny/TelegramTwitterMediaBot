@@ -25,16 +25,32 @@ pub enum MediaItemPayload {
     Photo {
         media: String,
         has_spoiler: bool,
+        /// Smaller variant used when the primary media exceeds Telegram's
+        /// size limits.
+        #[serde(default)]
+        fallback_url: Option<String>,
     },
     Video {
         media: String,
         has_spoiler: bool,
         thumbnail: Option<String>,
+        #[serde(default)]
+        fallback_url: Option<String>,
     },
     Animation {
         media: String,
         has_spoiler: bool,
     },
+}
+
+impl MediaItemPayload {
+    fn fallback_url(&self) -> Option<&str> {
+        match self {
+            MediaItemPayload::Photo { fallback_url, .. }
+            | MediaItemPayload::Video { fallback_url, .. } => fallback_url.as_deref(),
+            MediaItemPayload::Animation { .. } => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -74,7 +90,9 @@ pub enum Task {
 }
 
 pub const MAX_MEDIA_GROUP: usize = 9;
-pub const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024; // Telegram Bot API upload cap
+/// Upload cap (bytes): files above this are not uploaded; the bot falls back
+/// to a smaller media URL instead.
+pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024; // 10485760
 
 /// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items.
 pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
@@ -100,6 +118,18 @@ pub fn is_media_fetch_failure(e: &ApiError) -> bool {
     ];
     let description = e.to_string().to_lowercase();
     MARKERS.iter().any(|marker| description.contains(marker))
+}
+
+/// Telegram reported the media file as too large (HTTP 413 on multipart
+/// upload, or a "too large" message for URL-fetched media). These errors are
+/// handled by the size-check fallback (use a smaller media URL), NOT by a
+/// queue retry.
+pub fn is_size_error(e: &ApiError) -> bool {
+    if matches!(e, ApiError::RequestEntityTooLarge) {
+        return true;
+    }
+    let description = e.to_string().to_lowercase();
+    ["too large", "too big"].iter().any(|marker| description.contains(marker))
 }
 
 /// Task-free classification of a Telegram request error. The callers attach
@@ -216,11 +246,13 @@ fn build_media_group(
                 MediaItemPayload::Photo {
                     media,
                     has_spoiler,
+                    ..
                 } => photo_media(input_file_for(media)?, item_caption, *has_spoiler),
                 MediaItemPayload::Video {
                     media,
                     has_spoiler,
                     thumbnail,
+                    ..
                 } => {
                     let mut video = video_media(input_file_for(media)?, item_caption, *has_spoiler);
                     if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut video) {
@@ -231,6 +263,7 @@ fn build_media_group(
                 MediaItemPayload::Animation {
                     media,
                     has_spoiler,
+                    ..
                 } => animation_media(input_file_for(media)?, item_caption, *has_spoiler),
             })
         })
@@ -258,6 +291,9 @@ fn sniff_ext(bytes: &[u8]) -> &'static str {
 enum FallbackError {
     Retryable { delay_seconds: f64 },
     Permanent { message: String },
+    /// The downloaded file exceeds the upload cap; the caller falls back to
+    /// the item's smaller URL.
+    MediaTooLarge,
 }
 
 /// Downloads one media item to a temp file (deleted on drop). Network errors
@@ -282,9 +318,7 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
         }
     };
     if bytes.len() as u64 > MAX_UPLOAD_BYTES {
-        return Err(FallbackError::Permanent {
-            message: "media too large".into(),
-        });
+        return Err(FallbackError::MediaTooLarge);
     }
     let ext = sniff_ext(&bytes);
     let mut file = tempfile::Builder::new()
@@ -302,7 +336,48 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
     Ok(file)
 }
 
-/// Download-and-reupload fallback for one media batch.
+/// Builds the media group item from an uploaded file.
+fn media_from_file(
+    item: &MediaItemPayload,
+    path: std::path::PathBuf,
+    caption: Option<&str>,
+) -> InputMedia {
+    match item {
+        MediaItemPayload::Photo { has_spoiler, .. } => {
+            photo_media(InputFile::file(path), caption, *has_spoiler)
+        }
+        MediaItemPayload::Video { has_spoiler, .. } => {
+            video_media(InputFile::file(path), caption, *has_spoiler)
+        }
+        MediaItemPayload::Animation { has_spoiler, .. } => {
+            animation_media(InputFile::file(path), caption, *has_spoiler)
+        }
+    }
+}
+
+/// Builds the media group item from a (smaller) URL.
+fn media_from_url(
+    item: &MediaItemPayload,
+    url: &str,
+    caption: Option<&str>,
+) -> Result<InputMedia, String> {
+    Ok(match item {
+        MediaItemPayload::Photo { has_spoiler, .. } => {
+            photo_media(input_file_for(url)?, caption, *has_spoiler)
+        }
+        MediaItemPayload::Video { has_spoiler, .. } => {
+            video_media(input_file_for(url)?, caption, *has_spoiler)
+        }
+        MediaItemPayload::Animation { has_spoiler, .. } => {
+            animation_media(input_file_for(url)?, caption, *has_spoiler)
+        }
+    })
+}
+
+/// Download-and-reupload fallback for one media batch. Files over the upload
+/// cap are not downloaded/uploaded; the item falls back to its smaller URL
+/// (which Telegram fetches itself). Returns the fallback-error without the
+/// task attached; callers wrap it with the updated task state.
 async fn send_batch_via_upload(
     bot: &Bot,
     chat_id: i64,
@@ -313,22 +388,51 @@ async fn send_batch_via_upload(
     let mut files = Vec::new();
     let mut items = Vec::new();
     for (i, item) in batch.iter().enumerate() {
-        let file = download_to_temp(item).await?;
-        let path = file.path().to_path_buf();
         let item_caption = if i == 0 { caption } else { None };
-        let media = match item {
-            MediaItemPayload::Photo { has_spoiler, .. } => {
-                photo_media(InputFile::file(path), item_caption, *has_spoiler)
+        // Size check before downloading/uploading: over the cap, use the
+        // smaller URL instead of the file.
+        let too_large = match x_media::site::media_size(item_url(item)).await {
+            Ok(Some(size)) => size > MAX_UPLOAD_BYTES,
+            _ => false,
+        };
+        let media = if too_large {
+            match item.fallback_url() {
+                Some(url) => match media_from_url(item, url, item_caption) {
+                    Ok(media) => media,
+                    Err(message) => {
+                        return Err(FallbackError::Permanent { message });
+                    }
+                },
+                None => {
+                    return Err(FallbackError::Permanent {
+                        message: "media too large".into(),
+                    });
+                }
             }
-            MediaItemPayload::Video { has_spoiler, .. } => {
-                video_media(InputFile::file(path), item_caption, *has_spoiler)
-            }
-            MediaItemPayload::Animation { has_spoiler, .. } => {
-                animation_media(InputFile::file(path), item_caption, *has_spoiler)
+        } else {
+            match download_to_temp(item).await {
+                Ok(file) => {
+                    let path = file.path().to_path_buf();
+                    files.push(file);
+                    media_from_file(item, path, item_caption)
+                }
+                Err(FallbackError::MediaTooLarge) => match item.fallback_url() {
+                    Some(url) => match media_from_url(item, url, item_caption) {
+                        Ok(media) => media,
+                        Err(message) => {
+                            return Err(FallbackError::Permanent { message });
+                        }
+                    },
+                    None => {
+                        return Err(FallbackError::Permanent {
+                            message: "media too large".into(),
+                        });
+                    }
+                },
+                Err(e) => return Err(e),
             }
         };
         items.push(media);
-        files.push(file);
     }
     let result = bot
         .send_media_group(ChatId(chat_id), items)
@@ -422,7 +526,9 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                 );
                 sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
             }
-            Err(RequestError::Api(api)) if is_media_fetch_failure(&api) => {
+            Err(RequestError::Api(api))
+                if is_media_fetch_failure(&api) || is_size_error(&api) =>
+            {
                 log::info!(
                     "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
                     batch
@@ -444,6 +550,7 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                             task: updated_sequence_task(task, idx, sent),
                         });
                     }
+                    Err(FallbackError::MediaTooLarge) => unreachable!("handled inside upload"),
                 }
             }
             Err(e) => {
@@ -507,33 +614,63 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
         .await
     {
         Ok(message) => Ok(vec![message.id.0 as i64]),
-        Err(RequestError::Api(api)) if is_media_fetch_failure(&api) => {
+        Err(RequestError::Api(api))
+            if is_media_fetch_failure(&api) || is_size_error(&api) =>
+        {
             log::info!(
                 "Telegram could not fetch animation URL, downloading and reuploading: {}",
                 media_url
             );
-            let file = match download_to_temp(animation).await {
-                Ok(file) => file,
+            match download_to_temp(animation).await {
+                Ok(file) => {
+                    let path = file.path().to_path_buf();
+                    match send_animation_inner(
+                        bot,
+                        chat_id,
+                        reply_to,
+                        caption,
+                        has_spoiler,
+                        InputFile::file(path),
+                    )
+                    .await
+                    {
+                        Ok(message) => Ok(vec![message.id.0 as i64]),
+                        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+                    }
+                }
+                // Over the upload cap: fall back to the smaller URL.
+                Err(FallbackError::MediaTooLarge) => match animation.fallback_url() {
+                    Some(url) => match input_file_for(url) {
+                        Ok(file) => {
+                            match send_animation_inner(
+                                bot,
+                                chat_id,
+                                reply_to,
+                                caption,
+                                has_spoiler,
+                                file,
+                            )
+                            .await
+                            {
+                                Ok(message) => Ok(vec![message.id.0 as i64]),
+                                Err(e) => Err(classify_to_send_error(&e, task.clone())),
+                            }
+                        }
+                        Err(message) => {
+                            Err(SendError::Permanent { message, task: task.clone() })
+                        }
+                    },
+                    None => Err(SendError::Permanent {
+                        message: "media too large".into(),
+                        task: task.clone(),
+                    }),
+                },
                 Err(FallbackError::Retryable { delay_seconds }) => {
-                    return Err(SendError::Retryable { delay_seconds, task: task.clone() });
+                    Err(SendError::Retryable { delay_seconds, task: task.clone() })
                 }
                 Err(FallbackError::Permanent { message }) => {
-                    return Err(SendError::Permanent { message, task: task.clone() });
+                    Err(SendError::Permanent { message, task: task.clone() })
                 }
-            };
-            let path = file.path().to_path_buf();
-            match send_animation_inner(
-                bot,
-                chat_id,
-                reply_to,
-                caption,
-                has_spoiler,
-                InputFile::file(path),
-            )
-            .await
-            {
-                Ok(message) => Ok(vec![message.id.0 as i64]),
-                Err(e) => Err(classify_to_send_error(&e, task.clone())),
             }
         }
         Err(e) => Err(classify_to_send_error(&e, task.clone())),
@@ -820,6 +957,36 @@ mod tests {
     }
 
     #[test]
+    fn is_size_error_matches_known_errors() {
+        // 413 upload cap.
+        let e = ApiError::RequestEntityTooLarge;
+        assert!(is_size_error(&e), "{e:?}");
+        // Unknown descriptions with size wording.
+        for description in [
+            "Bad Request: file is too large",
+            "Bad Request: media is too big",
+            "Bad Request: url file size is too big",
+        ] {
+            let api = ApiError::Unknown(description.to_string());
+            assert!(is_size_error(&api), "{description}");
+        }
+        // Unrelated errors must not match.
+        for description in ["Bad Request: WEBPAGE_MEDIA_EMPTY", "Bad Request: message is not modified"] {
+            let api = ApiError::Unknown(description.to_string());
+            assert!(!is_size_error(&api), "{description}");
+        }
+    }
+
+    #[test]
+    fn media_item_payload_fallback_url_serde_default() {
+        // Old queued payloads without the field deserialize with None.
+        let json = serde_json::json!({"kind": "photo", "media": "https://a/b.jpg", "has_spoiler": false});
+        let photo: MediaItemPayload = serde_json::from_value(json).unwrap();
+        assert!(matches!(photo, MediaItemPayload::Photo { fallback_url: None, .. }));
+        assert_eq!(photo.fallback_url(), None);
+    }
+
+    #[test]
     fn classification_mapping() {
         use teloxide::types::Seconds;
         // RetryAfter -> Retryable with its delay
@@ -858,11 +1025,13 @@ mod tests {
                 vec![MediaItemPayload::Photo {
                     media: "https://a/b.jpg".into(),
                     has_spoiler: true,
+                    fallback_url: Some("https://a/b_small.jpg".into()),
                 }],
                 vec![MediaItemPayload::Video {
                     media: "https://a/v.mp4".into(),
                     has_spoiler: false,
                     thumbnail: Some("https://a/t.jpg".into()),
+                    fallback_url: None,
                 }],
             ],
             batch_index: 1,
@@ -900,6 +1069,7 @@ mod tests {
         let photo = MediaItemPayload::Photo {
             media: "https://a/b.jpg".into(),
             has_spoiler: false,
+            fallback_url: None,
         };
         let json = serde_json::to_value(&photo).unwrap();
         assert_eq!(json["kind"], "photo");

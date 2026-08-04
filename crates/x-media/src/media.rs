@@ -14,6 +14,24 @@ impl Media {
             Media::Animated { thumbnail_url, .. } => Some(thumbnail_url),
         }
     }
+
+    /// A smaller variant of this media's file (used as the fallback when the
+    /// primary URL or upload exceeds Telegram's size limits). None when no
+    /// smaller variant exists (videos, animated gifs).
+    pub fn smaller_url(&self) -> Option<&str> {
+        match self {
+            Media::Illustration {
+                url,
+                fallback_url,
+                thumbnail_url,
+                ..
+            } => fallback_url
+                .as_deref()
+                .or(thumbnail_url.as_deref())
+                .filter(|smaller| *smaller != url),
+            Media::Video { .. } | Media::Animated { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
