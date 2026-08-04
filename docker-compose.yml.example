@@ -16,6 +16,7 @@ services:
     networks: [proxy]
     labels:
       - 'com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy=true'
+    container_name: nginx-proxy
 
   acme-companion:
     image: nginxproxy/acme-companion
@@ -29,6 +30,7 @@ services:
       - ./nginx-html:/usr/share/nginx/html:rw
       - ./nginx-acme:/etc/acme.sh
     networks: [proxy]
+    container_name: acme-companion
     depends_on:
       - nginx-proxy
 
@@ -54,6 +56,8 @@ services:
     volumes:
       - ./data:/app/data
     networks: [proxy]
+    depends_on:
+      - nginx-proxy
     container_name: tgxmb
 
 networks:

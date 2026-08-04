@@ -72,7 +72,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 | `crates/x-media/src/site/pixiv/api.rs` | OAuth token exchange (hardcoded app client id/secret), access-token cache, ugoira zip→MP4 via ffmpeg in `spawn_blocking` |
 | `Dockerfile` | Multi-stage: cached dep layer via stub sources + `touch *.rs` mtime hack, static ffmpeg from ffmpeg.martin-riedl.de (`FFMPEG_URL` arg, `unzip -t` integrity check), `debian:bookworm-slim` runtime, entrypoint |
 | `docker-entrypoint.sh` | Privilege drop: `useradd` with `LOCAL_USER_ID` (default 9001) + `setpriv` (no gosu on bookworm-slim) |
-| `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored). Ships nginx-proxy + acme-companion: webhook mode needs TLS termination in front (teloxide's axum listener is HTTP-only; `WEBHOOK_CERT` only feeds `set_webhook`), bot exposes `VIRTUAL_HOST`/`VIRTUAL_PORT` on the shared `proxy` network, no host port |
+| `docker-compose.yml.example` | Deployment env reference (real `docker-compose.yml` is gitignored). Ships nginx-proxy + acme-companion: webhook mode needs TLS termination in front (teloxide's axum listener is HTTP-only; `WEBHOOK_CERT` only feeds `set_webhook`), bot exposes `VIRTUAL_HOST`/`VIRTUAL_PORT` on the shared `proxy` network, no host port; container names `nginx-proxy`/`acme-companion`/`tgxmb`, start order via `depends_on` (proxy → acme → bot) |
 | `.github/workflows/docker.yml` | CI: build+push to Docker Hub on tag `v*`/master; **no test step**; buildx gha cache (`cache-from`/`cache-to`, scope `tgxmb-build`, `mode=max`) so cargo deps + ffmpeg layers are restored across runs |
 | `README.md` | Feature docs + command table (Chinese) |
 
