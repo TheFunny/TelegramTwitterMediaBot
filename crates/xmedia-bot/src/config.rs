@@ -41,8 +41,14 @@ impl Config {
     let webhook_url = env::var("WEBHOOK_URL").ok().and_then(|s| s.parse().ok());
     let webhook_listen = env::var("WEBHOOK_LISTEN").ok().and_then(|s| s.parse().ok());
     let webhook_port = env::var("WEBHOOK_PORT").ok().and_then(|s| s.parse().ok());
-    let webhook_cert = env::var("WEBHOOK_CERT").ok();
-    let webhook_secret_token = env::var("WEBHOOK_SECRET_TOKEN").ok();
+    // Empty strings count as unset (e.g. `-e WEBHOOK_CERT=` to disable a
+    // value that would otherwise come from `.env`).
+    let webhook_cert = env::var("WEBHOOK_CERT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let webhook_secret_token = env::var("WEBHOOK_SECRET_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
 
         Config {
             admin_ids,

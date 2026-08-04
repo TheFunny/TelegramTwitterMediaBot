@@ -96,7 +96,8 @@ async fn main() {
             .webhook_url
             .clone()
             .expect("WEBHOOK_URL is not set");
-        bot.set_webhook(url.clone()).await.unwrap();
+        // `webhooks::axum` calls set_webhook itself (with the full options,
+        // secret token included) — no explicit registration here.
         let listen = CONFIG.webhook_listen.expect("WEBHOOK_LISTEN is not set");
         let port = CONFIG.webhook_port.expect("WEBHOOK_PORT is not set");
         let mut options = webhooks::Options::new((listen, port).into(), url);
