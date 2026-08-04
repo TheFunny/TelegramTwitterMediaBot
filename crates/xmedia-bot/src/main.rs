@@ -1,7 +1,8 @@
 use dotenv::dotenv;
 use teloxide::dptree::endpoint;
+use teloxide::stop::StopToken;
 use teloxide::types::{ChatId, InputFile, MessageId};
-use teloxide::update_listeners::webhooks;
+use teloxide::update_listeners::{self, webhooks, UpdateListener};
 use teloxide::prelude::*;
 use tokio::sync::watch;
 use x_media::site;
@@ -13,6 +14,24 @@ mod send;
 mod state;
 
 use handlers::{CHAT_STORE, CONFIG, TASK_QUEUE};
+
+/// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc
+/// handler (SIGINT only) never sees — without this the process would die
+/// before the graceful shutdown below (admin notice, queue drain). Stopping
+/// the token unwinds the dispatcher exactly like Ctrl+C does.
+#[cfg(unix)]
+fn spawn_sigterm_handler(stop_token: StopToken) {
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        sigterm.recv().await;
+        log::info!("SIGTERM received, stopping the dispatcher");
+        stop_token.stop();
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_sigterm_handler(_stop_token: StopToken) {}
 
 #[tokio::main]
 async fn main() {
@@ -108,20 +127,36 @@ async fn main() {
             options = options.secret_token(secret.clone());
         }
 
+        let mut listener = webhooks::axum(bot.clone(), options)
+            .await
+            .expect("Failed to create webhook listener");
+        let stop_token = listener.stop_token();
+        spawn_sigterm_handler(stop_token);
+
         dispatcher
             .dispatch_with_listener(
-                webhooks::axum(bot.clone(), options)
-                    .await
-                    .expect("Failed to create webhook listener"),
+                listener,
                 LoggingErrorHandler::with_custom_text("Error from update listener"),
             )
             .await;
     } else {
         log::info!("running in polling mode");
-        dispatcher.dispatch().await;
+        // Same listener `dispatch()` builds internally — using
+        // `dispatch_with_listener` just exposes its stop token so SIGTERM can
+        // unwind the dispatcher before the graceful shutdown below.
+        let mut listener = update_listeners::polling_default(bot.clone()).await;
+        let stop_token = listener.stop_token();
+        spawn_sigterm_handler(stop_token);
+
+        dispatcher
+            .dispatch_with_listener(
+                listener,
+                LoggingErrorHandler::with_custom_text("Error from update listener"),
+            )
+            .await;
     }
 
-    // Graceful stop (Ctrl+C): stop the sweep, notify the admin, drain the queue.
+    // Graceful stop (Ctrl+C / SIGTERM): stop the sweep, notify the admin, drain the queue.
     log::info!("Stopping bot");
     let _ = stop_tx.send(true);
     if let Some(admin) = CONFIG.admin_ids.first() {

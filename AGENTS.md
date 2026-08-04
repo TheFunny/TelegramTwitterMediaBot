@@ -65,7 +65,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 
 | File | Why it matters |
 |---|---|
-| `crates/xmedia-bot/src/main.rs` | Startup sequence, webhook vs polling, graceful shutdown (ctrlc → sweep stop → admin msg → queue stop) |
+| `crates/xmedia-bot/src/main.rs` | Startup sequence, webhook vs polling, graceful shutdown (SIGINT via teloxide ctrlc / SIGTERM via `stop_token` for docker, → sweep stop → admin msg → queue stop) |
 | `crates/xmedia-bot/src/handlers.rs` | `CHAT_STORE`/`TASK_QUEUE`/`CONFIG` singletons (open `data/task_queue.db` **relative to CWD**); command dispatch; URL extraction; retry enqueue |
 | `crates/xmedia-bot/src/send.rs` | Constants `MAX_MEDIA_GROUP = 9`, `MAX_UPLOAD_BYTES = 10 MiB`; fallback chain; `classify_request_error` |
 | `crates/x-media/src/site/mod.rs` | Dispatcher, `Fetched`/`FetchError`, shared `CLIENT`, `download_media` (adds `Referer: https://www.pixiv.net/` for `pximg.net` hotlink protection) |
