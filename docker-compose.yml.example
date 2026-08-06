@@ -7,9 +7,8 @@ services:
       - '443:443'
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
-      - ./nginx-certs:/etc/nginx/certs:ro
-      - ./nginx-vhost.d:/etc/nginx/vhost.d:ro
-      - ./nginx-html:/usr/share/nginx/html:ro
+      - certs:/etc/nginx/certs:ro
+      - html:/usr/share/nginx/html:ro
     networks: [proxy]
     labels:
       - 'com.github.nginx-proxy.nginx=true'
@@ -22,10 +21,9 @@ services:
       DEFAULT_EMAIL: 'admin@yoursfunny.top'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./nginx-certs:/etc/nginx/certs:rw
-      - ./nginx-vhost.d:/etc/nginx/vhost.d:rw
-      - ./nginx-html:/usr/share/nginx/html:rw
-      - ./nginx-acme:/etc/acme.sh
+      - certs:/etc/nginx/certs:rw
+      - html:/usr/share/nginx/html:rw
+      - acme:/etc/acme.sh
     networks: [proxy]
     container_name: acme-companion
     depends_on:
@@ -57,6 +55,11 @@ services:
     depends_on:
       - nginx-proxy
     container_name: tgxmb
+
+volumes:
+  certs:
+  html:
+  acme:
 
 networks:
   proxy:

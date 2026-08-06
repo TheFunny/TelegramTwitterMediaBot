@@ -53,8 +53,8 @@ Let's Encrypt 支持为公网 IP 签发证书（2026 年起可用，有效期约
      command: daemon
      restart: always
      volumes:
-       - ./nginx-certs:/acme.sh
-       - ./nginx-html:/usr/share/nginx/html
+       - certs:/acme.sh
+       - html:/usr/share/nginx/html
        - /var/run/docker.sock:/var/run/docker.sock:ro
      networks: [proxy]
    ```
@@ -112,6 +112,6 @@ Telegram 只接受 443/80/88/8443 端口。
 
 ## 备注
 
-- 数据持久化于 `data/task_queue.db`，容器部署需挂载该目录
+- 数据持久化于 `data/task_queue.db`，compose 部署使用 bind mount `./data`（保持目录形式便于备份）
 - 运行环境需安装 ffmpeg（Docker 镜像已内置）
 - 测试：`cargo test --workspace`
