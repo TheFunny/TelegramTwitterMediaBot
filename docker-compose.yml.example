@@ -11,7 +11,7 @@ services:
       - html:/usr/share/nginx/html:ro
     networks: [proxy]
     labels:
-      - 'com.github.nginx-proxy.nginx=true'
+      - 'com.github.nginx-proxy.nginx'
     container_name: nginx-proxy
 
   acme-companion:
