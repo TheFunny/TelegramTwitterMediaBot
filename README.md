@@ -39,16 +39,37 @@ NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTE
 
 **有域名**
 1. DNS A 记录指向服务器
-2. compose 里设 `VIRTUAL_HOST`、`LETSENCRYPT_HOST` 为域名，`WEBHOOK_URL` 设为 `https://域名/`
-3. 证书自动签发与续期，无需手动处理
+2. compose 里设 `VIRTUAL_HOST`、`WEBHOOK_URL` 为域名，并取消注释 `ACME_HOST`（设为域名）
+3. acme-companion 自动签发与续期证书，无需手动处理
 
 **只有 IP**
-1. 生成自签证书（PEM 格式，见第 3 步）：
-   `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout nginx-certs/default.key -out nginx-certs/default.crt`
-2. compose 里 nginx-proxy 设 `DEFAULT_HOST`，bot 设 `WEBHOOK_CERT: './cert/cert.pem'`（须与代理所服务的为同一张证书）
-3. 证书必须是 PEM 编码（ASCII BASE64，以 `-----BEGIN CERTIFICATE-----` 开头）—— Telegram 只接受该格式；若现有证书是 DER 二进制，转换：
-   `openssl x509 -in cert.der -inform DER -out cert.pem -outform PEM`
-   （私钥同理：`openssl rsa -in key.der -inform DER -out key.pem -outform PEM`）
+Let's Encrypt 支持为公网 IP 签发证书（2026 年起可用，有效期约 7 天，须 `shortlived` profile）。用 [acme.sh](https://github.com/acmesh-official/acme.sh) 自动签发与续期，无需手动证书：
+
+1. compose 里增加 acme-ip 服务（签发 + 每日检查自动续期）：
+   ```yaml
+   acme-ip:
+     image: neilpang/acme.sh
+     container_name: acme-ip
+     command: daemon
+     restart: always
+     volumes:
+       - ./nginx-certs:/acme.sh
+       - ./nginx-html:/usr/share/nginx/html
+       - /var/run/docker.sock:/var/run/docker.sock:ro
+     networks: [proxy]
+   ```
+2. 首次签发（把 `<SERVER_IP>` 换成服务器公网 IP，IPv6 同样支持，多个 `-d` 可并列）：
+   ```bash
+   docker compose exec acme-ip acme.sh --issue --server letsencrypt \
+     -d <SERVER_IP> --cert-profile shortlived --days 3 \
+     --webroot /usr/share/nginx/html \
+     --install-cert --cert-file /acme.sh/<SERVER_IP>.crt \
+     --key-file /acme.sh/<SERVER_IP>.key \
+     --reloadcmd "curl --unix-socket /var/run/docker.sock -X POST http://localhost/containers/nginx-proxy/kill?signal=HUP"
+   ```
+3. compose 里设 `VIRTUAL_HOST: '<SERVER_IP>'`、`WEBHOOK_URL: 'https://<SERVER_IP>/'`，无需 `WEBHOOK_CERT`。续期由 acme.sh daemon 自动完成（`--days 3` = 每 3 天续一次，证书 7 天有效有缓冲），续期成功后自动 HUP 通知 nginx-proxy 加载新证书。
+
+   限制：证书约 7 天有效；验证仅支持 http-01/tls-alpn-01（80 端口必须公网可达）；不支持 DNS-01、私有 IP 与 IP 段；同一 IP 集合每 168 小时限签发 5 张。建议先用 `--server letsencrypt_test` 试签，成功后再切正式服务器。
 
 Telegram 只接受 443/80/88/8443 端口。
 
@@ -66,13 +87,12 @@ Telegram 只接受 443/80/88/8443 端口。
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |
 | `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由 |
 | `VIRTUAL_PORT` | bot 容器内监听端口，nginx-proxy 的转发目标 |
-| `LETSENCRYPT_HOST` | 设为域名时由 acme-companion 自动签发/续期证书 |
+| `ACME_HOST` | 域名部署：设为域名时由 acme-companion 自动签发/续期证书 |
 | `DEFAULT_HOST` | nginx-proxy 将未知 Host 的请求路由到该 vhost（IP 访问时需要） |
 | `DEFAULT_EMAIL` | acme-companion 证书通知邮箱 |
 | `WEBHOOK` | `true` 启用 webhook 模式（默认轮询） |
 | `WEBHOOK_LISTEN` / `WEBHOOK_PORT` | bot 容器内监听地址/端口 |
-| `WEBHOOK_URL` | 对外公网 HTTPS 地址（`https://域名/`） |
-| `WEBHOOK_CERT` | 自签证书路径（仅 IP 路径需要，须为 PEM 且与代理所服务的一致） |
+| `WEBHOOK_URL` | 对外公网 HTTPS 地址（`https://域名/` 或 `https://IP/`） |
 | `WEBHOOK_SECRET_TOKEN` | 更新校验令牌（`X-Telegram-Bot-Api-Secret-Token`） |
 
 </details>
