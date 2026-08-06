@@ -101,12 +101,14 @@ Telegram 只接受 443/80/88/8443 端口。
 
 | 命令 | 说明 |
 |---|---|
-| `/set_forward_channel <频道>` | 设置转发频道 |
+| `/start` | 欢迎语 |
+| `/help` | 查看全部命令及用法（即本文档的命令表） |
+| `/set_forward_channel <频道>` | 设置转发频道，参数为 `@频道名` 或频道 ID；设置后发送的媒体消息会自动转发到该频道 |
 | `/remove_forward_channel` | 取消转发频道 |
-| `/edit_before_forward` | 开关转发前编辑 |
-| `/set_template <名称>` | 将回复的消息（含 `[]`）保存为模板 |
-| `/set_format <站点> <格式>` | 自定义 caption 格式（占位符 `{url}` `{title}` `{tags}` 等） |
-| `/bot_dict` | 查看聊天状态 |
+| `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
+| `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
+| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/bot_dict` | 查看当前聊天状态（调试用） |
 
 链接处理仅限私聊；命令在任意聊天可用。
 

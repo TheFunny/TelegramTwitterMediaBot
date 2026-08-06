@@ -34,23 +34,23 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 static URL_TASKS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "snake_case", description = "")]
+#[command(rename_rule = "snake_case", description = "Turn X/Pixiv/Bluesky links into media messages")]
 enum Command {
-    #[command(description = "")]
+    #[command(description = "Get started")]
     Start,
-    #[command(description = "")]
+    #[command(description = "Show command help")]
     Help,
-    #[command(description = "", parse_with = "split")]
+    #[command(description = "Set forward channel (@channel or ID)", parse_with = "split")]
     SetForwardChannel(String),
-    #[command(description = "")]
+    #[command(description = "Remove forward channel")]
     RemoveForwardChannel,
-    #[command(description = "")]
+    #[command(description = "Toggle edit-before-forward")]
     EditBeforeForward,
-    #[command(description = "", parse_with = "split")]
+    #[command(description = "Reply with [] to save as template", parse_with = "split")]
     SetTemplate(String),
-    #[command(description = "")]
+    #[command(description = "Show chat state (debug)")]
     BotDict,
-    #[command(description = "", parse_with = "split")]
+    #[command(description = "Set site caption format", parse_with = "split")]
     SetFormat(String),
 }
 
