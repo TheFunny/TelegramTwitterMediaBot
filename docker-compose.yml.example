@@ -5,9 +5,6 @@ services:
     ports:
       - '80:80'
       - '443:443'
-    # Bare-IP access only. Uncomment to enable.
-    # environment:
-    #   DEFAULT_HOST: 'bot.example.com'
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
       - ./nginx-certs:/etc/nginx/certs:ro
@@ -42,18 +39,12 @@ services:
       TELOXIDE_TOKEN: ''
       BOT_ADMIN: ''
       PIXIV_REFRESH_TOKEN: ''
-      # Optional: x.com session cookie (auth_token) — fetches NSFW tweets
-      # that the public syndication endpoint withholds.
       TWITTER_AUTH_TOKEN: ''
       EDIT_MESSAGE_TTL_SECONDS: '86400'
-      # Link-result cache TTL (default 604800 = 7 days).
       LINK_CACHE_TTL_SECONDS: '604800'
       RUST_LOG: 'info'
-      # 域名部署：替换为你的域名；纯 IP 部署：替换为服务器公网 IP（需按
-      # README「只有 IP」一节签发 acme IP 证书）。
       VIRTUAL_HOST: '<YOUR_DOMAIN>'
       VIRTUAL_PORT: '8443'
-      # 域名部署：取消注释并设为域名，由 acme-companion 自动签发/续期证书。
       # ACME_HOST: 'your.domain.com'
       WEBHOOK: 'true'
       WEBHOOK_LISTEN: '0.0.0.0'
