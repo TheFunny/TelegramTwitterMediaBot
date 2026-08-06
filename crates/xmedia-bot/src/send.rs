@@ -5,6 +5,7 @@
 
 use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
+use crate::photo::{self, PhotoPrep, MAX_UPLOAD_BYTES};
 use crate::queue::QueueError;
 use crate::state::{EditMessage, unix_now};
 use rand::Rng;
@@ -210,9 +211,6 @@ pub async fn invalidate_cache(task: &Task) {
 }
 
 pub const MAX_MEDIA_GROUP: usize = 9;
-/// Upload cap (bytes): files above this are not uploaded; the bot falls back
-/// to a smaller media URL instead.
-pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024; // 10485760
 
 /// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items.
 pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
@@ -229,12 +227,15 @@ pub fn retry_delay_seconds(attempts: u32) -> f64 {
 /// these errors are handled by the download-and-reupload fallback, NOT by a
 /// queue retry (resending the URL cannot succeed).
 pub fn is_media_fetch_failure(e: &ApiError) -> bool {
-    const MARKERS: [&str; 5] = [
+    const MARKERS: [&str; 6] = [
         "webpage_media_empty",
         "media_empty",
         "empty_web_media",
         "webpage_curl_failed",
         "timeout",
+        // Oversized photos (width + height > 10000 px) are rejected on URL
+        // sends too; route them to the download-and-resize fallback.
+        "PHOTO_INVALID_DIMENSIONS",
     ];
     let description = e.to_string().to_lowercase();
     MARKERS.iter().any(|marker| description.contains(marker))
@@ -437,6 +438,13 @@ enum FallbackError {
     MediaTooLarge,
 }
 
+/// Brings a downloaded photo within Telegram's limits via the pure-Rust
+/// chain in [`crate::photo`] (no ffmpeg): dimension cap / upload cap
+/// exceeded photos are decoded, downscaled with Lanczos3, PNG bit depth
+/// reduced (>24-bit → 24-bit RGB, ≤24-bit untouched) and transcoded to JPEG
+/// only if still too big. Anything that cannot be fixed falls back to the
+/// item's smaller URL.
+///
 /// Downloads one media item to a temp file (deleted on drop). Network errors
 /// are retryable; size over the upload cap and other download errors are not.
 async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, FallbackError> {
@@ -458,7 +466,11 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
             });
         }
     };
-    if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+    // Photos are downloaded even over the cap so `prepare_photo` can
+    // downscale / transcode them; only videos/animations short-circuit.
+    if !matches!(item, MediaItemPayload::Photo { .. })
+        && bytes.len() as u64 > MAX_UPLOAD_BYTES
+    {
         return Err(FallbackError::MediaTooLarge);
     }
     let ext = sniff_ext(&bytes);
@@ -531,11 +543,13 @@ async fn send_batch_via_upload(
     for (i, item) in batch.iter().enumerate() {
         let item_caption = if i == 0 { caption } else { None };
         // Size check before downloading/uploading: over the cap, use the
-        // smaller URL instead of the file.
+        // smaller URL instead of the file. Photos are exempt — they are
+        // downloaded and processed (downscale / PNG→JPEG) before uploading.
         let too_large = match x_media::site::media_size(item_url(item)).await {
             Ok(Some(size)) => size > MAX_UPLOAD_BYTES,
             _ => false,
         };
+        let too_large = too_large && !matches!(item, MediaItemPayload::Photo { .. });
         let media = if too_large {
             match item.fallback_url() {
                 Some(url) => match media_from_url(item, url, item_caption) {
@@ -553,9 +567,46 @@ async fn send_batch_via_upload(
         } else {
             match download_to_temp(item).await {
                 Ok(file) => {
-                    let path = file.path().to_path_buf();
-                    files.push(file);
-                    media_from_file(item, path, item_caption)
+                    // Telegram rejects photos wider+taller than 10000 px
+                    // combined (PHOTO_INVALID_DIMENSIONS): downscale the
+                    // downloaded file before uploading; photos that cannot be
+                    // brought within the limits degrade to the smaller URL.
+                    if matches!(item, MediaItemPayload::Photo { .. }) {
+                        // CPU-heavy (decode/resize/encode): run off the async
+                        // executor thread.
+                        let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file))
+                            .await
+                            .map_err(|e| FallbackError::Permanent {
+                                message: format!("photo worker panicked: {e}"),
+                            })?
+                            .map_err(|message| FallbackError::Permanent { message })?;
+                        match prep {
+                            PhotoPrep::Upload(upload) => {
+                                let path = upload.path().to_path_buf();
+                                files.push(upload);
+                                media_from_file(item, path, item_caption)
+                            }
+                            PhotoPrep::UseFallback => match item.fallback_url() {
+                                Some(url) => match media_from_url(item, url, item_caption) {
+                                    Ok(media) => media,
+                                    Err(message) => {
+                                        return Err(FallbackError::Permanent { message });
+                                    }
+                                },
+                                None => {
+                                    return Err(FallbackError::Permanent {
+                                        message:
+                                            "photo dimensions exceed Telegram limits and no smaller variant is available"
+                                                .into(),
+                                    });
+                                }
+                            },
+                        }
+                    } else {
+                        let path = file.path().to_path_buf();
+                        files.push(file);
+                        media_from_file(item, path, item_caption)
+                    }
                 }
                 Err(FallbackError::MediaTooLarge) => match item.fallback_url() {
                     Some(url) => match media_from_url(item, url, item_caption) {
@@ -1084,6 +1135,14 @@ pub async fn dead_letter_notify(payload: serde_json::Value, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_photo_boundary() {
+        // The empirical Telegram limit: sum 10000 passes, 10001 fails.
+        assert!(crate::photo::PHOTO_MAX_DIMENSION_SUM == 10000);
+        assert!(6100 + 3900 <= crate::photo::PHOTO_MAX_DIMENSION_SUM);
+        assert!(6300 + 3730 > crate::photo::PHOTO_MAX_DIMENSION_SUM);
+    }
 
     #[test]
     fn chunk_media_items_sizes() {

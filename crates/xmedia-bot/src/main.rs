@@ -10,6 +10,7 @@ use x_media::site;
 mod config;
 mod handlers;
 mod link_cache;
+mod photo;
 mod queue;
 mod send;
 mod state;
