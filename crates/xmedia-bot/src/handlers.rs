@@ -388,9 +388,9 @@ async fn execute_command(
     Ok(())
 }
 
-/// `""` for one, `"ies"` for anything else — "1 entry" / "2 entries".
+/// `"y"` for one, `"ies"` for anything else — "1 entry" / "2 entries".
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "ies" }
+    if n == 1 { "y" } else { "ies" }
 }
 
 /// For locally produced media (encoded ugoira MP4) the thumbnail URL is a
