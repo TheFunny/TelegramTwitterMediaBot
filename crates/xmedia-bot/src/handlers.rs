@@ -393,6 +393,15 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "y" } else { "ies" }
 }
 
+/// Registers the bot's command list with Telegram so clients show it in the
+/// `/` menu (Bot API `setMyCommands`).
+pub async fn register_commands(bot: &Bot) -> Result<(), RequestError> {
+    let commands = Command::bot_commands();
+    bot.set_my_commands(commands.clone()).await?;
+    log::info!("registered {} commands", commands.len());
+    Ok(())
+}
+
 /// For locally produced media (encoded ugoira MP4) the thumbnail URL is a
 /// hotlink-protected remote URL Telegram may not fetch; let Telegram generate
 /// its own thumbnail instead.

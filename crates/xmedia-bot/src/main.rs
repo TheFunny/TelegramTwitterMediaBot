@@ -44,6 +44,11 @@ async fn main() {
 
     let bot = Bot::from_env();
 
+    // Register the command list with Telegram (client `/` menu).
+    if let Err(e) = handlers::register_commands(&bot).await {
+        log::warn!("failed to register commands: {e}");
+    }
+
     log::info!(
         "config: {} admin(s), edit-message TTL {}s",
         CONFIG.admin_ids.len(),
