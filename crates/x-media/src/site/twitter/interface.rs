@@ -158,12 +158,10 @@ impl Tweet {
     pub fn from_syndication_json(raw_json: &str) -> Result<Self, serde_json::Error> {
         let json: model::SyndicationTweet = serde_json::from_str(raw_json)?;
         let id = json.id_str;
-        // Strip the appended media short link first, then expand the remaining
-        // t.co short links (the user's own URLs) to their real destinations.
-        let text = expand_links(
-            &strip_trailing_short_links(&json.text, json.display_text_range),
-            &json.entities.urls,
-        );
+        // Expand the user's t.co short links to their real destinations and
+        // strip the appended media short link, mirroring FxEmbed's linkFixer
+        // (no display_text_range arithmetic — see expand_links).
+        let text = expand_links(&json.text, &json.entities.urls);
         // `name` is the display name, `screen_name` the handle (Python's
         // vxtwitter mapping: author = display name, author_id = handle).
         let author = json.user.name;
@@ -204,43 +202,43 @@ impl Tweet {
     }
 }
 
-/// The raw syndication `text` ends with the appended media short link
-/// (" https://t.co/wmI8McgXul"). `display_text_range` marks the visible text;
-/// a regex strips any remaining trailing t.co link when the range is absent
-/// or a tweet ends in a URL short link.
-///
-/// X reports these indices in Unicode **code points**, not UTF-16 units
-/// (verified against GraphQL responses containing emoji: cutting an emoji
-/// tweet by UTF-16 units silently drops the character after the emoji).
-fn strip_trailing_short_links(text: &str, display_text_range: Option<[usize; 2]>) -> String {
-    let mut out = match display_text_range {
-        Some([start, end]) if start < end => {
-            text.chars().skip(start).take(end - start).collect()
-        }
-        _ => text.to_string(),
-    };
-    while TRAILING_TCO.is_match(&out) {
-        out = TRAILING_TCO.replace(&out, "").into_owned();
-    }
-    out
-}
-
-/// Trailing Twitter short link, optionally preceded by whitespace.
-static TRAILING_TCO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\s*https?://t\.co/[A-Za-z0-9]+$").unwrap()
-});
-
-/// Replaces every t.co short link that has an entity mapping with its
-/// expanded URL. Short links without a mapping stay untouched.
+/// Mirrors FxEmbed's `linkFixer` (link-fixer.ts): expand every t.co short
+/// link that has an entity mapping to its real destination, drop internal
+/// `x.com/i/web/status/…` plumbing links, then strip any remaining t.co
+/// short link (the appended media link and other unmapped short links).
+/// Pure content matching — no `display_text_range` arithmetic, so the
+/// endpoint's inconsistent index units (UTF-16 vs code points, see the
+/// deleted `strip_trailing_short_links`) never matter.
 fn expand_links(text: &str, urls: &[model::SyndicationEntityUrl]) -> String {
     let mut out = text.to_string();
     for entity in urls {
-        if let Some(expanded) = &entity.expanded_url {
-            out = out.replace(&entity.url, expanded);
-        }
+        let Some(expanded) = &entity.expanded_url else {
+            continue;
+        };
+        let replacement = if WEB_STATUS_URL.is_match(expanded) {
+            ""
+        } else {
+            expanded
+        };
+        out = out.replace(&entity.url, replacement);
     }
-    out
+    TCO_LINK.replace_all(&out, "").into_owned()
 }
+
+/// Internal x.com page links (reply / quote plumbing) expand to
+/// `x.com/i/web/status/<id>`; FxEmbed drops them — the tweet's own content
+/// already carries the information.
+static WEB_STATUS_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^https://(?:x\.com|twitter\.com)/i/web/status/\w+").unwrap()
+});
+
+/// A t.co short link, optionally preceded by a space. Any leftover
+/// occurrence (unmapped — e.g. the appended media link) is removed,
+/// mirroring FxEmbed. Real short-link codes are 10 alphanumerics; the
+/// length-agnostic class keeps fixtures and hypothetical odd lengths safe.
+static TCO_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r" ?https?://t\.co/[A-Za-z0-9]+").unwrap()
+});
 
 /// pbs.twimg.com serves a reduced default size without size params; `name=orig`
 /// returns the original file (fxtwitter used to hand out the original
@@ -411,13 +409,12 @@ mod tests {
 
     #[test]
     fn syndication_text_strips_trailing_media_short_link() {
-        // Real syndication shape: the media short link sits after the visible
-        // text, and display_text_range marks where it begins.
+        // Real syndication shape: the appended media short link sits after the
+        // visible text; the unmapped t.co link is stripped by content.
         let raw = serde_json::json!({
             "__typename": "Tweet",
             "id_str": "1",
             "text": "hello world https://t.co/abc123",
-            "display_text_range": [0, 11],
             "user": { "name": "N", "screen_name": "h" },
             "mediaDetails": []
         });
@@ -427,8 +424,31 @@ mod tests {
     }
 
     #[test]
-    fn syndication_text_strips_trailing_short_link_without_range() {
-        // No display_text_range: the regex fallback removes the trailing link.
+    fn syndication_text_strips_trailing_link_regardless_of_index_units() {
+        // Real tweet 2084567054481571919: the visible text is 30 code points
+        // but 41 UTF-16 units, and the two endpoints historically reported
+        // display_text_range in different units (UTF-16 on syndication, code
+        // points on GraphQL). The FxEmbed-style content-based strip ignores
+        // the range entirely, so the appended media link is removed for any
+        // response shape.
+        let text = "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero https://t.co/XnIi83EkEB";
+        let visible = "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero";
+        let raw = serde_json::json!({
+            "__typename": "Tweet",
+            "id_str": "2084567054481571919",
+            "text": text,
+            "user": { "name": "N", "screen_name": "h" },
+            "mediaDetails": []
+        });
+        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        assert_eq!(tweet.text, visible, "left a partial link");
+        assert!(!tweet.caption().contains("t.co"));
+    }
+
+    #[test]
+    fn syndication_text_strips_trailing_short_link_without_entities() {
+        // No URL entities at all: the leftover t.co link is stripped by the
+        // content regex.
         let raw = serde_json::json!({
             "__typename": "Tweet",
             "id_str": "1",
@@ -449,7 +469,6 @@ mod tests {
             "__typename": "Tweet",
             "id_str": "1",
             "text": "Test Tweet with @mentionThis $twtr https://t.co/RzmrQ6wAzD #hashtag https://t.co/9r69akA484",
-            "display_text_range": [0, 67],
             "user": { "name": "N", "screen_name": "h" },
             "entities": {
                 "urls": [{
@@ -469,25 +488,47 @@ mod tests {
     }
 
     #[test]
-    fn syndication_text_keeps_unmapped_short_links() {
-        // No entity mapping for the embedded link: it stays as-is. Only the
-        // trailing media link is stripped.
+    fn syndication_text_strips_unmapped_short_links() {
+        // FxEmbed parity: short links without an entity mapping (appended
+        // media link, embedded unmapped links) are stripped, not kept.
         let raw = serde_json::json!({
             "__typename": "Tweet",
             "id_str": "1",
             "text": "check https://t.co/abc123 #tag https://t.co/def456",
-            "display_text_range": [0, 30],
             "user": { "name": "N", "screen_name": "h" },
             "mediaDetails": []
         });
         let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        assert_eq!(tweet.text, "check https://t.co/abc123 #tag");
+        assert_eq!(tweet.text, "check #tag");
     }
 
     #[test]
-    fn syndication_text_utf16_display_range_keeps_multibyte() {
-        // display_text_range is in UTF-16 units; a Japanese text must not be
-        // sliced by UTF-8 bytes.
+    fn syndication_text_drops_internal_web_status_links() {
+        // FxEmbed parity: a mapped link expanding to an internal
+        // x.com/i/web/status/... page (reply/quote plumbing) is removed
+        // instead of being shown.
+        let raw = serde_json::json!({
+            "__typename": "Tweet",
+            "id_str": "1",
+            "text": "see https://t.co/xyz1234567 for context",
+            "user": { "name": "N", "screen_name": "h" },
+            "entities": {
+                "urls": [{
+                    "url": "https://t.co/xyz1234567",
+                    "expanded_url": "https://x.com/i/web/status/9876543210",
+                    "display_url": "x.com/i/web/status/9876543210"
+                }]
+            },
+            "mediaDetails": []
+        });
+        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        assert_eq!(tweet.text, "see  for context");
+        assert!(!tweet.caption().contains("t.co"));
+    }
+
+    #[test]
+    fn syndication_text_keeps_multibyte_text() {
+        // Text-only tweet: no short links, the multibyte text is untouched.
         let text = "コミティア落ちたので、明日は行きません。🙏ごめんなさい";
         let units: Vec<u16> = text.encode_utf16().collect();
         assert_eq!(units.len(), 28);
@@ -495,7 +536,6 @@ mod tests {
             "__typename": "Tweet",
             "id_str": "1",
             "text": text,
-            "display_text_range": [0, 28],
             "user": { "name": "N", "screen_name": "h" },
             "mediaDetails": []
         });

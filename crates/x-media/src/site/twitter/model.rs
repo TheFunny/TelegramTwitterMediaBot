@@ -9,10 +9,6 @@ pub struct SyndicationTweet {
     pub user: SyndicationUser,
     #[serde(default)]
     pub possibly_sensitive: Option<bool>,
-    /// Visible-text span; the raw `text` field has the appended media short
-    /// link after it. Indices are Unicode code points (not UTF-16 units).
-    #[serde(default, rename = "display_text_range")]
-    pub display_text_range: Option<[usize; 2]>,
     #[serde(default)]
     pub entities: SyndicationEntities,
     #[serde(default, rename = "mediaDetails")]

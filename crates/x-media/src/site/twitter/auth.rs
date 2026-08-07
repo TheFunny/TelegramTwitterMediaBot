@@ -228,7 +228,6 @@ fn to_syndication_shape(tweet: &Value) -> Option<Value> {
             "screen_name": user.get("screen_name"),
         },
         "possibly_sensitive": legacy.get("possibly_sensitive"),
-        "display_text_range": legacy.get("display_text_range"),
         "entities": legacy.get("entities"),
         "mediaDetails": legacy.pointer("/extended_entities/media"),
     }))
@@ -251,12 +250,12 @@ mod tests {
             "legacy": {
                 "id_str": "2083868672721039569",
                 "full_text": "nsfw content https://t.co/abc123",
-                "display_text_range": [0, 12],
                 "possibly_sensitive": true,
                 "entities": {
-                    "urls": [
-                        { "url": "https://t.co/abc123", "expanded_url": "https://example.com/x" }
-                    ]
+                    // The appended media link lives in extended_entities.media,
+                    // not entities.urls, so it has no expansion mapping and the
+                    // content-based strip removes it.
+                    "urls": []
                 },
                 "extended_entities": {
                     "media": [
@@ -319,7 +318,7 @@ mod tests {
             other => panic!("expected video, got {other:?}"),
         }
         assert_eq!(fetched.source_url, "https://x.com/nsfw_author/status/2083868672721039569");
-        // display_text_range cuts the trailing t.co link.
+        // The appended media short link (no URL-entity mapping) is stripped.
         assert_eq!(fetched.title, "nsfw content");
     }
 
