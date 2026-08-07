@@ -8,7 +8,7 @@
 //! [`Config::link_cache_ttl`]; a stale entry is dropped lazily on read and
 //! by the periodic prune in `main`.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -143,6 +143,24 @@ impl LinkCache {
             }
         }
     }
+
+    /// Deletes one entry (by normalized cache key) or the whole cache when
+    /// `key` is `None`. Returns how many rows were removed.
+    pub async fn clear(&self, key: Option<&str>) -> usize {
+        let key = key.map(str::to_string);
+        let result = crate::db::with_conn(&self.db_path, move |conn| match &key {
+            Some(key) => conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key]),
+            None => conn.execute("DELETE FROM link_cache", []),
+        })
+        .await;
+        match result {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("link cache clear failed: {e}");
+                0
+            }
+        }
+    }
 }
 
 fn now_f64() -> f64 {
@@ -192,14 +210,21 @@ mod tests {
         // Force the row into the past so a 1s TTL expires it.
         {
             let conn = Connection::open(dir.path().join("c.db")).unwrap();
-            conn.execute(
-                "UPDATE link_cache SET created_at = created_at - 100",
-                [],
-            )
-            .unwrap();
+            conn.execute("UPDATE link_cache SET created_at = created_at - 100", [])
+                .unwrap();
         }
-        assert!(cache.get("twitter:1", Duration::from_secs(1)).await.is_none());
-        assert!(cache.get("twitter:1", Duration::from_secs(3600)).await.is_none());
+        assert!(
+            cache
+                .get("twitter:1", Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+        assert!(
+            cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -209,14 +234,60 @@ mod tests {
         cache.put("twitter:1", &entry()).await;
         cache.put("pixiv:2", &entry()).await;
         cache.remove("twitter:1").await;
-        assert!(cache.get("twitter:1", Duration::from_secs(3600)).await.is_none());
-        assert!(cache.get("pixiv:2", Duration::from_secs(3600)).await.is_some());
+        assert!(
+            cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+        assert!(
+            cache
+                .get("pixiv:2", Duration::from_secs(3600))
+                .await
+                .is_some()
+        );
         {
             let conn = Connection::open(dir.path().join("c.db")).unwrap();
             conn.execute("UPDATE link_cache SET created_at = created_at - 100", [])
                 .unwrap();
         }
         assert_eq!(cache.prune(Duration::from_secs(1)).await, 1);
-        assert!(cache.get("pixiv:2", Duration::from_secs(3600)).await.is_none());
+        assert!(
+            cache
+                .get("pixiv:2", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_one_entry_or_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        cache.put("twitter:1", &entry()).await;
+        cache.put("pixiv:2", &entry()).await;
+        // By key: only the matching row is removed.
+        assert_eq!(cache.clear(Some("twitter:1")).await, 1);
+        assert!(
+            cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+        assert!(
+            cache
+                .get("pixiv:2", Duration::from_secs(3600))
+                .await
+                .is_some()
+        );
+        // Whole cache: nothing left; removing an absent key deletes 0 rows.
+        assert_eq!(cache.clear(None).await, 1);
+        assert!(
+            cache
+                .get("pixiv:2", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+        assert_eq!(cache.clear(None).await, 0);
     }
 }

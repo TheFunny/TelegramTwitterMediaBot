@@ -5,20 +5,19 @@ use crate::send::{self, MediaItemPayload, Task};
 use crate::state::{ChatData, ChatStore, unix_now};
 use std::collections::HashSet;
 use std::sync::LazyLock;
+use teloxide::RequestError;
 use teloxide::prelude::*;
-use tokio::sync::Semaphore;
 use teloxide::types::{
     CallbackQuery, ChatAction, ChatId, ChatKind, InlineQuery, InlineQueryResult,
     InlineQueryResultMpeg4Gif, InlineQueryResultPhoto, InlineQueryResultVideo, Message,
     MessageEntityKind, MessageId, ParseMode, Recipient, ReplyParameters,
 };
 use teloxide::utils::command::BotCommands;
-use teloxide::RequestError;
+use tokio::sync::Semaphore;
 use x_media::media::Media;
 
-pub static CHAT_STORE: LazyLock<ChatStore> = LazyLock::new(|| {
-    ChatStore::open("data/task_queue.db").expect("failed to open chat store")
-});
+pub static CHAT_STORE: LazyLock<ChatStore> =
+    LazyLock::new(|| ChatStore::open("data/task_queue.db").expect("failed to open chat store"));
 pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
     LazyLock::new(|| PersistentTaskQueue::new("data/task_queue.db"));
 pub static LINK_CACHE: LazyLock<LinkCache> =
@@ -34,24 +33,38 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 static URL_TASKS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "snake_case", description = "Turn X/Pixiv/Bluesky links into media messages")]
+#[command(
+    rename_rule = "snake_case",
+    description = "Turn X/Pixiv/Bluesky links into media messages"
+)]
 enum Command {
     #[command(description = "Get started")]
     Start,
     #[command(description = "Show command help")]
     Help,
-    #[command(description = "Set forward channel (@channel or ID)", parse_with = "split")]
+    #[command(
+        description = "Set forward channel (@channel or ID)",
+        parse_with = "split"
+    )]
     SetForwardChannel(String),
     #[command(description = "Remove forward channel")]
     RemoveForwardChannel,
     #[command(description = "Toggle edit-before-forward")]
     EditBeforeForward,
-    #[command(description = "Reply with [] to save as template", parse_with = "split")]
+    #[command(
+        description = "Reply with [] to save as template",
+        parse_with = "split"
+    )]
     SetTemplate(String),
     #[command(description = "Show chat state (debug)")]
     BotDict,
     #[command(description = "Set site caption format", parse_with = "split")]
     SetFormat(String),
+    #[command(
+        description = "Clear link cache (admin; optional URL, else all)",
+        parse_with = "split"
+    )]
+    ClearCache(String),
 }
 
 async fn reply<T>(bot: Bot, message: Message, text: T) -> Result<Message, RequestError>
@@ -197,7 +210,11 @@ async fn set_forward_channel_handler(
     Ok(channel_id)
 }
 
-async fn execute_command(bot: &Bot, message: &Message, command: Command) -> Result<(), RequestError> {
+async fn execute_command(
+    bot: &Bot,
+    message: &Message,
+    command: Command,
+) -> Result<(), RequestError> {
     match command {
         Command::Start => {
             bot.send_message(message.chat.id, "Hello!").await?;
@@ -215,7 +232,8 @@ async fn execute_command(bot: &Bot, message: &Message, command: Command) -> Resu
                     "Add successfully.".to_string()
                 }
                 Err(SetForwardChannelError::EmptyParameter) => {
-                    "Receive empty parameter.\nYou should enter a channel id or username".to_string()
+                    "Receive empty parameter.\nYou should enter a channel id or username"
+                        .to_string()
                 }
                 Err(SetForwardChannelError::NotChannel) => {
                     "Given id / username is not a channel".to_string()
@@ -292,7 +310,9 @@ async fn execute_command(bot: &Bot, message: &Message, command: Command) -> Resu
         Command::SetFormat(arg) => {
             let chat_id = message.chat.id.0;
             let (site, format) = match arg.split_once(char::is_whitespace) {
-                Some((site, format)) if !format.trim().is_empty() => (site.trim(), format.trim().to_string()),
+                Some((site, format)) if !format.trim().is_empty() => {
+                    (site.trim(), format.trim().to_string())
+                }
                 _ => {
                     reply(
                         bot.clone(),
@@ -317,8 +337,60 @@ async fn execute_command(bot: &Bot, message: &Message, command: Command) -> Resu
             CHAT_STORE.set(chat_id, &chat_data).await;
             reply(bot.clone(), message.clone(), "Format set.").await?;
         }
+        Command::ClearCache(arg) => {
+            let sender_id = message
+                .from
+                .as_ref()
+                .map(|user| user.id.0 as i64)
+                .unwrap_or(-1);
+            if !CONFIG.admin_ids.contains(&sender_id) {
+                reply(bot.clone(), message.clone(), "Admin only.").await?;
+                return Ok(());
+            }
+            let arg = arg.trim();
+            if arg.is_empty() {
+                let removed = LINK_CACHE.clear(None).await;
+                log::info!("cache cleared by {sender_id}: {removed} entries");
+                reply(
+                    bot.clone(),
+                    message.clone(),
+                    format!("Cleared {removed} cached entr{}.", plural(removed)),
+                )
+                .await?;
+            } else {
+                let key = match x_media::site::cache_key(arg) {
+                    Some(key) => key,
+                    None => {
+                        reply(
+                            bot.clone(),
+                            message.clone(),
+                            "Unrecognized link. Use a twitter/x, pixiv or bsky post URL.",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                let removed = LINK_CACHE.clear(Some(&key)).await;
+                log::info!("cache entry cleared by {sender_id}: {key} ({removed} rows)");
+                reply(
+                    bot.clone(),
+                    message.clone(),
+                    format!(
+                        "Cleared cache for {arg} ({} entr{}).",
+                        removed,
+                        plural(removed)
+                    ),
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
+}
+
+/// `""` for one, `"ies"` for anything else — "1 entry" / "2 entries".
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "ies" }
 }
 
 /// For locally produced media (encoded ugoira MP4) the thumbnail URL is a
@@ -383,7 +455,10 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
             log::info!("sent {} message(s) for {url}", message_ids.len());
             send::post_send_actions(&bot, task, message_ids).await;
         }
-        Err(send::SendError::Retryable { delay_seconds, task }) => {
+        Err(send::SendError::Retryable {
+            delay_seconds,
+            task,
+        }) => {
             log::info!("send for {url} failed, queued for retry in {delay_seconds:.1}s");
             enqueue_retry(task, delay_seconds).await;
             let _ = reply(bot, message.clone(), "Send failed. Task queued for retry.").await;
@@ -444,7 +519,10 @@ fn build_send_task(
 
 async fn url_media(bot: Bot, message: &Message, url: &str) {
     let chat_id = message.chat.id.0;
-    if let Err(e) = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await {
+    if let Err(e) = bot
+        .send_chat_action(ChatId(chat_id), ChatAction::Typing)
+        .await
+    {
         log::error!("send_chat_action failed: {e}");
     }
 
@@ -520,7 +598,12 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
             log::error!("fetch {url}: {e}");
-            let _ = reply(bot, message.clone(), "Failed to fetch media from this link.").await;
+            let _ = reply(
+                bot,
+                message.clone(),
+                "Failed to fetch media from this link.",
+            )
+            .await;
         }
         Ok(Some(fetched)) => {
             if fetched.media.is_empty() {
@@ -542,8 +625,9 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
             let caption = fetched.caption_with(&format);
             // Raw render data for the link cache; the send fills in the
             // Telegram file ids and persists the entry.
-            let cache_data = fetched.render_fields().map(|(author, author_url, title, tags)| {
-                CachedPost {
+            let cache_data = fetched
+                .render_fields()
+                .map(|(author, author_url, title, tags)| CachedPost {
                     url: fetched.source_url.clone(),
                     caption: fetched.caption.clone(),
                     title: title.to_string(),
@@ -552,8 +636,7 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
                     tags: tags.to_string(),
                     sensitive: fetched.sensitive,
                     media: vec![],
-                }
-            });
+                });
             let items: Vec<MediaItemPayload> = fetched
                 .media
                 .iter()
@@ -583,7 +666,10 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
         .text()
         .map(|t| if t.len() > 120 { &t[..120] } else { t })
         .unwrap_or("<no text>");
-    log::info!("message from {sender} in {} (private={is_private}): {text_preview}", message.chat.id);
+    log::info!(
+        "message from {sender} in {} (private={is_private}): {text_preview}",
+        message.chat.id
+    );
     // URL/edit flows only run in private chats; commands run in any chat.
     if is_private && edit_message_handler(&bot, &message).await {
         return respond(());
@@ -653,8 +739,8 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
                             thumbnail,
                             fetched.title.clone(),
                         )
-                            .caption(caption)
-                            .parse_mode(ParseMode::Html),
+                        .caption(caption)
+                        .parse_mode(ParseMode::Html),
                     ),
                     Media::Animated { .. } => InlineQueryResult::Mpeg4Gif(
                         InlineQueryResultMpeg4Gif::new(id, url, thumbnail)
@@ -686,7 +772,10 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
     let mut chat_data = CHAT_STORE.get(chat_id).await;
     let edit = chat_data.edit_message.get(&prompt_message_id).cloned();
     let Some(edit) = edit else {
-        log::info!("callback from {}: no edit record for prompt {prompt_message_id}", chat_id);
+        log::info!(
+            "callback from {}: no edit record for prompt {prompt_message_id}",
+            chat_id
+        );
         bot.answer_callback_query(callback_query_id)
             .text("Expired")
             .await?;
@@ -705,7 +794,10 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
     let Some(data) = data else {
         return respond(());
     };
-    log::info!("callback from {} on prompt {prompt_message_id}: {data}", chat_id);
+    log::info!(
+        "callback from {} on prompt {prompt_message_id}: {data}",
+        chat_id
+    );
     if data == "forward" {
         match chat_data.forward_channel_id {
             Some(channel_id) => {
@@ -731,7 +823,10 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                         chat_data.edit_message.remove(&prompt_message_id);
                         CHAT_STORE.set(chat_id, &chat_data).await;
                     }
-                    Err(send::SendError::Retryable { delay_seconds, task }) => {
+                    Err(send::SendError::Retryable {
+                        delay_seconds,
+                        task,
+                    }) => {
                         log::info!("forward queued for retry in {delay_seconds:.1}s");
                         enqueue_retry(task, delay_seconds).await;
                         bot.answer_callback_query(callback_query_id)
