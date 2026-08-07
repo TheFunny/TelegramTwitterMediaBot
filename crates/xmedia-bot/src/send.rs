@@ -5,20 +5,19 @@
 
 use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
-use crate::photo::{self, PhotoPrep, MAX_UPLOAD_BYTES};
+use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
 use crate::queue::QueueError;
 use crate::state::{EditMessage, unix_now};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tempfile::NamedTempFile;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMedia,
-    InputMediaAnimation, InputMediaPhoto, InputMediaVideo, Message, MessageId, ParseMode,
-    ReplyParameters,
+    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMedia, InputMediaAnimation,
+    InputMediaPhoto, InputMediaVideo, Message, MessageId, ParseMode, ReplyParameters,
 };
 use teloxide::{ApiError, RequestError};
+use tempfile::NamedTempFile;
 use x_media::site::FetchError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -111,16 +110,18 @@ pub enum Task {
 impl Task {
     fn cache_data(&self) -> Option<&CachedPost> {
         match self {
-            Task::SendMediaSequence { cache_data, .. }
-            | Task::SendAnimation { cache_data, .. } => cache_data.as_ref(),
+            Task::SendMediaSequence { cache_data, .. } | Task::SendAnimation { cache_data, .. } => {
+                cache_data.as_ref()
+            }
             Task::ForwardMessages { .. } => None,
         }
     }
 
     fn source_url(&self) -> Option<&str> {
         match self {
-            Task::SendMediaSequence { source_url, .. }
-            | Task::SendAnimation { source_url, .. } => Some(source_url),
+            Task::SendMediaSequence { source_url, .. } | Task::SendAnimation { source_url, .. } => {
+                Some(source_url)
+            }
             Task::ForwardMessages { .. } => None,
         }
     }
@@ -138,9 +139,10 @@ fn file_id_of_message(message: &Message, item: &MediaItemPayload) -> Option<Stri
     match item {
         // `photo()` returns all sizes, smallest first — the largest carries
         // the file id of the sent media.
-        MediaItemPayload::Photo { .. } => {
-            message.photo().and_then(|sizes| sizes.last()).map(|p| p.file.id.to_string())
-        }
+        MediaItemPayload::Photo { .. } => message
+            .photo()
+            .and_then(|sizes| sizes.last())
+            .map(|p| p.file.id.to_string()),
         MediaItemPayload::Video { .. } => message.video().map(|v| v.file.id.to_string()),
         MediaItemPayload::Animation { .. } => message.animation().map(|a| a.file.id.to_string()),
     }
@@ -214,7 +216,10 @@ pub const MAX_MEDIA_GROUP: usize = 9;
 
 /// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items.
 pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
-    items.chunks(MAX_MEDIA_GROUP).map(|chunk| chunk.to_vec()).collect()
+    items
+        .chunks(MAX_MEDIA_GROUP)
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }
 
 /// Exponential backoff with jitter, capped at 30s.
@@ -250,31 +255,41 @@ pub fn is_size_error(e: &ApiError) -> bool {
         return true;
     }
     let description = e.to_string().to_lowercase();
-    ["too large", "too big"].iter().any(|marker| description.contains(marker))
+    ["too large", "too big"]
+        .iter()
+        .any(|marker| description.contains(marker))
 }
 
 /// Task-free classification of a Telegram request error. The callers attach
 /// the (updated) task when building a [`SendError`].
 pub enum Classification {
-    Retryable { delay_seconds: f64 },
-    Permanent { message: String },
+    Retryable {
+        delay_seconds: f64,
+    },
+    Permanent {
+        message: String,
+    },
     /// Handled by the download fallback, not a queue retry.
     MediaFetchFailure,
 }
 
 pub fn classify_request_error(e: &RequestError) -> Classification {
     match e {
-        RequestError::RetryAfter(seconds) => {
-            Classification::Retryable { delay_seconds: seconds.seconds() as f64 }
-        }
+        RequestError::RetryAfter(seconds) => Classification::Retryable {
+            delay_seconds: seconds.seconds() as f64,
+        },
         RequestError::Network(_) => Classification::Retryable {
             delay_seconds: retry_delay_seconds(0),
         },
         RequestError::Api(api) if is_media_fetch_failure(api) => Classification::MediaFetchFailure,
-        RequestError::Api(api) => Classification::Permanent { message: api.to_string() },
+        RequestError::Api(api) => Classification::Permanent {
+            message: api.to_string(),
+        },
         RequestError::MigrateToChatId(_)
         | RequestError::InvalidJson { .. }
-        | RequestError::Io(_) => Classification::Permanent { message: e.to_string() },
+        | RequestError::Io(_) => Classification::Permanent {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -390,9 +405,9 @@ fn build_media_group(
         .map(|(i, item)| {
             let item_caption = if i == 0 { caption } else { None };
             Ok(match item {
-                MediaItemPayload::Photo {
-                    has_spoiler, ..
-                } => photo_media(item.input_file()?, item_caption, *has_spoiler),
+                MediaItemPayload::Photo { has_spoiler, .. } => {
+                    photo_media(item.input_file()?, item_caption, *has_spoiler)
+                }
                 MediaItemPayload::Video {
                     has_spoiler,
                     thumbnail,
@@ -404,9 +419,9 @@ fn build_media_group(
                     }
                     video
                 }
-                MediaItemPayload::Animation {
-                    has_spoiler, ..
-                } => animation_media(item.input_file()?, item_caption, *has_spoiler),
+                MediaItemPayload::Animation { has_spoiler, .. } => {
+                    animation_media(item.input_file()?, item_caption, *has_spoiler)
+                }
             })
         })
         .collect()
@@ -431,8 +446,12 @@ fn sniff_ext(bytes: &[u8]) -> &'static str {
 }
 
 enum FallbackError {
-    Retryable { delay_seconds: f64 },
-    Permanent { message: String },
+    Retryable {
+        delay_seconds: f64,
+    },
+    Permanent {
+        message: String,
+    },
     /// The downloaded file exceeds the upload cap; the caller falls back to
     /// the item's smaller URL.
     MediaTooLarge,
@@ -468,9 +487,7 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
     };
     // Photos are downloaded even over the cap so `prepare_photo` can
     // downscale / transcode them; only videos/animations short-circuit.
-    if !matches!(item, MediaItemPayload::Photo { .. })
-        && bytes.len() as u64 > MAX_UPLOAD_BYTES
-    {
+    if !matches!(item, MediaItemPayload::Photo { .. }) && bytes.len() as u64 > MAX_UPLOAD_BYTES {
         return Err(FallbackError::MediaTooLarge);
     }
     let ext = sniff_ext(&bytes);
@@ -628,14 +645,16 @@ async fn send_batch_via_upload(
     }
     let result = bot
         .send_media_group(ChatId(chat_id), items)
-        .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply())
+        .reply_parameters(
+            ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply(),
+        )
         .await;
     match result {
         Ok(messages) => Ok(messages),
         Err(e) => Err(match classify_request_error(&e) {
-            Classification::Retryable { delay_seconds } => FallbackError::Retryable {
-                delay_seconds,
-            },
+            Classification::Retryable { delay_seconds } => {
+                FallbackError::Retryable { delay_seconds }
+            }
             Classification::Permanent { message } => FallbackError::Permanent { message },
             Classification::MediaFetchFailure => FallbackError::Permanent {
                 message: "upload failed".into(),
@@ -702,7 +721,11 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
     let fresh_send = *batch_index == 0 && sent.is_empty();
     for idx in *batch_index..media_batches.len() {
         let batch = &media_batches[idx];
-        let caption = if idx == 0 { Some(caption.as_str()) } else { None };
+        let caption = if idx == 0 {
+            Some(caption.as_str())
+        } else {
+            None
+        };
         let items = match build_media_group(batch, caption) {
             Ok(items) => items,
             Err(message) => {
@@ -714,7 +737,9 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
         };
         match bot
             .send_media_group(ChatId(chat_id), items)
-            .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply())
+            .reply_parameters(
+                ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply(),
+            )
             .await
         {
             Ok(messages) => {
@@ -726,9 +751,7 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                 collect_file_ids(&messages, batch, &mut cached_media);
                 sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
             }
-            Err(RequestError::Api(api))
-                if is_media_fetch_failure(&api) || is_size_error(&api) =>
-            {
+            Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
                 log::info!(
                     "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
                     batch.first().map(item_url).unwrap_or("?")
@@ -779,7 +802,9 @@ async fn send_animation_inner(
         .send_animation(ChatId(chat_id), file)
         .caption(caption)
         .parse_mode(ParseMode::Html)
-        .reply_parameters(ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply());
+        .reply_parameters(
+            ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply(),
+        );
     if spoiler {
         request = request.has_spoiler(true);
     }
@@ -802,9 +827,7 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
     let reply_to = *reply_to_message_id;
     let (media_url, has_spoiler) = match animation {
         MediaItemPayload::Animation {
-            media,
-            has_spoiler,
-            ..
+            media, has_spoiler, ..
         } => (media, *has_spoiler),
         MediaItemPayload::Photo { .. } | MediaItemPayload::Video { .. } => {
             unreachable!("SendAnimation carries an Animation payload")
@@ -812,19 +835,20 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
     };
     let url_file = match input_file_for(media_url) {
         Ok(file) => file,
-        Err(message) => return Err(SendError::Permanent { message, task: task.clone() }),
+        Err(message) => {
+            return Err(SendError::Permanent {
+                message,
+                task: task.clone(),
+            });
+        }
     };
-    match send_animation_inner(bot, chat_id, reply_to, caption, has_spoiler, url_file)
-        .await
-    {
+    match send_animation_inner(bot, chat_id, reply_to, caption, has_spoiler, url_file).await {
         Ok(message) => {
             let id = message.id.0 as i64;
             cache_animation_send(task, &message).await;
             Ok(vec![id])
         }
-        Err(RequestError::Api(api))
-            if is_media_fetch_failure(&api) || is_size_error(&api) =>
-        {
+        Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
             log::info!(
                 "Telegram could not fetch animation URL, downloading and reuploading: {}",
                 media_url
@@ -872,21 +896,24 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                                 Err(e) => Err(classify_to_send_error(&e, task.clone())),
                             }
                         }
-                        Err(message) => {
-                            Err(SendError::Permanent { message, task: task.clone() })
-                        }
+                        Err(message) => Err(SendError::Permanent {
+                            message,
+                            task: task.clone(),
+                        }),
                     },
                     None => Err(SendError::Permanent {
                         message: "media too large".into(),
                         task: task.clone(),
                     }),
                 },
-                Err(FallbackError::Retryable { delay_seconds }) => {
-                    Err(SendError::Retryable { delay_seconds, task: task.clone() })
-                }
-                Err(FallbackError::Permanent { message }) => {
-                    Err(SendError::Permanent { message, task: task.clone() })
-                }
+                Err(FallbackError::Retryable { delay_seconds }) => Err(SendError::Retryable {
+                    delay_seconds,
+                    task: task.clone(),
+                }),
+                Err(FallbackError::Permanent { message }) => Err(SendError::Permanent {
+                    message,
+                    task: task.clone(),
+                }),
             }
         }
         Err(e) => Err(classify_to_send_error(&e, task.clone())),
@@ -910,7 +937,11 @@ pub async fn forward_messages(bot: &Bot, task: &Task) -> Result<(), SendError> {
         .map(|id| MessageId(*id as i32))
         .collect::<Vec<_>>();
     match bot
-        .copy_messages(ChatId(*to_chat_id), ChatId(*from_chat_id), message_ids.clone())
+        .copy_messages(
+            ChatId(*to_chat_id),
+            ChatId(*from_chat_id),
+            message_ids.clone(),
+        )
         .await
     {
         Ok(_) => {
@@ -944,12 +975,18 @@ pub fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardM
 
 /// Notifies a chat about a dead-lettered task (skips when `notify_chat_id` is
 /// absent).
-pub async fn notify_failure(bot: &Bot, chat_id: Option<i64>, message_id: Option<i64>, message: &str) {
+pub async fn notify_failure(
+    bot: &Bot,
+    chat_id: Option<i64>,
+    message_id: Option<i64>,
+    message: &str,
+) {
     let Some(chat_id) = chat_id else { return };
     let mut request = bot.send_message(ChatId(chat_id), message);
     if let Some(message_id) = message_id {
-        request = request
-            .reply_parameters(ReplyParameters::new(MessageId(message_id as i32)).allow_sending_without_reply());
+        request = request.reply_parameters(
+            ReplyParameters::new(MessageId(message_id as i32)).allow_sending_without_reply(),
+        );
     }
     if let Err(e) = request.await {
         log::error!("failed to notify about failed task: {e}");
@@ -959,38 +996,45 @@ pub async fn notify_failure(bot: &Bot, chat_id: Option<i64>, message_id: Option<
 /// After a successful send: either open the edit-before-forward prompt or
 /// forward to the configured channel (with retry/queue handling).
 pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
-    let (chat_id, reply_to, source_url, edit_before_forward, forward_channel_id, notify_chat_id, notify_message_id) =
-        match task {
-            Task::SendMediaSequence {
-                chat_id,
-                reply_to_message_id,
-                source_url,
-                edit_before_forward,
-                forward_channel_id,
-                notify_chat_id,
-                notify_message_id,
-                ..
-            }
-            | Task::SendAnimation {
-                chat_id,
-                reply_to_message_id,
-                source_url,
-                edit_before_forward,
-                forward_channel_id,
-                notify_chat_id,
-                notify_message_id,
-                ..
-            } => (
-                *chat_id,
-                *reply_to_message_id,
-                source_url.clone(),
-                *edit_before_forward,
-                *forward_channel_id,
-                *notify_chat_id,
-                *notify_message_id,
-            ),
-            Task::ForwardMessages { .. } => return,
-        };
+    let (
+        chat_id,
+        reply_to,
+        source_url,
+        edit_before_forward,
+        forward_channel_id,
+        notify_chat_id,
+        notify_message_id,
+    ) = match task {
+        Task::SendMediaSequence {
+            chat_id,
+            reply_to_message_id,
+            source_url,
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            notify_message_id,
+            ..
+        }
+        | Task::SendAnimation {
+            chat_id,
+            reply_to_message_id,
+            source_url,
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            notify_message_id,
+            ..
+        } => (
+            *chat_id,
+            *reply_to_message_id,
+            source_url.clone(),
+            *edit_before_forward,
+            *forward_channel_id,
+            *notify_chat_id,
+            *notify_message_id,
+        ),
+        Task::ForwardMessages { .. } => return,
+    };
 
     if edit_before_forward {
         let mut chat_data = CHAT_STORE.get(chat_id).await;
@@ -1027,7 +1071,10 @@ pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
     }
 
     if let Some(channel_id) = forward_channel_id {
-        log::info!("forwarding {} message(s) to channel {channel_id}", message_ids.len());
+        log::info!(
+            "forwarding {} message(s) to channel {channel_id}",
+            message_ids.len()
+        );
         let forward_task = Task::ForwardMessages {
             from_chat_id: chat_id,
             to_chat_id: channel_id,
@@ -1037,7 +1084,10 @@ pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
         };
         match forward_messages(bot, &forward_task).await {
             Ok(()) => {}
-            Err(SendError::Retryable { delay_seconds, task }) => {
+            Err(SendError::Retryable {
+                delay_seconds,
+                task,
+            }) => {
                 let payload = serde_json::to_value(task).expect("task serializes");
                 let run_after = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1077,7 +1127,10 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
         Task::SendMediaSequence { .. } | Task::SendAnimation { .. } => {
             let message_ids = match send_media_or_animation(&bot, &task).await {
                 Ok(ids) => ids,
-                Err(SendError::Retryable { delay_seconds, task }) => {
+                Err(SendError::Retryable {
+                    delay_seconds,
+                    task,
+                }) => {
                     return Err(QueueError::Retryable {
                         delay_seconds,
                         payload: serde_json::to_value(task).expect("task serializes"),
@@ -1096,7 +1149,10 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
         }
         Task::ForwardMessages { .. } => match forward_messages(&bot, &task).await {
             Ok(()) => Ok(()),
-            Err(SendError::Retryable { delay_seconds, task }) => Err(QueueError::Retryable {
+            Err(SendError::Retryable {
+                delay_seconds,
+                task,
+            }) => Err(QueueError::Retryable {
                 delay_seconds,
                 payload: serde_json::to_value(task).expect("task serializes"),
             }),
@@ -1151,7 +1207,11 @@ mod tests {
         assert_eq!(chunk_media_items((0..10).collect()).len(), 2);
         assert_eq!(chunk_media_items((0..25).collect()).len(), 3);
         assert_eq!(chunk_media_items((0..25).collect())[2].len(), 7);
-        assert!(chunk_media_items((0..25).collect()).iter().all(|c| c.len() <= 9));
+        assert!(
+            chunk_media_items((0..25).collect())
+                .iter()
+                .all(|c| c.len() <= 9)
+        );
     }
 
     #[test]
@@ -1175,7 +1235,10 @@ mod tests {
             let api = ApiError::Unknown(description.to_string());
             assert!(is_media_fetch_failure(&api), "{description}");
         }
-        for description in ["Bad Request: message is not modified", "Forbidden: bot was blocked by the user"] {
+        for description in [
+            "Bad Request: message is not modified",
+            "Forbidden: bot was blocked by the user",
+        ] {
             let api = ApiError::Unknown(description.to_string());
             assert!(!is_media_fetch_failure(&api), "{description}");
         }
@@ -1196,7 +1259,10 @@ mod tests {
             assert!(is_size_error(&api), "{description}");
         }
         // Unrelated errors must not match.
-        for description in ["Bad Request: WEBPAGE_MEDIA_EMPTY", "Bad Request: message is not modified"] {
+        for description in [
+            "Bad Request: WEBPAGE_MEDIA_EMPTY",
+            "Bad Request: message is not modified",
+        ] {
             let api = ApiError::Unknown(description.to_string());
             assert!(!is_size_error(&api), "{description}");
         }
@@ -1205,9 +1271,16 @@ mod tests {
     #[test]
     fn media_item_payload_fallback_url_serde_default() {
         // Old queued payloads without the field deserialize with None.
-        let json = serde_json::json!({"kind": "photo", "media": "https://a/b.jpg", "has_spoiler": false});
+        let json =
+            serde_json::json!({"kind": "photo", "media": "https://a/b.jpg", "has_spoiler": false});
         let photo: MediaItemPayload = serde_json::from_value(json).unwrap();
-        assert!(matches!(photo, MediaItemPayload::Photo { fallback_url: None, .. }));
+        assert!(matches!(
+            photo,
+            MediaItemPayload::Photo {
+                fallback_url: None,
+                ..
+            }
+        ));
         assert_eq!(photo.fallback_url(), None);
     }
 
@@ -1286,7 +1359,13 @@ mod tests {
                 assert_eq!(sent_message_ids, vec![11, 12]);
                 assert_eq!(forward_channel_id, Some(333));
                 assert_eq!(media_batches.len(), 2);
-                assert!(matches!(media_batches[0][0], MediaItemPayload::Photo { has_spoiler: true, .. }));
+                assert!(matches!(
+                    media_batches[0][0],
+                    MediaItemPayload::Photo {
+                        has_spoiler: true,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected SendMediaSequence, got {other:?}"),
         }

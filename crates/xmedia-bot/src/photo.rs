@@ -216,13 +216,15 @@ fn target_dims(w: u32, h: u32) -> (u32, u32) {
 /// RGB, Lanczos-downscale beyond the dimension cap, encode PNG — a PNG still
 /// over the upload cap afterwards becomes JPEG.
 fn prepare_png(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String> {
-    let (w, h, _bit_depth, color_type) =
-        parse_png_header(&bytes).ok_or("invalid PNG header")?;
+    let (w, h, _bit_depth, color_type) = parse_png_header(&bytes).ok_or("invalid PNG header")?;
     let size_over = bytes.len() as u64 > MAX_UPLOAD_BYTES;
     if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
         return Ok(PhotoPrep::Upload(file));
     }
-    log::info!("photo {w}x{h} ({_bit_depth:?} {color_type:?}, {} bytes) needs processing", bytes.len());
+    log::info!(
+        "photo {w}x{h} ({_bit_depth:?} {color_type:?}, {} bytes) needs processing",
+        bytes.len()
+    );
 
     let channels = output_channels(color_type);
     if (w as u64) * (h as u64) * channels as u64 > MAX_DECODE_BYTES {
@@ -238,7 +240,9 @@ fn prepare_png(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String>
     };
     let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
     decoder.set_transformations(transforms);
-    let mut reader = decoder.read_info().map_err(|e| format!("png decode: {e}"))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png decode: {e}"))?;
     let out_w = reader.info().width;
     let out_h = reader.info().height;
     let mut buf = vec![
@@ -457,7 +461,9 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let encoder = jpeg_encoder::Encoder::new(&mut bytes, 90);
-            encoder.encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb).unwrap();
+            encoder
+                .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
+                .unwrap();
         }
         let mut file = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
         std::io::Write::write_all(file.as_file_mut(), &bytes).unwrap();
@@ -485,7 +491,9 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let base = (x + y) * 255 / (w + h);
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let n = ((rng >> 33) % 11) as i32 - 5; // noise in [-5, 5]
                 let v = (base as i32 + n).clamp(0, 255) as u8;
                 data.extend_from_slice(&[v, v, v]);
@@ -499,7 +507,11 @@ mod tests {
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&data).unwrap();
         }
-        assert!(bytes.len() as u64 > MAX_UPLOAD_BYTES, "test needs a >10MiB PNG, got {}", bytes.len());
+        assert!(
+            bytes.len() as u64 > MAX_UPLOAD_BYTES,
+            "test needs a >10MiB PNG, got {}",
+            bytes.len()
+        );
 
         let mut file = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
         std::io::Write::write_all(file.as_file_mut(), &bytes).unwrap();

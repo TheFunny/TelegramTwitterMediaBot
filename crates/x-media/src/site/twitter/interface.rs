@@ -35,9 +35,7 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                     }
                 }
             } else {
-                log::info!(
-                    "tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media"
-                );
+                log::info!("tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media");
                 Ok(empty_fetched(url))
             }
         }
@@ -228,25 +226,22 @@ fn expand_links(text: &str, urls: &[model::SyndicationEntityUrl]) -> String {
 /// Internal x.com page links (reply / quote plumbing) expand to
 /// `x.com/i/web/status/<id>`; FxEmbed drops them — the tweet's own content
 /// already carries the information.
-static WEB_STATUS_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^https://(?:x\.com|twitter\.com)/i/web/status/\w+").unwrap()
-});
+static WEB_STATUS_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^https://(?:x\.com|twitter\.com)/i/web/status/\w+").unwrap());
 
 /// A t.co short link, optionally preceded by a space. Any leftover
 /// occurrence (unmapped — e.g. the appended media link) is removed,
 /// mirroring FxEmbed. Real short-link codes are 10 alphanumerics; the
 /// length-agnostic class keeps fixtures and hypothetical odd lengths safe.
-static TCO_LINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r" ?https?://t\.co/[A-Za-z0-9]+").unwrap()
-});
+static TCO_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r" ?https?://t\.co/[A-Za-z0-9]+").unwrap());
 
 /// pbs.twimg.com serves a reduced default size without size params; `name=orig`
 /// returns the original file (fxtwitter used to hand out the original
 /// directly, the syndication API does not). Non-twimg URLs pass through
 /// unchanged.
 fn original_twimg_url(url: &str) -> String {
-    if url.starts_with("https://pbs.twimg.com/")
-        && (url.ends_with(".jpg") || url.ends_with(".png"))
+    if url.starts_with("https://pbs.twimg.com/") && (url.ends_with(".jpg") || url.ends_with(".png"))
     {
         format!("{url}?name=orig")
     } else {
@@ -361,24 +356,23 @@ mod tests {
         match &fetched.media[0] {
             Media::Illustration { url, .. } => {
                 // Photo URL is rewritten to request the original file.
-                assert_eq!(
-                    url,
-                    "https://pbs.twimg.com/media/photo.jpg?name=orig"
-                );
+                assert_eq!(url, "https://pbs.twimg.com/media/photo.jpg?name=orig");
             }
             other => panic!("expected illustration, got {other:?}"),
         }
         match &fetched.media[1] {
-            Media::Video { url, thumbnail_url, .. } => {
+            Media::Video {
+                url, thumbnail_url, ..
+            } => {
                 assert_eq!(url, "https://video.twimg.com/v.mp4");
                 assert_eq!(thumbnail_url, "https://pbs.twimg.com/thumb.jpg");
             }
             other => panic!("expected video, got {other:?}"),
         }
         assert!(
-            fetched
-                .caption
-                .contains("<a href=\"https://x.com/author_handle\">Display Name</a>: a &amp; b &lt;c&gt;"),
+            fetched.caption.contains(
+                "<a href=\"https://x.com/author_handle\">Display Name</a>: a &amp; b &lt;c&gt;"
+            ),
             "caption: {}",
             fetched.caption
         );
@@ -587,6 +581,9 @@ mod tests {
     async fn live_fetch_deleted_tweet_is_not_found() {
         // Deleted tweet: the syndication endpoint answers with errors.
         let result = fetch("0").await;
-        assert!(matches!(result, Err(FetchError::NotFound)), "got {result:?}");
+        assert!(
+            matches!(result, Err(FetchError::NotFound)),
+            "got {result:?}"
+        );
     }
 }

@@ -1,9 +1,9 @@
 use dotenv::dotenv;
 use teloxide::dptree::endpoint;
+use teloxide::prelude::*;
 use teloxide::stop::StopToken;
 use teloxide::types::{ChatId, InputFile, MessageId};
-use teloxide::update_listeners::{self, webhooks, UpdateListener};
-use teloxide::prelude::*;
+use teloxide::update_listeners::{self, UpdateListener, webhooks};
 use tokio::sync::watch;
 use x_media::site;
 
@@ -75,7 +75,10 @@ async fn main() {
     }
 
     // Edit-expiry sweep: clears the prompt's buttons once the record expires.
-    log::info!("edit-expiry sweep: every 300s, ttl {}", CONFIG.edit_message_ttl.as_secs());
+    log::info!(
+        "edit-expiry sweep: every 300s, ttl {}",
+        CONFIG.edit_message_ttl.as_secs()
+    );
     let (stop_tx, stop_rx) = watch::channel(false);
     {
         let bot = bot.clone();
@@ -96,7 +99,10 @@ async fn main() {
                     // If the prompt was already deleted, this fails with a
                     // 400 "message to edit not found" — log and ignore.
                     if let Err(e) = bot
-                        .edit_message_reply_markup(ChatId(chat_id), MessageId(prompt_message_id as i32))
+                        .edit_message_reply_markup(
+                            ChatId(chat_id),
+                            MessageId(prompt_message_id as i32),
+                        )
                         .await
                     {
                         log::info!("edit-expiry sweep: prompt message gone: {e}");
@@ -118,10 +124,7 @@ async fn main() {
 
     if CONFIG.webhook_enabled {
         log::info!("running in webhook mode");
-        let url = CONFIG
-            .webhook_url
-            .clone()
-            .expect("WEBHOOK_URL is not set");
+        let url = CONFIG.webhook_url.clone().expect("WEBHOOK_URL is not set");
         // `webhooks::axum` calls set_webhook itself (with the full options,
         // secret token included) — no explicit registration here.
         let listen = CONFIG.webhook_listen.expect("WEBHOOK_LISTEN is not set");

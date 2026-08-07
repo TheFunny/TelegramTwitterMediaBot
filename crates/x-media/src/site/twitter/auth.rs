@@ -23,7 +23,7 @@
 
 use std::sync::LazyLock;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::site::FetchError;
 
@@ -40,8 +40,7 @@ static AUTH_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
 });
 
 /// Public "logged in" client token used by the x.com web app.
-const LOGGED_IN_BEARER: &str =
-    "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+const LOGGED_IN_BEARER: &str = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 /// `TweetDetail` query id (from nazurin; still valid as of 2026-08,
 /// corroborated by the current FxEmbed build — see module caveats).
@@ -103,9 +102,7 @@ pub fn enabled() -> bool {
 /// Fetches a tweet as the logged-in user via the private GraphQL API.
 /// Returns the syndication-shaped [`Tweet`] (media included for NSFW posts).
 pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
-    let token = AUTH_TOKEN
-        .as_deref()
-        .ok_or(FetchError::Sensitive)?;
+    let token = AUTH_TOKEN.as_deref().ok_or(FetchError::Sensitive)?;
     // 16 random bytes as 32 hex chars: X rejects ct0 values of any other
     // length with 403 code 353 ("matching csrf cookie and header").
     let ct0: String = (0..16)
@@ -136,11 +133,12 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     let text = response.text().await?;
     let json: Value = serde_json::from_str(&text)?;
     let result = parse_tweet_result(&json, id)?;
-    let syndication_shape = to_syndication_shape(&result)
-        .ok_or_else(|| FetchError::Json(serde_json::Error::io(std::io::Error::new(
+    let syndication_shape = to_syndication_shape(&result).ok_or_else(|| {
+        FetchError::Json(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "missing tweet fields in GraphQL response",
-        ))))?;
+        )))
+    })?;
     Tweet::from_syndication_json(&syndication_shape.to_string()).map_err(FetchError::Json)
 }
 
@@ -317,7 +315,10 @@ mod tests {
             }
             other => panic!("expected video, got {other:?}"),
         }
-        assert_eq!(fetched.source_url, "https://x.com/nsfw_author/status/2083868672721039569");
+        assert_eq!(
+            fetched.source_url,
+            "https://x.com/nsfw_author/status/2083868672721039569"
+        );
         // The appended media short link (no URL-entity mapping) is stripped.
         assert_eq!(fetched.title, "nsfw content");
     }
@@ -330,7 +331,10 @@ mod tests {
         let json = conversation(rt);
         let result = parse_tweet_result(&json, "2083868672721039569").unwrap();
         assert!(result.pointer("/legacy/retweeted_status_result").is_none());
-        assert_eq!(result.pointer("/legacy/id_str").unwrap(), "2083868672721039569");
+        assert_eq!(
+            result.pointer("/legacy/id_str").unwrap(),
+            "2083868672721039569"
+        );
     }
 
     #[test]

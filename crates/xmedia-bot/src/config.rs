@@ -24,39 +24,37 @@ pub struct Config {
 impl Config {
     pub fn load() -> Config {
         let admin_ids = env::var("BOT_ADMIN")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|part| part.trim().parse::<i64>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|part| part.trim().parse::<i64>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    let edit_message_ttl = env::var("EDIT_MESSAGE_TTL_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(86400));
+        let edit_message_ttl = env::var("EDIT_MESSAGE_TTL_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(86400));
 
-    let link_cache_ttl = env::var("LINK_CACHE_TTL_SECONDS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(7 * 24 * 3600));
+        let link_cache_ttl = env::var("LINK_CACHE_TTL_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(7 * 24 * 3600));
 
-    let webhook_enabled = env::var("WEBHOOK")
-        .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"));
-    let webhook_url = env::var("WEBHOOK_URL").ok().and_then(|s| s.parse().ok());
-    let webhook_listen = env::var("WEBHOOK_LISTEN").ok().and_then(|s| s.parse().ok());
-    let webhook_port = env::var("WEBHOOK_PORT").ok().and_then(|s| s.parse().ok());
-    // Empty strings count as unset (e.g. `-e WEBHOOK_CERT=` to disable a
-    // value that would otherwise come from `.env`).
-    let webhook_cert = env::var("WEBHOOK_CERT")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let webhook_secret_token = env::var("WEBHOOK_SECRET_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty());
+        let webhook_enabled = env::var("WEBHOOK")
+            .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"));
+        let webhook_url = env::var("WEBHOOK_URL").ok().and_then(|s| s.parse().ok());
+        let webhook_listen = env::var("WEBHOOK_LISTEN").ok().and_then(|s| s.parse().ok());
+        let webhook_port = env::var("WEBHOOK_PORT").ok().and_then(|s| s.parse().ok());
+        // Empty strings count as unset (e.g. `-e WEBHOOK_CERT=` to disable a
+        // value that would otherwise come from `.env`).
+        let webhook_cert = env::var("WEBHOOK_CERT").ok().filter(|s| !s.is_empty());
+        let webhook_secret_token = env::var("WEBHOOK_SECRET_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         Config {
             admin_ids,

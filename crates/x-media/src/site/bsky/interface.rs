@@ -5,9 +5,8 @@ use html_escape::encode_text;
 use regex::Regex;
 use std::sync::LazyLock;
 
-pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap()
-});
+pub static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap());
 
 pub fn enabled() -> bool {
     true
@@ -15,8 +14,14 @@ pub fn enabled() -> bool {
 
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     let caps = PATTERN.captures(url).ok_or(FetchError::NotFound)?;
-    let handle = caps.get(1).map(|m| m.as_str()).ok_or(FetchError::NotFound)?;
-    let rkey = caps.get(2).map(|m| m.as_str()).ok_or(FetchError::NotFound)?;
+    let handle = caps
+        .get(1)
+        .map(|m| m.as_str())
+        .ok_or(FetchError::NotFound)?;
+    let rkey = caps
+        .get(2)
+        .map(|m| m.as_str())
+        .ok_or(FetchError::NotFound)?;
     Ok(fetch(handle, rkey).await?.into())
 }
 
@@ -197,7 +202,10 @@ mod tests {
         }));
         let post = Post::from_json(&raw.to_string(), "3xxxx".into()).unwrap();
         let fetched: Fetched = post.into();
-        assert_eq!(fetched.source_url, "https://bsky.app/profile/user.bsky.social/post/3xxxx");
+        assert_eq!(
+            fetched.source_url,
+            "https://bsky.app/profile/user.bsky.social/post/3xxxx"
+        );
         assert_eq!(fetched.title, "hello <world>");
         assert_eq!(fetched.media.len(), 1);
         assert!(!fetched.sensitive);
@@ -246,11 +254,10 @@ mod tests {
 
     #[tokio::test]
     async fn live_fetch_with_photos() {
-        let fetched = fetch_from_url(
-            "https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m",
-        )
-        .await
-        .unwrap();
+        let fetched =
+            fetch_from_url("https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m")
+                .await
+                .unwrap();
         assert_eq!(
             fetched.source_url,
             "https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m"
@@ -260,9 +267,10 @@ mod tests {
 
     #[tokio::test]
     async fn live_fetch_smoke() {
-        let fetched = fetch_from_url("https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224")
-            .await
-            .unwrap();
+        let fetched =
+            fetch_from_url("https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224")
+                .await
+                .unwrap();
         assert_eq!(
             fetched.source_url,
             "https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224"

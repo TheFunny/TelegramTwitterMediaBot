@@ -10,8 +10,8 @@ use crate::site::FetchError;
 use std::env;
 use std::fmt;
 use std::io::{Cursor, Read};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 const AUTH_TOKEN_URL: &str = "https://oauth.secure.pixiv.net/auth/token";
@@ -127,7 +127,9 @@ impl PixivAPI {
     pub async fn illust_detail(&self, illust_id: u64) -> Result<IllustrationModel, PixivError> {
         let access_token = self.get_access_token().await?;
         let response = crate::site::CLIENT
-            .get(format!("{APP_API_URL}/v1/illust/detail?illust_id={illust_id}"))
+            .get(format!(
+                "{APP_API_URL}/v1/illust/detail?illust_id={illust_id}"
+            ))
             .header("app-os", "ios")
             .header("app-os-version", "14.6")
             .header("User-Agent", APP_USER_AGENT)
@@ -175,7 +177,9 @@ impl PixivAPI {
     pub async fn ugoira_metadata(&self, illust_id: u64) -> Result<UgoiraMetadataModel, PixivError> {
         let access_token = self.get_access_token().await?;
         let response = crate::site::CLIENT
-            .get(format!("{APP_API_URL}/v1/ugoira/metadata?illust_id={illust_id}"))
+            .get(format!(
+                "{APP_API_URL}/v1/ugoira/metadata?illust_id={illust_id}"
+            ))
             .header("app-os", "ios")
             .header("app-os-version", "14.6")
             .header("User-Agent", APP_USER_AGENT)
@@ -218,87 +222,89 @@ impl PixivAPI {
         let Some(zip_url) = zip_url else {
             return Ok(None);
         };
-        let zip_bytes = crate::site::download_media(&zip_url).await.map_err(|e| match e {
-            FetchError::Http(e) => PixivError::Http(e),
-            other => PixivError::Api(format!("frame zip download failed: {other}")),
-        })?;
+        let zip_bytes = crate::site::download_media(&zip_url)
+            .await
+            .map_err(|e| match e {
+                FetchError::Http(e) => PixivError::Http(e),
+                other => PixivError::Api(format!("frame zip download failed: {other}")),
+            })?;
         let frame_delays = metadata.frames.iter().map(|f| f.delay).collect::<Vec<_>>();
-        let result = tokio::task::spawn_blocking(
-            move || -> Result<(String, tempfile::TempDir), String> {
-            let frames_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-            let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let result =
+            tokio::task::spawn_blocking(move || -> Result<(String, tempfile::TempDir), String> {
+                let frames_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+                let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
 
-            // Extract frames to canonical zero-padded names; pixiv ugoira
-            // frames are uniformly jpg or png per artwork.
-            let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
-                .map_err(|e| format!("unzip: {e}"))?;
-            // pixiv ugoira frames are uniformly jpg or png per artwork; take
-            // the extension from the first entry.
-            let extension = if archive.len() > 0 {
-                let first_name = archive
-                    .by_index(0)
-                    .map_err(|e| e.to_string())?
-                    .name()
-                    .to_string();
-                first_name
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("jpg")
-                    .to_string()
-            } else {
-                "jpg".to_string()
-            };
-            let mut count = 0usize;
-            for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-                let path = frames_dir.path().join(format!("img_{count:05}.{extension}"));
-                std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-                count += 1;
-            }
-            if count == 0 {
-                return Err("empty frame zip".to_string());
-            }
+                // Extract frames to canonical zero-padded names; pixiv ugoira
+                // frames are uniformly jpg or png per artwork.
+                let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
+                    .map_err(|e| format!("unzip: {e}"))?;
+                // pixiv ugoira frames are uniformly jpg or png per artwork; take
+                // the extension from the first entry.
+                let extension = if archive.len() > 0 {
+                    let first_name = archive
+                        .by_index(0)
+                        .map_err(|e| e.to_string())?
+                        .name()
+                        .to_string();
+                    first_name.rsplit('.').next().unwrap_or("jpg").to_string()
+                } else {
+                    "jpg".to_string()
+                };
+                let mut count = 0usize;
+                for i in 0..archive.len() {
+                    let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                    let mut bytes = Vec::new();
+                    entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                    let path = frames_dir
+                        .path()
+                        .join(format!("img_{count:05}.{extension}"));
+                    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+                if count == 0 {
+                    return Err("empty frame zip".to_string());
+                }
 
-            // Constant rate from the median frame delay (ms).
-            let mut delays = frame_delays;
-            delays.sort_unstable();
-            let median = delays[delays.len() / 2].max(1);
-            let framerate = 1000.0 / median as f64;
+                // Constant rate from the median frame delay (ms).
+                let mut delays = frame_delays;
+                delays.sort_unstable();
+                let median = delays[delays.len() / 2].max(1);
+                let framerate = 1000.0 / median as f64;
 
-            let output = out_dir.path().join("ugoira.mp4");
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-framerate",
-                    &framerate.to_string(),
-                    "-i",
-                    &frames_dir.path().join(format!("img_%05d.{extension}")).to_string_lossy(),
-                    // libx264 needs even dimensions; pixiv ugoira frames can
-                    // be odd-sized (e.g. 277x405).
-                    "-vf",
-                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                    &output.to_string_lossy(),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
-            if !status.success() {
-                return Err(format!("ffmpeg exited with {status}"));
-            }
-            Ok((output.to_string_lossy().into_owned(), out_dir))
-        },
-        )
-        .await
-        .expect("ugoira encode worker panicked");
+                let output = out_dir.path().join("ugoira.mp4");
+                let status = std::process::Command::new("ffmpeg")
+                    .args([
+                        "-y",
+                        "-framerate",
+                        &framerate.to_string(),
+                        "-i",
+                        &frames_dir
+                            .path()
+                            .join(format!("img_%05d.{extension}"))
+                            .to_string_lossy(),
+                        // libx264 needs even dimensions; pixiv ugoira frames can
+                        // be odd-sized (e.g. 277x405).
+                        "-vf",
+                        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        &output.to_string_lossy(),
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+                if !status.success() {
+                    return Err(format!("ffmpeg exited with {status}"));
+                }
+                Ok((output.to_string_lossy().into_owned(), out_dir))
+            })
+            .await
+            .expect("ugoira encode worker panicked");
         match result {
             Ok(pair) => Ok(Some(pair)),
             Err(message) => {
@@ -332,9 +338,8 @@ fn log_once_ffmpeg_missing() {
 }
 
 /// pixiv3-rs replacement: `None` when `PIXIV_REFRESH_TOKEN` is unset.
-static PIXIV_CLIENT: LazyLock<Option<PixivAPI>> = LazyLock::new(|| {
-    env::var("PIXIV_REFRESH_TOKEN").ok().map(PixivAPI::new)
-});
+static PIXIV_CLIENT: LazyLock<Option<PixivAPI>> =
+    LazyLock::new(|| env::var("PIXIV_REFRESH_TOKEN").ok().map(PixivAPI::new));
 
 /// Set at startup when the login validation fails; pixiv stays disabled until
 /// the next process start.

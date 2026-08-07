@@ -82,12 +82,15 @@ impl Illustration {
             // keeps media empty when encoding fails or ffmpeg is missing.
         } else if model.page_count > 1 {
             media.extend(model.meta_pages.iter().filter_map(|page| {
-                page.image_urls.original.clone().map(|original| Media::Illustration {
-                    title: None,
-                    url: original,
-                    thumbnail_url: Some(page.image_urls.medium.clone()),
-                    fallback_url: Some(page.image_urls.large.clone()),
-                })
+                page.image_urls
+                    .original
+                    .clone()
+                    .map(|original| Media::Illustration {
+                        title: None,
+                        url: original,
+                        thumbnail_url: Some(page.image_urls.medium.clone()),
+                        fallback_url: Some(page.image_urls.large.clone()),
+                    })
             }));
         } else if let Some(original) = model
             .meta_single_page
@@ -147,8 +150,8 @@ impl From<Illustration> for Fetched {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::model::IllustrationModel;
+    use super::*;
 
     fn illust_json(
         type_: &str,
@@ -203,8 +206,14 @@ mod tests {
             ("https://pixiv.net/artworks/123456", "123456"),
             ("https://www.pixiv.net/en/artworks/123456", "123456"),
             ("https://www.pixiv.net/i/123456", "123456"),
-            ("https://www.pixiv.net/member_illust.php?mode=medium&illust_id=123456", "123456"),
-            ("https://www.pixiv.net/en/member_illust.php?illust_id=123456", "123456"),
+            (
+                "https://www.pixiv.net/member_illust.php?mode=medium&illust_id=123456",
+                "123456",
+            ),
+            (
+                "https://www.pixiv.net/en/member_illust.php?illust_id=123456",
+                "123456",
+            ),
         ];
         for (url, id) in cases {
             let caps = PATTERN.captures(url).unwrap_or_else(|| panic!("{url}"));
@@ -225,7 +234,14 @@ mod tests {
 
     #[test]
     fn ugoira_yields_empty_media() {
-        let v = illust_json("ugoira", 1, Some("https://i.pximg.net/orig.jpg"), None, vec![], 0);
+        let v = illust_json(
+            "ugoira",
+            1,
+            Some("https://i.pximg.net/orig.jpg"),
+            None,
+            vec![],
+            0,
+        );
         let illustration = parse(v);
         let fetched: Fetched = illustration.into();
         assert!(fetched.media.is_empty());
@@ -296,7 +312,12 @@ mod tests {
         let fetched: Fetched = parse(v).into();
         assert_eq!(fetched.media.len(), 1);
         match &fetched.media[0] {
-            Media::Illustration { url, thumbnail_url, fallback_url, .. } => {
+            Media::Illustration {
+                url,
+                thumbnail_url,
+                fallback_url,
+                ..
+            } => {
                 assert_eq!(url, "https://i.pximg.net/p2.jpg");
                 assert_eq!(thumbnail_url.as_deref(), Some("m2.jpg"));
                 assert_eq!(fallback_url.as_deref(), Some("l2.jpg"));
@@ -307,7 +328,14 @@ mod tests {
 
     #[test]
     fn caption_with_escapes_format_and_substitutes() {
-        let v = illust_json("illust", 1, Some("https://i.pximg.net/o.jpg"), None, vec![], 0);
+        let v = illust_json(
+            "illust",
+            1,
+            Some("https://i.pximg.net/o.jpg"),
+            None,
+            vec![],
+            0,
+        );
         let fetched: Fetched = parse(v).into();
         // Format string is escaped in full, then placeholders substituted.
         let out = fetched.caption_with("{title} by {author} <script> {tags}");
@@ -330,7 +358,14 @@ mod tests {
     #[test]
     fn ai_work_gets_leading_ai_tag() {
         // illust_ai_type == 2 is the only AI marker.
-        let v = illust_json("illust", 1, Some("https://i.pximg.net/o.jpg"), None, vec![], 2);
+        let v = illust_json(
+            "illust",
+            1,
+            Some("https://i.pximg.net/o.jpg"),
+            None,
+            vec![],
+            2,
+        );
         let fetched: Fetched = parse(v).into();
         assert!(
             fetched.caption.contains("#AI #tag1 #tag2"),
@@ -338,14 +373,25 @@ mod tests {
             fetched.caption
         );
         // The {tags} placeholder reflects the tag array too.
-        assert!(fetched.caption_with("{tags}").starts_with("#AI "), "got: {}", fetched.caption_with("{tags}"));
+        assert!(
+            fetched.caption_with("{tags}").starts_with("#AI "),
+            "got: {}",
+            fetched.caption_with("{tags}")
+        );
     }
 
     #[test]
     fn non_ai_work_has_no_ai_tag() {
         // 1 = explicitly not AI, 0 = undefined: neither gets the #AI tag.
         for ai_type in [0, 1] {
-            let v = illust_json("illust", 1, Some("https://i.pximg.net/o.jpg"), None, vec![], ai_type);
+            let v = illust_json(
+                "illust",
+                1,
+                Some("https://i.pximg.net/o.jpg"),
+                None,
+                vec![],
+                ai_type,
+            );
             let fetched: Fetched = parse(v).into();
             assert!(
                 !fetched.caption.contains("#AI"),
@@ -357,7 +403,14 @@ mod tests {
 
     #[test]
     fn caption_escapes_and_links() {
-        let v = illust_json("illust", 1, Some("https://i.pximg.net/o.jpg"), None, vec![], 0);
+        let v = illust_json(
+            "illust",
+            1,
+            Some("https://i.pximg.net/o.jpg"),
+            None,
+            vec![],
+            0,
+        );
         let fetched: Fetched = parse(v).into();
         assert!(
             fetched
@@ -367,9 +420,6 @@ mod tests {
             fetched.caption
         );
         assert!(fetched.caption.contains("#tag1 #tag2"));
-        assert_eq!(
-            fetched.source_url,
-            "https://www.pixiv.net/artworks/123"
-        );
+        assert_eq!(fetched.source_url, "https://www.pixiv.net/artworks/123");
     }
 }

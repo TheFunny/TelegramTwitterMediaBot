@@ -179,7 +179,6 @@ impl From<reqwest::Error> for FetchError {
     }
 }
 
-
 impl From<serde_json::Error> for FetchError {
     fn from(e: serde_json::Error) -> Self {
         FetchError::Json(e)
