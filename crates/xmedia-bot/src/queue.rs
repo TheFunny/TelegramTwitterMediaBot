@@ -6,11 +6,11 @@
 //! replaced by dedicated columns.
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::Value;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -29,15 +29,9 @@ const QUEUE_WORKERS: usize = 4;
 pub enum QueueError {
     /// Reschedule with the given delay; after `MAX_RETRIES` attempts the task
     /// is dead-lettered instead.
-    Retryable {
-        delay_seconds: f64,
-        payload: Value,
-    },
+    Retryable { delay_seconds: f64, payload: Value },
     /// Give up now.
-    Permanent {
-        message: String,
-        payload: Value,
-    },
+    Permanent { message: String, payload: Value },
 }
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -74,16 +68,7 @@ fn now_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Opens the queue DB with a busy timeout. Handler tasks enqueue while
-/// workers lease/update rows concurrently; without the timeout a concurrent
-/// write fails immediately with SQLITE_BUSY and the operation is lost.
-fn open_db(path: &str) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
-    Ok(conn)
-}
-
-fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+fn ensure_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
          run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
@@ -162,10 +147,8 @@ impl PersistentTaskQueue {
             self.counter.fetch_add(1, Ordering::Relaxed)
         );
         let payload = payload.to_string();
-        let db_path = self.db_path.clone();
         log::info!("enqueued {id} (run_after {run_after:.1})");
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
                  VALUES (?1, ?2, ?3, 0, 'pending', 0, ?4)",
@@ -173,8 +156,7 @@ impl PersistentTaskQueue {
             )?;
             Ok(())
         })
-        .await
-        .expect("queue insert worker panicked")?;
+        .await?;
         // Wake every sleeping worker: with several workers the one that finds
         // nothing due must not starve the newly inserted row.
         self.notify.notify_waiters();
@@ -182,18 +164,17 @@ impl PersistentTaskQueue {
     }
 
     async fn recover_stale(&self) {
-        let db_path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "UPDATE tasks SET status='pending', locked_until=0 WHERE status='in_progress' AND locked_until < ?1",
                 params![now_f64()],
             )?;
             Ok(())
         })
-        .await
-        .expect("queue recovery worker panicked")
-        .unwrap_or_else(|e| log::error!("queue recovery failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("queue recovery failed: {e}");
+        }
     }
 }
 
@@ -225,9 +206,7 @@ impl QueueWorker {
 
     /// Leases the oldest due row (sets it `in_progress` with a lock TTL).
     async fn lease_next(&self) -> Option<LeasedRow> {
-        let db_path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<LeasedRow>> {
-            let mut conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, |conn| {
             // BEGIN IMMEDIATE: with several workers, a deferred transaction
             // that read before another worker's lease commit would fail with
             // SQLITE_BUSY_SNAPSHOT. Taking the write lock up front serializes
@@ -265,31 +244,34 @@ impl QueueWorker {
                 attempts,
             }))
         })
-        .await
-        .expect("queue lease worker panicked")
-        .unwrap_or_else(|e| {
-            log::error!("queue lease failed: {e}");
-            None
-        })
+        .await;
+        match result {
+            Ok(row) => row,
+            Err(e) => {
+                log::error!("queue lease failed: {e}");
+                None
+            }
+        }
     }
 
     async fn earliest_run_after(&self) -> Option<f64> {
-        let db_path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<f64>> {
-            let conn = open_db(&db_path)?;
-            let mut stmt = conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
+        let result = crate::db::with_conn(&self.db_path, |conn| {
+            let mut stmt =
+                conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
             let mut rows = stmt.query([])?;
             match rows.next()? {
                 Some(row) => Ok(row.get::<_, Option<f64>>(0)?),
                 None => Ok(None),
             }
         })
-        .await
-        .expect("queue timing worker panicked")
-        .unwrap_or_else(|e| {
-            log::error!("queue timing query failed: {e}");
-            None
-        })
+        .await;
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("queue timing query failed: {e}");
+                None
+            }
+        }
     }
 
     async fn process(&self, row: LeasedRow) {
@@ -336,33 +318,31 @@ impl QueueWorker {
     }
 
     async fn delete_row(&self, id: &str) {
-        let db_path = self.db_path.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
             Ok(())
         })
-        .await
-        .expect("queue delete worker panicked")
-        .unwrap_or_else(|e| log::error!("queue delete failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("queue delete failed: {e}");
+        }
     }
 
     async fn reschedule(&self, id: &str, payload: Value, delay_seconds: f64, attempts: i32) {
-        let db_path = self.db_path.clone();
         let id = id.to_string();
         let payload = payload.to_string();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
                 params![payload, now_f64() + delay_seconds, attempts, id],
             )?;
             Ok(())
         })
-        .await
-        .expect("queue reschedule worker panicked")
-        .unwrap_or_else(|e| log::error!("queue reschedule failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("queue reschedule failed: {e}");
+        }
         self.notify.notify_waiters();
     }
 }

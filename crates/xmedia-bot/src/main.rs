@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use x_media::site;
 
 mod config;
+mod db;
 mod handlers;
 mod link_cache;
 mod photo;

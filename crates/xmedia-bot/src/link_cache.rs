@@ -49,12 +49,6 @@ pub struct LinkCache {
     db_path: String,
 }
 
-fn open_db(path: &str) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
-    Ok(conn)
-}
-
 impl LinkCache {
     pub fn open(db_path: &str) -> Self {
         if let Ok(conn) = Connection::open(db_path)
@@ -73,11 +67,9 @@ impl LinkCache {
     /// Returns the cached post if present and not expired; a stale entry is
     /// removed on the spot.
     pub async fn get(&self, key: &str, ttl: Duration) -> Option<CachedPost> {
-        let db_path = self.db_path.clone();
         let key = key.to_string();
         let ttl = ttl.as_secs_f64();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<CachedPost>> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             let mut stmt =
                 conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
             let mut rows = stmt.query(params![key])?;
@@ -90,66 +82,66 @@ impl LinkCache {
                 conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
                 return Ok(None);
             }
-            serde_json::from_str(&payload).map(Some).map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-            })
+            Ok(Some(serde_json::from_str::<CachedPost>(&payload).map_err(
+                |e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
+            )?))
         })
-        .await
-        .expect("link cache read worker panicked")
-        .unwrap_or_else(|e| {
-            log::error!("link cache read failed: {e}");
-            None
-        })
+        .await;
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("link cache read failed: {e}");
+                None
+            }
+        }
     }
 
     pub async fn put(&self, key: &str, post: &CachedPost) {
-        let db_path = self.db_path.clone();
         let key = key.to_string();
         let payload = serde_json::to_string(post).expect("cached post serializes");
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
                 params![key, payload, now_f64()],
             )?;
             Ok(())
         })
-        .await
-        .expect("link cache write worker panicked")
-        .unwrap_or_else(|e| log::error!("link cache write failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("link cache write failed: {e}");
+        }
     }
 
     /// Drops an entry (e.g. a cached file id that turned out invalid).
     pub async fn remove(&self, key: &str) {
-        let db_path = self.db_path.clone();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
             Ok(())
         })
-        .await
-        .expect("link cache delete worker panicked")
-        .unwrap_or_else(|e| log::error!("link cache delete failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("link cache delete failed: {e}");
+        }
     }
 
     /// Removes expired entries; returns how many were deleted.
     pub async fn prune(&self, ttl: Duration) -> usize {
-        let db_path = self.db_path.clone();
         let cutoff = now_f64() - ttl.as_secs_f64();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<usize> {
-            let conn = open_db(&db_path)?;
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "DELETE FROM link_cache WHERE created_at < ?1",
                 params![cutoff],
             )
         })
-        .await
-        .expect("link cache prune worker panicked")
-        .unwrap_or_else(|e| {
-            log::error!("link cache prune failed: {e}");
-            0
-        })
+        .await;
+        match result {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("link cache prune failed: {e}");
+                0
+            }
+        }
     }
 }
 

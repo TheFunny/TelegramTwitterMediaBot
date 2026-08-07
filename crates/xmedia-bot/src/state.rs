@@ -2,7 +2,7 @@
 //! `data/task_queue.db`, shared with the task queue).
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,7 +45,9 @@ pub fn unix_now() -> i64 {
 }
 
 impl ChatStore {
-    /// Creates the parent directory and both tables (idempotent).
+    /// Creates the parent directory and the `chat_state` table (idempotent).
+    /// The shared `tasks` / `link_cache` tables are owned by `queue.rs` and
+    /// `link_cache.rs` respectively.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
@@ -53,12 +55,9 @@ impl ChatStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         }
-        let conn = Connection::open(path)?;
+        let conn = crate::db::open_db(path)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
-             run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
-             locked_until REAL NOT NULL, created_at REAL NOT NULL); \
-             CREATE TABLE IF NOT EXISTS chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
         )?;
         drop(conn);
         Ok(ChatStore {
@@ -71,22 +70,19 @@ impl ChatStore {
         if let Some(data) = self.cache.lock().get(&chat_id) {
             return data.clone();
         }
-        let db_path = self.db_path.clone();
-        let payload = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<String>> {
-            let conn = Connection::open(&db_path)?;
+        let chat_key = chat_id.to_string();
+        let payload = crate::db::with_conn(&self.db_path, move |conn| {
             // Concurrent handler tasks (batch-forwards) may write chat_state
-            // while this read runs; without a busy timeout a write lock
-            // collision fails the query immediately.
-            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            // while this read runs; the shared busy timeout handles the
+            // write-lock collision instead of failing the query.
             let mut stmt = conn.prepare("SELECT payload FROM chat_state WHERE chat_id = ?1")?;
-            let mut rows = stmt.query(params![chat_id.to_string()])?;
+            let mut rows = stmt.query(params![chat_key])?;
             match rows.next()? {
-                Some(row) => Ok(Some(row.get(0)?)),
+                Some(row) => Ok(Some(row.get::<_, String>(0)?)),
                 None => Ok(None),
             }
         })
         .await
-        .expect("chat_state worker panicked")
         .unwrap_or_else(|e| {
             log::error!("chat_state read failed: {e}");
             None
@@ -101,19 +97,18 @@ impl ChatStore {
     pub async fn set(&self, chat_id: i64, data: &ChatData) {
         self.cache.lock().insert(chat_id, data.clone());
         let payload = serde_json::to_string(data).expect("chat state serializes");
-        let db_path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> rusqlite::Result<()> {
-            let conn = Connection::open(&db_path)?;
-            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let chat_id = chat_id.to_string();
+        let result = crate::db::with_conn(&self.db_path, move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
-                params![chat_id.to_string(), payload],
+                params![chat_id, payload],
             )?;
             Ok(())
         })
-        .await
-        .expect("chat_state worker panicked")
-        .unwrap_or_else(|e| log::error!("chat_state write failed: {e}"));
+        .await;
+        if let Err(e) = result {
+            log::error!("chat_state write failed: {e}");
+        }
     }
 
     /// Removes edit-before-forward records whose `created_at + ttl` is in the
@@ -149,7 +144,10 @@ impl ChatStore {
             self.set(chat_id, &data).await;
         }
         if !removed.is_empty() {
-            log::info!("pruned {} expired edit-before-forward record(s)", removed.len());
+            log::info!(
+                "pruned {} expired edit-before-forward record(s)",
+                removed.len()
+            );
         }
         removed
     }
