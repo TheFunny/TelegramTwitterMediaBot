@@ -79,6 +79,14 @@ fn recover_update(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Base delay × 2^attempts (attempts = retries already done), capped at 300s.
+/// Applied at the queue layer so the attempt count actually reaches the
+/// backoff computation; Telegram `RetryAfter` delays get the same treatment
+/// (conservatively larger wait, no API change needed).
+fn scaled_retry_delay(base: f64, attempts: i32) -> f64 {
+    (base * 2f64.powi(attempts)).min(300.0)
+}
+
 fn ensure_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
@@ -348,12 +356,13 @@ impl QueueWorker {
                     self.delete_row(&row.id).await;
                     (self.dead_letter)(payload, message).await;
                 } else {
+                    let delay = scaled_retry_delay(delay_seconds, row.attempts);
                     log::info!(
-                        "task {} rescheduled in {delay_seconds:.1}s (attempt {})",
+                        "task {} rescheduled in {delay:.1}s (attempt {})",
                         row.id,
                         row.attempts + 1
                     );
-                    self.reschedule(&row.id, payload, delay_seconds, row.attempts + 1)
+                    self.reschedule(&row.id, payload, delay, row.attempts + 1)
                         .await;
                 }
             }
@@ -399,6 +408,16 @@ impl QueueWorker {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[test]
+    fn scaled_retry_delay_scales_and_caps() {
+        assert_eq!(scaled_retry_delay(1.0, 0), 1.0);
+        assert_eq!(scaled_retry_delay(1.0, 1), 2.0);
+        assert_eq!(scaled_retry_delay(1.0, 2), 4.0);
+        assert_eq!(scaled_retry_delay(1.5, 1), 3.0);
+        assert_eq!(scaled_retry_delay(1.0, 10), 300.0, "capped at 300s");
+        assert_eq!(scaled_retry_delay(300.0, 0), 300.0);
+    }
 
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
