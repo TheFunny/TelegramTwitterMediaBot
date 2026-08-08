@@ -43,6 +43,9 @@ async fn main() {
     log::info!("Starting bot");
 
     let bot = Bot::from_env();
+    // Force the queue workers' shared Bot to initialize now so a missing
+    // token fails at startup, not on the first queued task.
+    let _ = &*send::BOT;
 
     // Register the command list with Telegram (client `/` menu).
     if let Err(e) = handlers::register_commands(&bot).await {

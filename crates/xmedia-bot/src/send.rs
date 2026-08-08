@@ -11,6 +11,7 @@ use crate::state::{EditMessage, unix_now};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use teloxide::prelude::*;
 use teloxide::types::{
     ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMedia, InputMediaAnimation,
@@ -19,6 +20,11 @@ use teloxide::types::{
 use teloxide::{ApiError, RequestError};
 use tempfile::NamedTempFile;
 use x_media::site::FetchError;
+
+/// One process-wide Bot for queue workers. Building a fresh Bot (and its HTTP
+/// client) per queue task was pure waste; forced at startup in main so a
+/// missing token fails fast instead of on the first task.
+pub static BOT: LazyLock<Bot> = LazyLock::new(Bot::from_env);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1158,7 +1164,7 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
             });
         }
     };
-    let bot = Bot::from_env();
+    let bot = BOT.clone();
     // A resumed multi-batch send already ran post_send_actions (edit prompt /
     // forward) when it first started; running them again on the resume would
     // open a duplicate edit prompt and double-forward. SendAnimation is
@@ -1227,7 +1233,7 @@ pub async fn dead_letter_notify(payload: serde_json::Value, message: String) {
     let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
     let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
     if notify_chat_id.is_some() {
-        let bot = Bot::from_env();
+        let bot = BOT.clone();
         notify_failure(
             &bot,
             notify_chat_id,
