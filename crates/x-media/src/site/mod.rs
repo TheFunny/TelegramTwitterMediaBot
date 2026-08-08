@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub mod bsky;
@@ -147,6 +148,8 @@ pub enum FetchError {
     /// The post exists but its content is withheld (twitter NSFW /
     /// age-restricted tweets come back as an empty `{}` from syndication).
     Sensitive,
+    /// A download exceeded the caller's size cap (see [`download_media_limited`]).
+    TooLarge,
 }
 
 impl fmt::Display for FetchError {
@@ -158,6 +161,7 @@ impl fmt::Display for FetchError {
             FetchError::NotFound => write!(f, "not found"),
             FetchError::Blocked => write!(f, "blocked"),
             FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
+            FetchError::TooLarge => write!(f, "media too large"),
         }
     }
 }
@@ -169,6 +173,7 @@ impl std::error::Error for FetchError {
             FetchError::Json(e) => Some(e),
             FetchError::Pixiv(e) => Some(e),
             FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
+            FetchError::TooLarge => None,
         }
     }
 }
@@ -203,6 +208,30 @@ pub(crate) static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     let builder = builder.pool_max_idle_per_host(0);
     builder.build().expect("failed to build HTTP client")
 });
+
+/// Whether a usable `ffmpeg` binary is on PATH (probed once). Shared by the
+/// pixiv ugoira encoder and the bsky HLS remuxer.
+static FFMPEG_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+});
+
+static FFMPEG_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn ffmpeg_available() -> bool {
+    *FFMPEG_AVAILABLE
+}
+
+pub(crate) fn log_once_ffmpeg_missing() {
+    if !FFMPEG_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!("ffmpeg not found; ugoira and bsky video posts stay unsupported");
+    }
+}
 
 /// Fetches a post from its URL. Returns `Ok(None)` when no site pattern
 /// matches (unsupported links are silently ignored by the bot).
@@ -262,18 +291,42 @@ pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
     if lower.contains("pximg.net") {
         request = request.header("Referer", "https://www.pixiv.net/");
     }
-    let response = request.send().await?;
+    let response = request.send().await?.error_for_status()?;
     Ok(response.content_length())
 }
 
-pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
+/// Downloads a media file with a hard size cap: the body is streamed and the
+/// download aborts with [`FetchError::TooLarge`] the moment the cap is
+/// crossed (or when a declared Content-Length already exceeds it). Keeps the
+/// bot from buffering arbitrarily large bodies into memory.
+pub async fn download_media_limited(
+    url: &str,
+    max_bytes: u64,
+) -> Result<bytes::Bytes, FetchError> {
     let mut request = CLIENT.get(url);
     let lower = url.to_ascii_lowercase();
     if lower.contains("pximg.net") {
         request = request.header("Referer", "https://www.pixiv.net/");
     }
-    let response = request.send().await?;
-    Ok(response.bytes().await?)
+    let response = request.send().await?.error_for_status()?;
+    if let Some(len) = response.content_length()
+        && len > max_bytes
+    {
+        return Err(FetchError::TooLarge);
+    }
+    let mut response = response;
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() as u64 > max_bytes {
+            return Err(FetchError::TooLarge);
+        }
+    }
+    Ok(bytes::Bytes::from(buf))
+}
+
+pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
+    download_media_limited(url, u64::MAX).await
 }
 
 #[cfg(test)]

@@ -207,8 +207,8 @@ impl PixivAPI {
         &self,
         illust_id: u64,
     ) -> Result<Option<(String, tempfile::TempDir)>, PixivError> {
-        if !ffmpeg_available() {
-            log_once_ffmpeg_missing();
+        if !crate::site::ffmpeg_available() {
+            crate::site::log_once_ffmpeg_missing();
             return Ok(None);
         }
         let metadata = self.ugoira_metadata(illust_id).await?;
@@ -312,28 +312,6 @@ impl PixivAPI {
                 Ok(None)
             }
         }
-    }
-}
-
-static FFMPEG_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-});
-
-static FFMPEG_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
-
-fn ffmpeg_available() -> bool {
-    *FFMPEG_AVAILABLE
-}
-
-fn log_once_ffmpeg_missing() {
-    if !FFMPEG_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
-        log::warn!("ffmpeg not found; pixiv ugoira posts stay unsupported");
     }
 }
 

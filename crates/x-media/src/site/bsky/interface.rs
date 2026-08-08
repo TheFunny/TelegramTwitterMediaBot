@@ -22,7 +22,161 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
         .get(2)
         .map(|m| m.as_str())
         .ok_or(FetchError::NotFound)?;
-    Ok(fetch(handle, rkey).await?.into())
+    let post = fetch(handle, rkey).await?;
+    let mut fetched: Fetched = post.into();
+    // bsky video embeds expose only an HLS playlist URL, which Telegram
+    // cannot fetch; remux it to a single MP4 (mirrors the pixiv ugoira
+    // encode path — the temp file stays alive via `_keep_alive`). On any
+    // failure the video item is dropped and the post degrades to its text.
+    let mut media = Vec::with_capacity(fetched.media.len());
+    for item in fetched.media {
+        let is_hls = matches!(&item, Media::Video { url, .. }
+            if url.contains("playlist") || url.ends_with(".m3u8"));
+        if !is_hls {
+            media.push(item);
+            continue;
+        }
+        let url = item.url().to_string();
+        match resolve_bsky_video(&url).await {
+            Ok(Some((mp4_path, keep_alive))) => {
+                let thumbnail_url = match &item {
+                    Media::Video { thumbnail_url, .. } => thumbnail_url.clone(),
+                    _ => String::new(),
+                };
+                media.push(Media::Video {
+                    title: None,
+                    url: mp4_path.to_string_lossy().into_owned(),
+                    thumbnail_url,
+                });
+                fetched._keep_alive = Some(keep_alive);
+            }
+            Ok(None) => log::warn!("bsky video remux unavailable for {url}"),
+            Err(e) => log::warn!("bsky video remux failed for {url}: {e}"),
+        }
+    }
+    fetched.media = media;
+    Ok(fetched)
+}
+
+/// Downloads an HLS playlist (master or media) and remuxes its segments to a
+/// single MP4 via ffmpeg. Returns the MP4 path plus the temp dir that must
+/// stay alive until the file is uploaded. `Ok(None)` when ffmpeg is missing.
+///
+/// Verified live (2026-08): bsky master playlists carry `#EXT-X-STREAM-INF`
+/// variant lines (e.g. `720p/video.m3u8?session_id=…`), and the media
+/// playlists are VOD MPEG-TS segments (`videoN.ts?…`) without EXT-X-MAP, so
+/// a plain `-f concat -c copy` remux is valid.
+async fn resolve_bsky_video(
+    playlist_url: &str,
+) -> Result<Option<(std::path::PathBuf, tempfile::TempDir)>, String> {
+    if !crate::site::ffmpeg_available() {
+        crate::site::log_once_ffmpeg_missing();
+        return Ok(None);
+    }
+    let master = crate::site::download_media_limited(playlist_url, 1_048_576)
+        .await
+        .map_err(|e| format!("bsky video master playlist: {e}"))?;
+    let master = String::from_utf8_lossy(&master);
+
+    // Master playlist: pick the variant with the highest declared bandwidth.
+    let playlist_url = if master.contains("#EXT-X-STREAM-INF") {
+        let mut best: Option<(u64, String)> = None;
+        let mut lines = master.lines();
+        while let Some(line) = lines.next() {
+            if !line.starts_with("#EXT-X-STREAM-INF") {
+                continue;
+            }
+            let bandwidth = line
+                .split_once("BANDWIDTH=")
+                .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            if let Some(uri) = lines.next().filter(|u| !u.starts_with('#')) {
+                if bandwidth >= best.as_ref().map(|(b, _)| *b).unwrap_or(0) {
+                    best = Some((bandwidth, uri.to_string()));
+                }
+            }
+        }
+        let Some((_, uri)) = best else {
+            return Err("bsky video master playlist has no variants".to_string());
+        };
+        url::Url::parse(playlist_url)
+            .and_then(|base| base.join(&uri))
+            .map_err(|e| format!("bsky video variant URL: {e}"))?
+            .to_string()
+    } else {
+        playlist_url.to_string()
+    };
+
+    let variant = crate::site::download_media_limited(&playlist_url, 1_048_576)
+        .await
+        .map_err(|e| format!("bsky video media playlist: {e}"))?;
+    let variant = String::from_utf8_lossy(&variant);
+    // Segment URIs: non-#, non-empty lines, resolved relative to the playlist.
+    let base = url::Url::parse(&playlist_url).map_err(|e| format!("bsky playlist URL: {e}"))?;
+    let segments: Vec<String> = variant
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| base.join(l).map(|u| u.to_string()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("bsky segment URL: {e}"))?;
+    if segments.is_empty() {
+        return Err("bsky video playlist has no segments".to_string());
+    }
+    if segments.len() > 500 {
+        return Err("bsky video has too many segments".to_string());
+    }
+
+    let frames_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut total: u64 = 0;
+    let mut list = String::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let bytes = crate::site::download_media_limited(seg, 20 * 1024 * 1024)
+            .await
+            .map_err(|e| format!("bsky segment {i}: {e}"))?;
+        total += bytes.len() as u64;
+        if total > 256 * 1024 * 1024 {
+            return Err("bsky video exceeds total size cap".to_string());
+        }
+        let path = frames_dir.path().join(format!("seg_{i:04}.ts"));
+        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+        list.push_str(&format!("file '{}'\n", path.to_string_lossy()));
+    }
+    let list_path = frames_dir.path().join("list.txt");
+    std::fs::write(&list_path, &list).map_err(|e| e.to_string())?;
+
+    let output = out_dir.path().join("video.mp4");
+    let list_str = list_path.to_string_lossy().into_owned();
+    let output_str = output.to_string_lossy().into_owned();
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                &list_str,
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                &output_str,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    })
+    .await
+    .map_err(|e| format!("bsky remux worker panicked: {e}"))?;
+    match status {
+        Ok(s) if s.success() => Ok(Some((output, out_dir))),
+        Ok(s) => Err(format!("ffmpeg exited with {s}")),
+        Err(e) => Err(format!("ffmpeg spawn failed: {e}")),
+    }
 }
 
 /// Fetches a post thread by handle or DID (`at://` URIs work for both).
