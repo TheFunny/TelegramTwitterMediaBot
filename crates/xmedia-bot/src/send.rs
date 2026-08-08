@@ -1129,6 +1129,18 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
         }
     };
     let bot = Bot::from_env();
+    // A resumed multi-batch send already ran post_send_actions (edit prompt /
+    // forward) when it first started; running them again on the resume would
+    // open a duplicate edit prompt and double-forward. SendAnimation is
+    // atomic (always a fresh run), so only SendMediaSequence can resume.
+    let resumed = matches!(
+        &task,
+        Task::SendMediaSequence {
+            batch_index,
+            sent_message_ids,
+            ..
+        } if *batch_index > 0 || !sent_message_ids.is_empty()
+    );
     match task {
         Task::SendMediaSequence { .. } | Task::SendAnimation { .. } => {
             let message_ids = match send_media_or_animation(&bot, &task).await {
@@ -1150,7 +1162,9 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                     });
                 }
             };
-            post_send_actions(&bot, &task, message_ids).await;
+            if !resumed {
+                post_send_actions(&bot, &task, message_ids).await;
+            }
             Ok(())
         }
         Task::ForwardMessages { .. } => match forward_messages(&bot, &task).await {
