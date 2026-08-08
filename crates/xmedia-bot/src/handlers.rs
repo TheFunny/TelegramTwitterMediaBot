@@ -190,19 +190,31 @@ async fn set_forward_channel_handler(
         return Err(SetForwardChannelError::NotChannel);
     }
     let channel_id = chat.id.0;
+    // The sender must be a channel administrator. Compare against the
+    // sender's user id, NOT the chat id (they only coincide in private
+    // chats, so the old check broke group usage).
+    let Some(sender) = message.from.as_ref() else {
+        return Err(SetForwardChannelError::NotAdmin);
+    };
     match bot.get_chat_administrators(channel.clone()).await {
         Err(e) => {
             log::error!("Failed to get channel administrators {}: {}", channel, e);
             return Err(SetForwardChannelError::NotBotAdmin(e));
         }
         Ok(admins) => {
-            if !admins.iter().any(|admin| admin.user.id == message.chat.id) {
+            if !admins.iter().any(|admin| admin.user.id == sender.id) {
                 return Err(SetForwardChannelError::NotAdmin);
             }
-            let bot_id = bot.get_me().await.expect("Failed get bot id").user.id;
-            if let Some(bot_admin) = admins.iter().find(|admin| admin.user.id == bot_id)
-                && !bot_admin.can_post_messages()
-            {
+            // The bot itself must be an admin that can post; a missing
+            // bot entry must not pass silently (copy would fail later).
+            let bot_id = match bot.get_me().await {
+                Ok(me) => me.user.id,
+                Err(e) => return Err(SetForwardChannelError::NotBotAdmin(e)),
+            };
+            let bot_ok = admins
+                .iter()
+                .any(|admin| admin.user.id == bot_id && admin.can_post_messages());
+            if !bot_ok {
                 return Err(SetForwardChannelError::NotBotCanPost);
             }
         }
