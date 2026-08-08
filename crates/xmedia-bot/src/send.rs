@@ -329,6 +329,11 @@ fn item_url(item: &MediaItemPayload) -> &str {
 fn input_file_for(media: &str) -> Result<InputFile, String> {
     if media.starts_with("http://") || media.starts_with("https://") {
         Ok(InputFile::url(parse_media_url(media)?))
+    } else if !std::path::Path::new(media).exists() {
+        // A retried task may reference a temp file the original send's
+        // TempDir already cleaned up; fail fast and permanent instead of
+        // burning retries on a file that can never come back.
+        Err(format!("local media file missing: {media}"))
     } else {
         Ok(InputFile::file(media))
     }
