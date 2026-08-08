@@ -55,6 +55,14 @@ services:
     depends_on:
       - nginx-proxy
     container_name: tgxmb
+    # Webhook mode only: the bot listens on WEBHOOK_PORT; nginx-proxy shows
+    # 502s while this is down, so surface it to the orchestrator.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8443'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   certs:

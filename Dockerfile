@@ -11,6 +11,11 @@ ARG APP_NAME=telegram-twitter-media-bot
 # runners. `/redirect/latest/` floats to the newest release build; each build
 # also ships a .sha256. Swap `amd64` for `arm64` when building arm64 images.
 ARG FFMPEG_URL=https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip
+# Optional sha256 of ffmpeg.zip (pinned releases only): set to verify the
+# download. The mirror publishes .sha256 sidecars next to pinned builds, e.g.
+# https://ffmpeg.martin-riedl.de/download/linux/amd64/<id>_9.0/ffmpeg.zip.sha256
+# (the /redirect/latest/ URL itself has no sidecar — pin the effective URL).
+ARG FFMPEG_SHA256=
 
 WORKDIR /build
 
@@ -30,19 +35,20 @@ RUN mkdir -p crates/x-media/src crates/xmedia-bot/src \
 #    root. `unzip -t` verifies the archive before extraction so a bad
 #    download fails loudly here instead of a cryptic later error.
 RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
+    && if [ -n "$FFMPEG_SHA256" ]; then echo "$FFMPEG_SHA256  /tmp/ffmpeg.zip" | sha256sum -c -; fi \
     && unzip -tq /tmp/ffmpeg.zip \
     && unzip -q /tmp/ffmpeg.zip -d /usr/local/bin \
     && chmod +x /usr/local/bin/ffmpeg \
     && rm /tmp/ffmpeg.zip \
     && /usr/local/bin/ffmpeg -version >/dev/null
 
-# 3. Real sources last: only our crates recompile on source changes. The
-#    COPY preserves host mtimes, which predate the stub artifacts from step 1;
-#    cargo's mtime-based freshness check would otherwise treat the stub build
-#    as up-to-date and never compile the real sources. `touch` forces cargo to
-#    see the real files as newer.
+# 3. Real sources last: only our crates recompile on source changes.
+#    `cargo clean -p` drops the two crates' artifacts while keeping the
+#    compiled dependency layer, forcing a deterministic rebuild of the real
+#    sources. (The previous `touch`-mtimes hack silently shipped the stub
+#    binary when host files carried future timestamps.)
 COPY crates/ ./crates/
-RUN find crates -type f -name '*.rs' -exec touch {} + \
+RUN cargo clean -p xmedia-bot -p x-media \
     && cargo build --release -p xmedia-bot
 
 # ---------- runtime stage ----------
@@ -56,10 +62,9 @@ LABEL org.opencontainers.image.title="${APP_NAME}"
 
 # Everything is copied in — no apt in the runtime stage. Privilege dropping is
 # done by docker-entrypoint.sh with setpriv (util-linux, already in
-# bookworm-slim), so no gosu needed.
+# bookworm-slim), so no gosu needed. (libssl3/libcrypto are already in
+# bookworm-slim; only ca-certificates and ffmpeg need copying.)
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3* /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3* /usr/lib/x86_64-linux-gnu/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 
 WORKDIR /app

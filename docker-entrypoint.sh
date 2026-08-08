@@ -16,7 +16,6 @@ then
    else
       usermod -u ${USER_ID} -o user > /dev/null 2>&1 || true
    fi
-   usermod -a -G root user > /dev/null 2>&1 || true
    # Bind-mounted volumes may not support chown; a failure here must not kill
    # the container either.
    chown -R `id -u user`:`id -u user` /app > /dev/null 2>&1 || true

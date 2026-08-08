@@ -1,3 +1,7 @@
 [workspace]
 members = ["crates/x-media", "crates/xmedia-bot"]
 resolver = "3"
+
+# Smaller production binary; debug symbols are not shipped anyway.
+[profile.release]
+strip = true
