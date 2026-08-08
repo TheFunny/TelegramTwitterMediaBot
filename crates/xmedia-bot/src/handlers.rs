@@ -775,6 +775,12 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
     if query.query.is_empty() {
         return respond(());
     }
+    // Telegram fires an inline query on every keystroke; only run a fetch
+    // (3 attempts!) for something that is actually a supported post URL, so
+    // typing does not hammer the source sites.
+    if x_media::site::cache_key(&query.query).is_none() {
+        return respond(());
+    }
     log::info!("inline query: {}", query.query);
     match x_media::site::fetch(&query.query).await {
         Ok(Some(fetched)) => {
