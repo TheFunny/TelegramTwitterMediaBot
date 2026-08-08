@@ -53,6 +53,7 @@ struct LeasedRow {
 }
 
 /// Owned worker state so the spawned loop does not borrow the queue handle.
+#[derive(Clone)]
 struct QueueWorker {
     db_path: String,
     notify: Arc<Notify>,
@@ -66,6 +67,16 @@ fn now_f64() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+/// Resets rows left `in_progress` with an expired lock TTL back to `pending`
+/// so they can be leased again (crash/panic recovery).
+fn recover_update(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET status='pending', locked_until=0 WHERE status='in_progress' AND locked_until < ?1",
+        params![now_f64()],
+    )?;
+    Ok(())
 }
 
 fn ensure_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -114,7 +125,7 @@ impl PersistentTaskQueue {
         let dead_letter: Arc<DeadLetter> =
             Arc::new(move |payload, message| Box::pin(dead_letter(payload, message)));
         self.recover_stale().await;
-        let mut handles = Vec::with_capacity(QUEUE_WORKERS);
+        let mut handles = Vec::with_capacity(QUEUE_WORKERS + 1);
         for _ in 0..QUEUE_WORKERS {
             let worker = QueueWorker {
                 db_path: self.db_path.clone(),
@@ -123,8 +134,35 @@ impl PersistentTaskQueue {
                 handler: Arc::clone(&handler),
                 dead_letter: Arc::clone(&dead_letter),
             };
-            handles.push(tokio::spawn(worker.run_loop()));
+            handles.push(tokio::spawn(worker.run_loop_supervised()));
         }
+        // Periodic lease-expiry sweep: recovers rows a crashed/panicked
+        // worker left `in_progress` (the lock TTL bounds the wait). Woken by
+        // the same notify as the workers, so enqueue and stop interrupt the
+        // sleep; the first interval tick fires immediately (harmless extra
+        // recovery at startup).
+        let sweep_db_path = self.db_path.clone();
+        let sweep_notify = Arc::clone(&self.notify);
+        let sweep_stop = Arc::clone(&self.stop);
+        handles.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                let notified = sweep_notify.notified();
+                tokio::pin!(notified);
+                tokio::select! {
+                    _ = &mut notified => {}
+                    _ = interval.tick() => {}
+                }
+                if sweep_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let result =
+                    crate::db::with_conn(&sweep_db_path, move |conn| recover_update(conn)).await;
+                if let Err(e) = result {
+                    log::error!("queue sweep failed: {e}");
+                }
+            }
+        }));
         *self.worker.lock() = handles;
     }
 
@@ -164,14 +202,11 @@ impl PersistentTaskQueue {
     }
 
     async fn recover_stale(&self) {
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
-            conn.execute(
-                "UPDATE tasks SET status='pending', locked_until=0 WHERE status='in_progress' AND locked_until < ?1",
-                params![now_f64()],
-            )?;
-            Ok(())
-        })
-        .await;
+        self.recover_sweep().await;
+    }
+
+    async fn recover_sweep(&self) {
+        let result = crate::db::with_conn(&self.db_path, move |conn| recover_update(conn)).await;
         if let Err(e) = result {
             log::error!("queue recovery failed: {e}");
         }
@@ -179,6 +214,19 @@ impl PersistentTaskQueue {
 }
 
 impl QueueWorker {
+    /// Supervised worker: the inner loop runs in its own task so a panic
+    /// (e.g. inside a handler or a DB closure) kills only that task; the
+    /// supervisor respawns it until stop is set. The row a dead worker had
+    /// leased is recovered by the periodic sweep once its lock TTL expires.
+    async fn run_loop_supervised(self) {
+        while !self.stop.load(Ordering::Relaxed) {
+            let worker = self.clone();
+            if let Err(e) = tokio::spawn(async move { worker.run_loop().await }).await {
+                log::error!("queue worker panicked, restarting: {e}");
+            }
+        }
+    }
+
     async fn run_loop(self) {
         while !self.stop.load(Ordering::Relaxed) {
             match self.lease_next().await {
@@ -488,6 +536,43 @@ mod tests {
             .await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        queue.stop().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_sweep_recovers_expired_lease() {
+        let (queue, _dir) = new_queue().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        queue
+            .start(
+                move |payload| {
+                    assert_eq!(payload["s"], 1);
+                    c.fetch_add(1, AtomicOrdering::SeqCst);
+                    async { Ok(()) }
+                },
+                |_payload, _message| async {},
+            )
+            .await;
+        // Insert a stale leased row AFTER startup: without a runtime sweep it
+        // would stay `in_progress` forever (only start() used to recover).
+        {
+            let conn = Connection::open(&queue.db_path).unwrap();
+            ensure_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
+                 VALUES ('task_stale_runtime', '{\"s\":1}', 0, 0, 'in_progress', ?1, 0)",
+                params![now_f64() - 1000.0],
+            )
+            .unwrap();
+        }
+        queue.recover_sweep().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "expired lease must be recovered and processed exactly once"
+        );
         queue.stop().await;
     }
 }
