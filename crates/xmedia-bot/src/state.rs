@@ -143,6 +143,10 @@ impl ChatStore {
         let now = unix_now();
         let ttl_secs = ttl.as_secs() as i64;
         let mut removed = Vec::new();
+        // Chats with no live edit records: evicted from the cache (and their
+        // per-chat lock) so the cache stays bounded to active prompts. The DB
+        // keeps the row; the next get() reloads it.
+        let mut evicted_chats = Vec::new();
         let changed: Vec<(i64, ChatData)> = {
             let mut cache = self.cache.lock();
             let mut out = Vec::new();
@@ -159,14 +163,30 @@ impl ChatStore {
                     }
                 }
                 if kept.len() != data.edit_message.len() {
+                    // Persist the pruned row (removes expired records from
+                    // the DB too, not just the cache).
                     data.edit_message = kept;
                     out.push((*chat_id, data.clone()));
                 }
+                if data.edit_message.is_empty() {
+                    evicted_chats.push(*chat_id);
+                }
             }
+            // Lock order: update() takes the per-chat lock before the cache
+            // lock, so prune must not hold the cache lock while taking locks.
+            drop(cache);
             out
         };
         for (chat_id, data) in changed {
             self.set(chat_id, &data).await;
+        }
+        if !evicted_chats.is_empty() {
+            let mut cache = self.cache.lock();
+            let mut locks = self.locks.lock();
+            for chat_id in &evicted_chats {
+                cache.remove(chat_id);
+                locks.remove(chat_id);
+            }
         }
         if !removed.is_empty() {
             log::info!(
