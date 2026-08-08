@@ -136,7 +136,10 @@ pub fn extract_urls(message: &Message) -> Vec<String> {
         }
     }
     let mut seen = HashSet::new();
-    urls.retain(|url| seen.insert(url.clone()));
+    // Dedup by the normalized post id so variant URLs of the same post
+    // (/status/1 vs /status/1/photo/1) are sent once; unsupported URLs fall
+    // back to exact-string dedup.
+    urls.retain(|url| seen.insert(x_media::site::cache_key(url).unwrap_or_else(|| url.clone())));
     urls
 }
 
