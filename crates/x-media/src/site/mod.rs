@@ -203,12 +203,22 @@ impl From<PixivError> for FetchError {
 /// Shared HTTP client (browser User-Agent) for twitter/bsky fetches and
 /// [`download_media`].
 pub(crate) static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let builder = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         // reqwest has no total timeout by default; a stalled connection
         // would otherwise pin a fetch/handler forever.
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10));
+    // Route site fetches through the same proxy the Bot API uses, so a
+    // network that needs TELOXIDE_PROXY (e.g. behind the GFW) does not
+    // leave site fetches dead while the bot itself works.
+    if let Some(proxy) = std::env::var("TELOXIDE_PROXY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        && let Ok(p) = reqwest::Proxy::all(&proxy)
+    {
+        builder = builder.proxy(p);
+    }
     // Each `#[tokio::test]` runs on its own runtime; the connection pool is
     // bound to the runtime that created it, so cross-runtime reuse of idle
     // connections fails with DispatchGone. In test builds every request uses
