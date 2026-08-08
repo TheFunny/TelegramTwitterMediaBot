@@ -240,8 +240,8 @@ impl QueueWorker {
     async fn run_loop(self) {
         while !self.stop.load(Ordering::Relaxed) {
             match self.lease_next().await {
-                Some(row) => self.process(row).await,
-                None => {
+                Ok(Some(row)) => self.process(row).await,
+                Ok(None) => {
                     let wait_until = self.earliest_run_after().await;
                     let notified = self.notify.notified();
                     tokio::pin!(notified);
@@ -258,13 +258,20 @@ impl QueueWorker {
                         }
                     }
                 }
+                // A lease failure while rows are due would otherwise loop
+                // with sleep(0) and hammer SQLite; back off briefly.
+                Err(e) => {
+                    log::error!("queue lease failed: {e}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     }
 
     /// Leases the oldest due row (sets it `in_progress` with a lock TTL).
-    async fn lease_next(&self) -> Option<LeasedRow> {
-        let result = crate::db::with_conn(&self.db_path, |conn| {
+    /// Errors are surfaced so the caller can back off instead of spinning.
+    async fn lease_next(&self) -> Result<Option<LeasedRow>, rusqlite::Error> {
+        crate::db::with_conn(&self.db_path, |conn| {
             // BEGIN IMMEDIATE: with several workers, a deferred transaction
             // that read before another worker's lease commit would fail with
             // SQLITE_BUSY_SNAPSHOT. Taking the write lock up front serializes
@@ -302,14 +309,7 @@ impl QueueWorker {
                 attempts,
             }))
         })
-        .await;
-        match result {
-            Ok(row) => row,
-            Err(e) => {
-                log::error!("queue lease failed: {e}");
-                None
-            }
-        }
+        .await
     }
 
     async fn earliest_run_after(&self) -> Option<f64> {
