@@ -6,7 +6,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:www\.)?pixiv\.net/(?:en/)?(?:(?:i|artworks)/|member_illust\.php\?(?:mode=[a-z_]*&)?illust_id=)(\d+)").unwrap()
+    Regex::new(r"^(?:https?://)?(?:www\.)?pixiv\.net/(?:en/)?(?:(?:i|artworks)/|member_illust\.php\?(?:mode=[a-z_]*&)?illust_id=)(\d+)").unwrap()
 });
 
 pub fn enabled() -> bool {

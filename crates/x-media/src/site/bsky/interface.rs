@@ -5,8 +5,9 @@ use html_escape::encode_text;
 use regex::Regex;
 use std::sync::LazyLock;
 
-pub static PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap());
+pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:https?://)?bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap()
+});
 
 pub fn enabled() -> bool {
     true
