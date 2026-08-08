@@ -13,8 +13,51 @@ use teloxide::types::{
     MessageEntityKind, MessageId, ParseMode, Recipient, ReplyParameters,
 };
 use teloxide::utils::command::BotCommands;
-use tokio::sync::Semaphore;
 use x_media::media::Media;
+
+/// One URL job: bot handle + the message + the extracted URL.
+type UrlJob = (Bot, Message, String);
+/// Bounded channel of URL jobs drained by [`start_url_workers`]. The bound
+/// caps both queued memory and shutdown backlog; a full channel applies
+/// backpressure to the per-chat handler instead of spawning unbounded tasks.
+static URL_JOBS: LazyLock<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<UrlJob>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(None));
+/// Set by main's shutdown sequence; workers stop pulling new jobs.
+static URL_STOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Worker count draining URL jobs; keeps the old 8-permit concurrency cap
+/// while bounding how many jobs can be queued at all.
+const URL_WORKERS: usize = 8;
+
+/// Starts the URL job workers (called once from main after the queue starts).
+/// teloxide dispatches updates to a per-chat worker that handles them
+/// sequentially, so a batch-forward of many messages would otherwise be
+/// processed one at a time (fetch + send each, roughly a second per
+/// message); the workers add throughput, and FIFO order preserves per-message
+/// URL order.
+pub async fn start_url_workers() {
+    let (tx, rx) = tokio::sync::mpsc::channel::<UrlJob>(256);
+    *URL_JOBS.lock() = Some(tx);
+    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    for _ in 0..URL_WORKERS {
+        let rx = std::sync::Arc::clone(&rx);
+        tokio::spawn(async move {
+            while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                let job = rx.lock().await.recv().await;
+                match job {
+                    Some((bot, message, url)) => url_media(bot, &message, &url).await,
+                    None => break,
+                }
+            }
+        });
+    }
+}
+
+/// Stops URL workers (drains up to the 256 queued jobs, then exits).
+pub fn stop_url_workers() {
+    URL_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub static CHAT_STORE: LazyLock<ChatStore> =
     LazyLock::new(|| ChatStore::open("data/task_queue.db").expect("failed to open chat store"));
@@ -23,14 +66,6 @@ pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
 pub static LINK_CACHE: LazyLock<LinkCache> =
     LazyLock::new(|| LinkCache::open("data/task_queue.db"));
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
-
-/// Cap on concurrent per-URL processing. teloxide dispatches updates to a
-/// per-chat worker that handles them sequentially, so a batch-forward of many
-/// messages would otherwise be processed one at a time (fetch + send each,
-/// roughly a second per message). Moving the work into spawned tasks trades
-/// per-chat reply ordering for throughput; the semaphore bounds how many run
-/// at once so a big burst cannot hammer Telegram's rate limits.
-static URL_TASKS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -721,13 +756,13 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
             log::info!("extracted {} URL(s): {urls:?}", urls.len());
         }
         for url in urls {
-            let bot = bot.clone();
-            let message = message.clone();
-            tokio::spawn(async move {
-                // Held for the whole task; the semaphore is never closed.
-                let _permit = URL_TASKS.acquire().await.expect("URL semaphore closed");
-                url_media(bot, &message, &url).await;
-            });
+            // Clone out of the lock: the parking_lot guard is !Send and must
+            // not be held across the await below.
+            let Some(tx) = URL_JOBS.lock().clone() else {
+                log::warn!("url workers not started; dropping link");
+                break;
+            };
+            let _ = tx.send((bot.clone(), message.clone(), url)).await;
         }
     }
     respond(())

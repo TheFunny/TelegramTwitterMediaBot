@@ -62,6 +62,10 @@ async fn main() {
         .await;
     log::info!("task queue worker started");
 
+    // URL job workers: bounded channel + fixed pool for per-URL work.
+    handlers::start_url_workers().await;
+    log::info!("url workers started");
+
     // Pixiv login validation (user request): a failed login notifies the
     // admin and disables pixiv for this process.
     if site::pixiv::enabled() {
@@ -174,6 +178,7 @@ async fn main() {
     // Graceful stop (Ctrl+C / SIGTERM): stop the sweep, notify the admin, drain the queue.
     log::info!("Stopping bot");
     let _ = stop_tx.send(true);
+    handlers::stop_url_workers();
     if let Some(admin) = CONFIG.admin_ids.first() {
         let _ = bot.send_message(ChatId(*admin), "Shutting down...").await;
     }
