@@ -19,6 +19,15 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Unix timestamp in fractional seconds. Shared by the queue, chat store and
+/// link cache (previously four private copies).
+pub fn now_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 /// Runs `f` against a fresh connection on a blocking thread, returning the
 /// closure's result. Owns the `spawn_blocking` + `expect` ceremony shared by
 /// every table access; the caller maps errors to its own log line.

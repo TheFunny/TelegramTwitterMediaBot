@@ -5,13 +5,14 @@
 //! flow. The Python dict-mutation hack (attempts inside the payload) is
 //! replaced by dedicated columns.
 
+use crate::db::now_f64;
 use parking_lot::Mutex;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -60,13 +61,6 @@ struct QueueWorker {
     stop: Arc<AtomicBool>,
     handler: Arc<Handler>,
     dead_letter: Arc<DeadLetter>,
-}
-
-fn now_f64() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
 }
 
 /// Resets rows left `in_progress` with an expired lock TTL back to `pending`

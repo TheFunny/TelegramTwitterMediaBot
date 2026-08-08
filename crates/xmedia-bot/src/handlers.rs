@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::db::now_f64;
 use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
 use crate::queue::PersistentTaskQueue;
 use crate::send::{self, MediaItemPayload, Task};
@@ -109,13 +110,6 @@ where
     bot.send_message(message.chat.id, text)
         .reply_parameters(ReplyParameters::new(message.id).allow_sending_without_reply())
         .await
-}
-
-fn now_f64() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
 }
 
 /// Extracts URL and text-link entities (text + caption), deduped in order.
