@@ -83,9 +83,11 @@ fn scaled_retry_delay(base: f64, attempts: i32) -> f64 {
 
 fn ensure_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
+        "PRAGMA journal_mode=WAL; \
+         CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
          run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
-         locked_until REAL NOT NULL, created_at REAL NOT NULL);",
+         locked_until REAL NOT NULL, created_at REAL NOT NULL); \
+         CREATE INDEX IF NOT EXISTS idx_tasks_pending ON tasks(status, run_after);",
     )
 }
 

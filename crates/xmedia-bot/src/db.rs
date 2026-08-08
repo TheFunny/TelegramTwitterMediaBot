@@ -16,6 +16,10 @@ use std::time::Duration;
 pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
+    // WAL lets readers run alongside writer leases instead of blocking on
+    // the rollback journal; the mode persists in the DB header, so the
+    // idempotent pragma here and in ensure_schema only needs to win once.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     Ok(conn)
 }
 
