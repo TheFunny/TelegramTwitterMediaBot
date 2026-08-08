@@ -136,6 +136,12 @@ impl PixivAPI {
             .bearer_auth(access_token)
             .send()
             .await?;
+        if !response.status().is_success() {
+            return Err(PixivError::Api(format!(
+                "status {}",
+                response.status()
+            )));
+        }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {
             let message = json
@@ -186,6 +192,12 @@ impl PixivAPI {
             .bearer_auth(access_token)
             .send()
             .await?;
+        if !response.status().is_success() {
+            return Err(PixivError::Api(format!(
+                "status {}",
+                response.status()
+            )));
+        }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {
             let message = json

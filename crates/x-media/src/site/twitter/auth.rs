@@ -126,9 +126,14 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         .header("referer", "https://x.com/")
         .send()
         .await?;
-    if !response.status().is_success() {
-        log::warn!("twitter auth fetch {id}: HTTP {}", response.status());
-        return Err(FetchError::NotFound);
+    // 404/410 = gone (permanent); 429/5xx = transient and retried by fetch.
+    let status = response.status();
+    if !status.is_success() {
+        log::warn!("twitter auth fetch {id}: HTTP {status}");
+        return match status.as_u16() {
+            404 | 410 => Err(FetchError::NotFound),
+            _ => Err(FetchError::Transient(format!("twitter auth status {status}"))),
+        };
     }
     let text = response.text().await?;
     let json: Value = serde_json::from_str(&text)?;

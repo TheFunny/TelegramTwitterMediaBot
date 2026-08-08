@@ -150,6 +150,8 @@ pub enum FetchError {
     Sensitive,
     /// A download exceeded the caller's size cap (see [`download_media_limited`]).
     TooLarge,
+    /// A transient server-side failure (429 / 5xx); [`fetch`] retries these.
+    Transient(String),
 }
 
 impl fmt::Display for FetchError {
@@ -162,6 +164,7 @@ impl fmt::Display for FetchError {
             FetchError::Blocked => write!(f, "blocked"),
             FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
             FetchError::TooLarge => write!(f, "media too large"),
+            FetchError::Transient(message) => write!(f, "transient: {message}"),
         }
     }
 }
@@ -174,6 +177,7 @@ impl std::error::Error for FetchError {
             FetchError::Pixiv(e) => Some(e),
             FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
             FetchError::TooLarge => None,
+            FetchError::Transient(_) => None,
         }
     }
 }
@@ -242,9 +246,10 @@ pub(crate) fn log_once_ffmpeg_missing() {
 /// matches (unsupported links are silently ignored by the bot).
 ///
 /// Transient network failures are retried: 3 total attempts with 1s then 2s
-/// delays. Non-Http errors (Json/NotFound/Blocked/Pixiv) are not retried.
+/// delays. Retried classes: bare HTTP errors, [`FetchError::Transient`]
+/// (429/5xx from any site), and pixiv errors (its network failures arrive
+/// wrapped as `PixivError`). Non-retried: Json/NotFound/Blocked/Sensitive.
 pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
-    let mut last_http_error = None;
     for attempt in 0..3u32 {
         match fetch_once(url).await {
             Ok(Some(fetched)) => {
@@ -256,18 +261,17 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
                 return Ok(Some(fetched));
             }
             Ok(None) => return Ok(None),
-            Err(FetchError::Http(e)) => {
-                last_http_error = Some(e);
+            Err(e @ (FetchError::Http(_) | FetchError::Transient(_) | FetchError::Pixiv(_))) => {
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                } else {
+                    return Err(e);
                 }
             }
             Err(other) => return Err(other),
         }
     }
-    Err(FetchError::Http(
-        last_http_error.expect("retry loop always ran 3 attempts"),
-    ))
+    unreachable!("retry loop always returns")
 }
 
 async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
