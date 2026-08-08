@@ -243,7 +243,7 @@ impl PixivAPI {
                 }
                 // Uniform jpg or png per artwork; sniff the first entry's
                 // magic bytes instead of trusting its filename.
-                let mut first = archive.by_index(0).map_err(|e| e.to_string())?;
+                let first = archive.by_index(0).map_err(|e| e.to_string())?;
                 let mut first_bytes = Vec::new();
                 first
                     .take(64 * 1024 * 1024 + 1)
@@ -268,7 +268,7 @@ impl PixivAPI {
                     count += 1;
                 }
                 for i in 1..archive.len() {
-                    let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                    let entry = archive.by_index(i).map_err(|e| e.to_string())?;
                     if entry.size() > 64 * 1024 * 1024 {
                         return Err(format!("frame {i} exceeds size cap"));
                     }
