@@ -61,6 +61,15 @@ impl MediaItemPayload {
             MediaItemPayload::Animation { .. } => None,
         }
     }
+
+    /// The cover-frame URL for videos (used by the upload fallback, which
+    /// otherwise drops the thumbnail the URL-send path applies).
+    fn thumbnail_url(&self) -> Option<&str> {
+        match self {
+            MediaItemPayload::Video { thumbnail, .. } => thumbnail.as_deref(),
+            MediaItemPayload::Photo { .. } | MediaItemPayload::Animation { .. } => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -522,8 +531,9 @@ fn media_from_file(
     item: &MediaItemPayload,
     path: std::path::PathBuf,
     caption: Option<&str>,
-) -> InputMedia {
-    match item {
+    thumbnail: Option<&str>,
+) -> Result<InputMedia, String> {
+    let mut media = match item {
         MediaItemPayload::Photo { has_spoiler, .. } => {
             photo_media(InputFile::file(path), caption, *has_spoiler)
         }
@@ -533,7 +543,11 @@ fn media_from_file(
         MediaItemPayload::Animation { has_spoiler, .. } => {
             animation_media(InputFile::file(path), caption, *has_spoiler)
         }
+    };
+    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut media) {
+        *v = v.clone().thumbnail(input_file_for(thumb)?);
     }
+    Ok(media)
 }
 
 /// Builds the media group item from a (smaller) URL.
@@ -541,8 +555,9 @@ fn media_from_url(
     item: &MediaItemPayload,
     url: &str,
     caption: Option<&str>,
+    thumbnail: Option<&str>,
 ) -> Result<InputMedia, String> {
-    Ok(match item {
+    let mut media = match item {
         MediaItemPayload::Photo { has_spoiler, .. } => {
             photo_media(input_file_for(url)?, caption, *has_spoiler)
         }
@@ -552,7 +567,11 @@ fn media_from_url(
         MediaItemPayload::Animation { has_spoiler, .. } => {
             animation_media(input_file_for(url)?, caption, *has_spoiler)
         }
-    })
+    };
+    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut media) {
+        *v = v.clone().thumbnail(input_file_for(thumb)?);
+    }
+    Ok(media)
 }
 
 /// Download-and-reupload fallback for one media batch. Files over the upload
@@ -580,7 +599,7 @@ async fn send_batch_via_upload(
         let too_large = too_large && !matches!(item, MediaItemPayload::Photo { .. });
         let media = if too_large {
             match item.fallback_url() {
-                Some(url) => match media_from_url(item, url, item_caption) {
+                Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
                     Ok(media) => media,
                     Err(message) => {
                         return Err(FallbackError::Permanent { message });
@@ -612,10 +631,11 @@ async fn send_batch_via_upload(
                             PhotoPrep::Upload(upload) => {
                                 let path = upload.path().to_path_buf();
                                 files.push(upload);
-                                media_from_file(item, path, item_caption)
+                                media_from_file(item, path, item_caption, item.thumbnail_url())
+                                    .map_err(|message| FallbackError::Permanent { message })?
                             }
                             PhotoPrep::UseFallback => match item.fallback_url() {
-                                Some(url) => match media_from_url(item, url, item_caption) {
+                                Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
                                     Ok(media) => media,
                                     Err(message) => {
                                         return Err(FallbackError::Permanent { message });
@@ -633,11 +653,12 @@ async fn send_batch_via_upload(
                     } else {
                         let path = file.path().to_path_buf();
                         files.push(file);
-                        media_from_file(item, path, item_caption)
+                        media_from_file(item, path, item_caption, item.thumbnail_url())
+                            .map_err(|message| FallbackError::Permanent { message })?
                     }
                 }
                 Err(FallbackError::MediaTooLarge) => match item.fallback_url() {
-                    Some(url) => match media_from_url(item, url, item_caption) {
+                    Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
                         Ok(media) => media,
                         Err(message) => {
                             return Err(FallbackError::Permanent { message });
