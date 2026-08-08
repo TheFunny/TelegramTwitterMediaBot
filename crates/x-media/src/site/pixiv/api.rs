@@ -238,23 +238,48 @@ impl PixivAPI {
                 // frames are uniformly jpg or png per artwork.
                 let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
                     .map_err(|e| format!("unzip: {e}"))?;
-                // pixiv ugoira frames are uniformly jpg or png per artwork; take
-                // the extension from the first entry.
-                let extension = if archive.len() > 0 {
-                    let first_name = archive
-                        .by_index(0)
-                        .map_err(|e| e.to_string())?
-                        .name()
-                        .to_string();
-                    first_name.rsplit('.').next().unwrap_or("jpg").to_string()
+                if archive.len() == 0 {
+                    return Err("empty frame zip".to_string());
+                }
+                // Uniform jpg or png per artwork; sniff the first entry's
+                // magic bytes instead of trusting its filename.
+                let mut first = archive.by_index(0).map_err(|e| e.to_string())?;
+                let mut first_bytes = Vec::new();
+                first
+                    .take(64 * 1024 * 1024 + 1)
+                    .read_to_end(&mut first_bytes)
+                    .map_err(|e| e.to_string())?;
+                if first_bytes.len() > 64 * 1024 * 1024 {
+                    return Err("frame exceeds size cap".to_string());
+                }
+                let extension = if first_bytes.starts_with(&[0xFF, 0xD8]) {
+                    "jpg"
+                } else if first_bytes.starts_with(b"\x89PNG") {
+                    "png"
                 } else {
-                    "jpg".to_string()
+                    "jpg"
                 };
                 let mut count = 0usize;
-                for i in 0..archive.len() {
+                {
+                    let path = frames_dir
+                        .path()
+                        .join(format!("img_{count:05}.{extension}"));
+                    std::fs::write(&path, &first_bytes).map_err(|e| e.to_string())?;
+                    count += 1;
+                }
+                for i in 1..archive.len() {
                     let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                    if entry.size() > 64 * 1024 * 1024 {
+                        return Err(format!("frame {i} exceeds size cap"));
+                    }
                     let mut bytes = Vec::new();
-                    entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                    entry
+                        .take(64 * 1024 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| e.to_string())?;
+                    if bytes.len() > 64 * 1024 * 1024 {
+                        return Err(format!("frame {i} exceeds size cap"));
+                    }
                     let path = frames_dir
                         .path()
                         .join(format!("img_{count:05}.{extension}"));
@@ -304,7 +329,10 @@ impl PixivAPI {
                 Ok((output.to_string_lossy().into_owned(), out_dir))
             })
             .await
-            .expect("ugoira encode worker panicked");
+            .map_err(|e| {
+                log::error!("ugoira encode worker panicked for {illust_id}: {e}");
+                PixivError::Api(format!("ugoira worker failed: {e}"))
+            })?;
         match result {
             Ok(pair) => Ok(Some(pair)),
             Err(message) => {
