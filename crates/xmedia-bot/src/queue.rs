@@ -203,9 +203,11 @@ impl PersistentTaskQueue {
             Ok(())
         })
         .await?;
-        // Wake every sleeping worker: with several workers the one that finds
-        // nothing due must not starve the newly inserted row.
-        self.notify.notify_waiters();
+        // `notify_one` stores a permit when no worker is registered, so a
+        // notification fired between a worker's DB reads and its `notified()`
+        // registration is not lost (notify_waiters would drop it). The
+        // awakened worker re-leases and finds the new row.
+        self.notify.notify_one();
         Ok(())
     }
 
@@ -400,7 +402,8 @@ impl QueueWorker {
         if let Err(e) = result {
             log::error!("queue reschedule failed: {e}");
         }
-        self.notify.notify_waiters();
+        // Same permit semantics as enqueue: never lose the wakeup.
+        self.notify.notify_one();
     }
 }
 
