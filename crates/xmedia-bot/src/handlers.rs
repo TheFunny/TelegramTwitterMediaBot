@@ -673,7 +673,10 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
         .unwrap_or_else(|| "unknown".to_string());
     let text_preview = message
         .text()
-        .map(|t| if t.len() > 120 { &t[..120] } else { t })
+        .map(|t| {
+            let end = t.floor_char_boundary(120.min(t.len()));
+            &t[..end]
+        })
         .unwrap_or("<no text>");
     log::info!(
         "message from {sender} in {} (private={is_private}): {text_preview}",
