@@ -472,12 +472,23 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
         | MediaItemPayload::Video { media, .. }
         | MediaItemPayload::Animation { media, .. } => media,
     };
-    let bytes = match x_media::site::download_media(media_url).await {
+    // Photos are downloaded even over the upload cap so `prepare_photo` can
+    // downscale / transcode them (cap = decode budget); videos/animations
+    // abort as soon as the upload cap is crossed mid-stream.
+    let limit = if matches!(item, MediaItemPayload::Photo { .. }) {
+        photo::MAX_DECODE_BYTES
+    } else {
+        MAX_UPLOAD_BYTES + 1
+    };
+    let bytes = match x_media::site::download_media_limited(media_url, limit).await {
         Ok(bytes) => bytes,
         Err(FetchError::Http(_)) => {
             return Err(FallbackError::Retryable {
                 delay_seconds: retry_delay_seconds(0),
             });
+        }
+        Err(FetchError::TooLarge) => {
+            return Err(FallbackError::MediaTooLarge);
         }
         Err(e) => {
             return Err(FallbackError::Permanent {
@@ -485,11 +496,6 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
             });
         }
     };
-    // Photos are downloaded even over the cap so `prepare_photo` can
-    // downscale / transcode them; only videos/animations short-circuit.
-    if !matches!(item, MediaItemPayload::Photo { .. }) && bytes.len() as u64 > MAX_UPLOAD_BYTES {
-        return Err(FallbackError::MediaTooLarge);
-    }
     let ext = sniff_ext(&bytes);
     let mut file = tempfile::Builder::new()
         .suffix(&format!(".{ext}"))

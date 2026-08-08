@@ -26,8 +26,9 @@ pub const PHOTO_TARGET_DIMENSION_SUM: u32 = 9900;
 /// to a smaller media URL instead.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Decode budget (bytes): a larger intermediate buffer is not worth the peak
-/// memory; the photo degrades to the smaller URL instead.
-const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+/// memory; the photo degrades to the smaller URL instead. Also the cap for
+/// downloading photos in the send fallback (they must be downloaded whole).
+pub(crate) const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
 /// JPEG output quality (1-100).
 const JPEG_QUALITY: u8 = 90;
 

@@ -222,7 +222,7 @@ impl PixivAPI {
         let Some(zip_url) = zip_url else {
             return Ok(None);
         };
-        let zip_bytes = crate::site::download_media(&zip_url)
+        let zip_bytes = crate::site::download_media_limited(&zip_url, 512 * 1024 * 1024)
             .await
             .map_err(|e| match e {
                 FetchError::Http(e) => PixivError::Http(e),
