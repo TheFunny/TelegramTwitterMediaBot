@@ -92,10 +92,10 @@ async fn resolve_bsky_video(
                 .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
                 .and_then(|n| n.parse::<u64>().ok())
                 .unwrap_or(0);
-            if let Some(uri) = lines.next().filter(|u| !u.starts_with('#')) {
-                if bandwidth >= best.as_ref().map(|(b, _)| *b).unwrap_or(0) {
-                    best = Some((bandwidth, uri.to_string()));
-                }
+            if let Some(uri) = lines.next().filter(|u| !u.starts_with('#'))
+                && bandwidth >= best.as_ref().map(|(b, _)| *b).unwrap_or(0)
+            {
+                best = Some((bandwidth, uri.to_string()));
             }
         }
         let Some((_, uri)) = best else {
@@ -199,7 +199,7 @@ pub async fn fetch(handle: &str, rkey: &str) -> Result<Post, FetchError> {
         };
     }
     let text = response.text().await?;
-    Ok(Post::from_json(&text, rkey.to_string())?)
+    Post::from_json(&text, rkey.to_string())
 }
 
 #[derive(Debug)]

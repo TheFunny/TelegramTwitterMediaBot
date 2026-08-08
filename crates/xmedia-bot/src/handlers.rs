@@ -24,8 +24,7 @@ type UrlJob = (Bot, Message, String);
 static URL_JOBS: LazyLock<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<UrlJob>>>> =
     LazyLock::new(|| parking_lot::Mutex::new(None));
 /// Set by main's shutdown sequence; workers stop pulling new jobs.
-static URL_STOP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static URL_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Worker count draining URL jobs; keeps the old 8-permit concurrency cap
 /// while bounding how many jobs can be queued at all.

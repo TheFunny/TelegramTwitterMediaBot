@@ -641,7 +641,12 @@ async fn send_batch_via_upload(
                                     .map_err(|message| FallbackError::Permanent { message })?
                             }
                             PhotoPrep::UseFallback => match item.fallback_url() {
-                                Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
+                                Some(url) => match media_from_url(
+                                    item,
+                                    url,
+                                    item_caption,
+                                    item.thumbnail_url(),
+                                ) {
                                     Ok(media) => media,
                                     Err(message) => {
                                         return Err(FallbackError::Permanent { message });
@@ -664,12 +669,14 @@ async fn send_batch_via_upload(
                     }
                 }
                 Err(FallbackError::MediaTooLarge) => match item.fallback_url() {
-                    Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
-                        Ok(media) => media,
-                        Err(message) => {
-                            return Err(FallbackError::Permanent { message });
+                    Some(url) => {
+                        match media_from_url(item, url, item_caption, item.thumbnail_url()) {
+                            Ok(media) => media,
+                            Err(message) => {
+                                return Err(FallbackError::Permanent { message });
+                            }
                         }
-                    },
+                    }
                     None => {
                         return Err(FallbackError::Permanent {
                             message: "media too large".into(),

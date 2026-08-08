@@ -132,7 +132,9 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         log::warn!("twitter auth fetch {id}: HTTP {status}");
         return match status.as_u16() {
             404 | 410 => Err(FetchError::NotFound),
-            _ => Err(FetchError::Transient(format!("twitter auth status {status}"))),
+            _ => Err(FetchError::Transient(format!(
+                "twitter auth status {status}"
+            ))),
         };
     }
     let text = response.text().await?;

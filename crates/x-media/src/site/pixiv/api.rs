@@ -137,10 +137,7 @@ impl PixivAPI {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(PixivError::Api(format!(
-                "status {}",
-                response.status()
-            )));
+            return Err(PixivError::Api(format!("status {}", response.status())));
         }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {
@@ -193,10 +190,7 @@ impl PixivAPI {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(PixivError::Api(format!(
-                "status {}",
-                response.status()
-            )));
+            return Err(PixivError::Api(format!("status {}", response.status())));
         }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {
@@ -250,7 +244,7 @@ impl PixivAPI {
                 // frames are uniformly jpg or png per artwork.
                 let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
                     .map_err(|e| format!("unzip: {e}"))?;
-                if archive.len() == 0 {
+                if archive.is_empty() {
                     return Err("empty frame zip".to_string());
                 }
                 // Uniform jpg or png per artwork; sniff the first entry's

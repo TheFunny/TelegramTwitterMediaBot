@@ -318,10 +318,7 @@ pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
 /// download aborts with [`FetchError::TooLarge`] the moment the cap is
 /// crossed (or when a declared Content-Length already exceeds it). Keeps the
 /// bot from buffering arbitrarily large bodies into memory.
-pub async fn download_media_limited(
-    url: &str,
-    max_bytes: u64,
-) -> Result<bytes::Bytes, FetchError> {
+pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
     let mut request = CLIENT.get(url);
     let lower = url.to_ascii_lowercase();
     if lower.contains("pximg.net") {
