@@ -199,7 +199,12 @@ impl From<PixivError> for FetchError {
 /// Shared HTTP client (browser User-Agent) for twitter/bsky fetches and
 /// [`download_media`].
 pub(crate) static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let builder = reqwest::Client::builder().user_agent("Mozilla/5.0");
+    let builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0")
+        // reqwest has no total timeout by default; a stalled connection
+        // would otherwise pin a fetch/handler forever.
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10));
     // Each `#[tokio::test]` runs on its own runtime; the connection pool is
     // bound to the runtime that created it, so cross-runtime reuse of idle
     // connections fails with DispatchGone. In test builds every request uses
