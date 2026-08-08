@@ -1,7 +1,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched};
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -48,7 +48,9 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
 fn empty_fetched(url: &str) -> Fetched {
     Fetched {
         source_url: url.to_string(),
-        caption: url.to_string(),
+        // The raw user-supplied URL goes into an HTML caption; escape it so
+        // crafted links cannot break the parse (Telegram 400).
+        caption: encode_text(url).into_owned(),
         title: String::new(),
         media: vec![],
         sensitive: true,
@@ -151,8 +153,8 @@ impl Tweet {
     pub fn caption(&self) -> String {
         format!(
             "{url}\n<a href=\"{author_url}\">{author}</a>: {text}",
-            url = self.url(),
-            author_url = self.author_url(),
+            url = encode_double_quoted_attribute(&self.url()),
+            author_url = encode_double_quoted_attribute(&self.author_url()),
             author = encode_text(&self.author),
             text = encode_text(&self.text),
         )

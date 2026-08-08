@@ -162,7 +162,7 @@ async fn edit_message_handler(bot: &Bot, message: &Message) -> bool {
     };
     let link = format!(
         "<a href=\"{0}\">{1}</a>",
-        edit.url,
+        html_escape::encode_double_quoted_attribute(&edit.url),
         html_escape::encode_text(text)
     );
     let new_text = if edit.template.is_empty() {

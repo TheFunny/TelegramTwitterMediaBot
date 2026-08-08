@@ -1,7 +1,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched};
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -224,8 +224,8 @@ impl Post {
     pub fn caption(&self) -> String {
         format!(
             "{url}\n<a href=\"{author_url}\">{author}</a>: {text}",
-            url = self.url(),
-            author_url = self.author_url(),
+            url = encode_double_quoted_attribute(&self.url()),
+            author_url = encode_double_quoted_attribute(&self.author_url()),
             author = encode_text(&self.author),
             text = encode_text(&self.text),
         )

@@ -1,7 +1,7 @@
 use super::model::{IllustrationModel, TypeModel};
 use crate::media::Media;
 use crate::site::{FetchError, Fetched};
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -48,9 +48,9 @@ impl Illustration {
     pub fn caption(&self) -> String {
         format!(
             "<a href=\"{url}\">{title}</a> / <a href=\"{author_url}\">{author}</a>\n{tags}",
-            url = self.url(),
+            url = encode_double_quoted_attribute(&self.url()),
             title = encode_text(&self.title),
-            author_url = self.author_url(),
+            author_url = encode_double_quoted_attribute(&self.author_url()),
             author = encode_text(&self.author),
             tags = encode_text(
                 &self
