@@ -238,9 +238,11 @@ async fn execute_command(
         Command::SetForwardChannel(channel) => {
             let result = match set_forward_channel_handler(bot, message, channel).await {
                 Ok(channel_id) => {
-                    let mut chat_data = CHAT_STORE.get(message.chat.id.0).await;
-                    chat_data.forward_channel_id = Some(channel_id);
-                    CHAT_STORE.set(message.chat.id.0, &chat_data).await;
+                    CHAT_STORE
+                        .update(message.chat.id.0, |data| {
+                            data.forward_channel_id = Some(channel_id);
+                        })
+                        .await;
                     "Add successfully.".to_string()
                 }
                 Err(SetForwardChannelError::EmptyParameter) => {
@@ -264,31 +266,34 @@ async fn execute_command(
         }
         Command::RemoveForwardChannel => {
             let chat_id = message.chat.id.0;
-            let mut chat_data = CHAT_STORE.get(chat_id).await;
-            let text = if chat_data.forward_channel_id.is_some() {
-                chat_data.forward_channel_id = None;
-                CHAT_STORE.set(chat_id, &chat_data).await;
-                "Remove successfully.".to_string()
-            } else {
-                "No channel to remove.".to_string()
-            };
+            let text = CHAT_STORE
+                .update(chat_id, |data| {
+                    if data.forward_channel_id.is_some() {
+                        data.forward_channel_id = None;
+                        "Remove successfully.".to_string()
+                    } else {
+                        "No channel to remove.".to_string()
+                    }
+                })
+                .await;
             reply(bot.clone(), message.clone(), text).await?;
         }
         Command::EditBeforeForward => {
             let chat_id = message.chat.id.0;
-            let mut chat_data = CHAT_STORE.get(chat_id).await;
-            let text = if chat_data.forward_channel_id.is_none() {
-                "Please enable forward channel first.".to_string()
-            } else if chat_data.edit_before_forward {
-                chat_data.edit_before_forward = false;
-                chat_data.edit_message.clear();
-                CHAT_STORE.set(chat_id, &chat_data).await;
-                "Disable edit before forward.".to_string()
-            } else {
-                chat_data.edit_before_forward = true;
-                CHAT_STORE.set(chat_id, &chat_data).await;
-                "Enable edit before forward.".to_string()
-            };
+            let text = CHAT_STORE
+                .update(chat_id, |data| {
+                    if data.forward_channel_id.is_none() {
+                        "Please enable forward channel first.".to_string()
+                    } else if data.edit_before_forward {
+                        data.edit_before_forward = false;
+                        data.edit_message.clear();
+                        "Disable edit before forward.".to_string()
+                    } else {
+                        data.edit_before_forward = true;
+                        "Enable edit before forward.".to_string()
+                    }
+                })
+                .await;
             reply(bot.clone(), message.clone(), text).await?;
         }
         Command::SetTemplate(name) => {
@@ -302,11 +307,14 @@ async fn execute_command(
                     } else if name.is_empty() {
                         "Please provide a name for the template.".to_string()
                     } else {
-                        let mut chat_data = CHAT_STORE.get(chat_id).await;
-                        chat_data
-                            .template
-                            .insert(name, html_escape::encode_text(reply_text).into_owned());
-                        CHAT_STORE.set(chat_id, &chat_data).await;
+                        CHAT_STORE
+                            .update(chat_id, |data| {
+                                data.template.insert(
+                                    name,
+                                    html_escape::encode_text(reply_text).into_owned(),
+                                );
+                            })
+                            .await;
                         "Template set.".to_string()
                     }
                 }
@@ -344,9 +352,11 @@ async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            let mut chat_data = CHAT_STORE.get(chat_id).await;
-            chat_data.message_format.insert(site.to_string(), format);
-            CHAT_STORE.set(chat_id, &chat_data).await;
+            CHAT_STORE
+                .update(chat_id, |data| {
+                    data.message_format.insert(site.to_string(), format);
+                })
+                .await;
             reply(bot.clone(), message.clone(), "Format set.").await?;
         }
         Command::ClearCache(arg) => {
@@ -793,7 +803,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
     let chat_id = message.chat().id.0;
     let prompt_message_id = message.id().0 as i64;
     let ttl_secs = CONFIG.edit_message_ttl.as_secs() as i64;
-    let mut chat_data = CHAT_STORE.get(chat_id).await;
+    let chat_data = CHAT_STORE.get(chat_id).await;
     let edit = chat_data.edit_message.get(&prompt_message_id).cloned();
     let Some(edit) = edit else {
         log::info!(
@@ -807,8 +817,11 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
     };
     // Lazy expiry: a stale record (past the TTL, not yet swept) is dropped.
     if edit.created_at + ttl_secs <= unix_now() {
-        chat_data.edit_message.remove(&prompt_message_id);
-        CHAT_STORE.set(chat_id, &chat_data).await;
+        CHAT_STORE
+            .update(chat_id, |data| {
+                data.edit_message.remove(&prompt_message_id);
+            })
+            .await;
         bot.answer_callback_query(callback_query_id)
             .text("Expired")
             .await?;
@@ -844,8 +857,11 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                         let _ = bot
                             .delete_message(ChatId(chat_id), MessageId(prompt_message_id as i32))
                             .await;
-                        chat_data.edit_message.remove(&prompt_message_id);
-                        CHAT_STORE.set(chat_id, &chat_data).await;
+                        CHAT_STORE
+                            .update(chat_id, |data| {
+                                data.edit_message.remove(&prompt_message_id);
+                            })
+                            .await;
                     }
                     Err(send::SendError::Retryable {
                         delay_seconds,
@@ -884,10 +900,13 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                 .caption(template_html)
                 .parse_mode(ParseMode::Html)
                 .await;
-            if let Some(entry) = chat_data.edit_message.get_mut(&prompt_message_id) {
-                entry.template = name.to_string();
-            }
-            CHAT_STORE.set(chat_id, &chat_data).await;
+            CHAT_STORE
+                .update(chat_id, |data| {
+                    if let Some(entry) = data.edit_message.get_mut(&prompt_message_id) {
+                        entry.template = name.to_string();
+                    }
+                })
+                .await;
             log::info!("template '{name}' applied to prompt {prompt_message_id}");
         }
         bot.answer_callback_query(callback_query_id).await?;

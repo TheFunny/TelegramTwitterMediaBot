@@ -1048,8 +1048,7 @@ pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
     };
 
     if edit_before_forward {
-        let mut chat_data = CHAT_STORE.get(chat_id).await;
-        let keyboard = build_edit_markup(&chat_data.template);
+        let keyboard = build_edit_markup(&CHAT_STORE.get(chat_id).await.template);
         match bot
             .send_message(ChatId(chat_id), "Reply to edit message.")
             .reply_markup(keyboard)
@@ -1064,17 +1063,22 @@ pub async fn post_send_actions(bot: &Bot, task: &Task, message_ids: Vec<i64>) {
                     prompt.id.0,
                     message_ids.len()
                 );
-                chat_data.edit_message.insert(
-                    prompt.id.0 as i64,
-                    EditMessage {
-                        url: source_url,
-                        chat_id,
-                        forward_message_ids: message_ids,
-                        template: String::new(),
-                        created_at: unix_now(),
-                    },
-                );
-                CHAT_STORE.set(chat_id, &chat_data).await;
+                let prompt_id = prompt.id.0 as i64;
+                let source_url = source_url.clone();
+                CHAT_STORE
+                    .update(chat_id, move |data| {
+                        data.edit_message.insert(
+                            prompt_id,
+                            EditMessage {
+                                url: source_url,
+                                chat_id,
+                                forward_message_ids: message_ids,
+                                template: String::new(),
+                                created_at: unix_now(),
+                            },
+                        );
+                    })
+                    .await;
             }
             Err(e) => log::error!("failed to send edit prompt: {e}"),
         }

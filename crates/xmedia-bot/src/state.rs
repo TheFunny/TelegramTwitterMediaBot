@@ -6,6 +6,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -34,6 +35,9 @@ pub struct EditMessage {
 pub struct ChatStore {
     /// In-memory cache; the DB is the source of truth on first access.
     cache: Mutex<HashMap<i64, ChatData>>,
+    /// Per-chat async locks serializing get→mutate→set so concurrent handler
+    /// tasks (batch-forwards, callbacks) cannot clobber each other's writes.
+    locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     db_path: String,
 }
 
@@ -62,6 +66,7 @@ impl ChatStore {
         drop(conn);
         Ok(ChatStore {
             cache: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
             db_path: path.to_string(),
         })
     }
@@ -111,6 +116,26 @@ impl ChatStore {
         }
     }
 
+    /// Serializes a get→mutate→set cycle per chat: concurrent handler tasks
+    /// (the batch-forward design spawns several per chat) each snapshot the
+    /// same `ChatData` and last-writer-wins would silently drop mutations,
+    /// e.g. a second `edit_message` record. The per-chat lock makes the
+    /// cycle atomic. Returns the closure's result.
+    pub async fn update<R>(&self, chat_id: i64, f: impl FnOnce(&mut ChatData) -> R) -> R {
+        let lock = {
+            let mut locks = self.locks.lock();
+            locks
+                .entry(chat_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        let mut data = self.get(chat_id).await;
+        let r = f(&mut data);
+        self.set(chat_id, &data).await;
+        r
+    }
+
     /// Removes edit-before-forward records whose `created_at + ttl` is in the
     /// past. Returns the removed `(chat_id, prompt_message_id)` pairs so the
     /// caller can clear the prompt's buttons.
@@ -150,5 +175,47 @@ impl ChatStore {
             );
         }
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_updates_do_not_lose_edit_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            ChatStore::open(dir.path().join("s.db").to_str().unwrap()).unwrap(),
+        );
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                store
+                    .update(1001, |data| {
+                        data.edit_message.insert(
+                            i,
+                            EditMessage {
+                                url: format!("https://x.com/u/status/{i}"),
+                                chat_id: 1001,
+                                forward_message_ids: vec![i],
+                                template: String::new(),
+                                created_at: 0,
+                            },
+                        );
+                    })
+                    .await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let data = store.get(1001).await;
+        assert_eq!(
+            data.edit_message.len(),
+            4,
+            "concurrent get→mutate→set must not drop records"
+        );
     }
 }
