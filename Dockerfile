@@ -64,12 +64,10 @@ LABEL org.opencontainers.image.title="${APP_NAME}"
 
 # Everything is copied in — no apt in the runtime stage. Privilege dropping is
 # done by docker-entrypoint.sh with setpriv (util-linux, already in
-# bookworm-slim), so no gosu needed. The bot links OpenSSL via
-# teloxide/reqwest's native-tls, but bookworm-slim does NOT ship libssl3, so
-# the shared libraries must be copied from the builder (same Debian release).
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3* /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3* /usr/lib/x86_64-linux-gnu/
+# bookworm-slim), so no gosu needed. TLS is rustls (webpki-roots baked in,
+# see Cargo.toml feature `rustls`/`rustls-tls`), so no system CA bundle or
+# libssl are needed; the static ffmpeg only processes local files (all
+# downloads go through reqwest).
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 
 WORKDIR /app
