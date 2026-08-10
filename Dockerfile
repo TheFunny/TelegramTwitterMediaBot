@@ -42,13 +42,15 @@ RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
     && rm /tmp/ffmpeg.zip \
     && /usr/local/bin/ffmpeg -version >/dev/null
 
-# 3. Real sources last: only our crates recompile on source changes.
-#    `cargo clean -p` drops the two crates' artifacts while keeping the
-#    compiled dependency layer, forcing a deterministic rebuild of the real
-#    sources. (The previous `touch`-mtimes hack silently shipped the stub
-#    binary when host files carried future timestamps.)
+# 3. Real sources last: only our crates recompile on source changes. Cargo's
+#    freshness check is mtime-based; the COPY'd host files usually predate the
+#    step-1 stub build, so cargo would consider the stub up to date and never
+#    compile the real sources. `touch` makes every .rs newer than the stub
+#    artifacts, forcing a rebuild of just the two crates while the compiled
+#    dependency layer stays cached. (`cargo clean -p` does NOT work here — it
+#    removes 0 files and the stub binary silently ships.)
 COPY crates/ ./crates/
-RUN cargo clean -p xmedia-bot -p x-media \
+RUN find crates -type f -name '*.rs' -exec touch {} + \
     && cargo build --release -p xmedia-bot
 
 # ---------- runtime stage ----------
@@ -62,9 +64,12 @@ LABEL org.opencontainers.image.title="${APP_NAME}"
 
 # Everything is copied in — no apt in the runtime stage. Privilege dropping is
 # done by docker-entrypoint.sh with setpriv (util-linux, already in
-# bookworm-slim), so no gosu needed. (libssl3/libcrypto are already in
-# bookworm-slim; only ca-certificates and ffmpeg need copying.)
+# bookworm-slim), so no gosu needed. The bot links OpenSSL via
+# teloxide/reqwest's native-tls, but bookworm-slim does NOT ship libssl3, so
+# the shared libraries must be copied from the builder (same Debian release).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3* /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3* /usr/lib/x86_64-linux-gnu/
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 
 WORKDIR /app
