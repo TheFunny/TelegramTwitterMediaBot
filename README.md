@@ -9,7 +9,8 @@ Telegram 机器人，将 X / Twitter、Pixiv、Bluesky 的帖子链接转换为�
 - 支持内联查询（`@机器人 <链接>`）
 - 可绑定转发频道自动转发；支持转发前编辑 caption 与自定义模板
 - 发送失败自动重试并持久化，重试耗尽后通知用户
-- Pixiv ugoira 动图自动转码为 MP4
+- Pixiv ugoira 动图自动转码为 MP4；Bluesky 视频自动转码（HLS 流 → MP4）
+- 超过 Telegram 尺寸/大小限制的图片自动压缩（保持原格式，必要时转 JPEG）
 - 链接结果本地缓存：成功发送后缓存 Telegram file id 与 caption 等，再次收到相同链接直接本地重发，不再请求源站、不保存媒体文件（`LINK_CACHE_TTL_SECONDS` 控制过期，默认 7 天）
 
 ## 快速开始
@@ -84,6 +85,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
 | `RUST_LOG` | 日志级别 |
+| `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需 |
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |
 | `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由 |
 | `VIRTUAL_PORT` | bot 容器内监听端口，nginx-proxy 的转发目标 |
@@ -93,6 +95,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `WEBHOOK` | `true` 启用 webhook 模式（默认轮询） |
 | `WEBHOOK_LISTEN` / `WEBHOOK_PORT` | bot 容器内监听地址/端口 |
 | `WEBHOOK_URL` | 对外公网 HTTPS 地址（`https://域名/` 或 `https://IP/`） |
+| `WEBHOOK_CERT` | 可选；自签名证书路径，仅用于 Telegram 侧验证（TLS 由反向代理终止） |
 | `WEBHOOK_SECRET_TOKEN` | 更新校验令牌（`X-Telegram-Bot-Api-Secret-Token`） |
 
 </details>
@@ -108,6 +111,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
 | `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
 | `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/clear_cache [链接]` | 清空链接缓存（仅管理员）；带链接只清该条，否则清空全部 |
 | `/bot_dict` | 查看当前聊天状态（调试用） |
 
 链接处理仅限私聊；命令在任意聊天可用。
