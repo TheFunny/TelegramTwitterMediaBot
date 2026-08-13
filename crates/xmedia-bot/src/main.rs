@@ -178,13 +178,22 @@ async fn main() {
             .await;
     }
 
-    // Graceful stop (Ctrl+C / SIGTERM): stop the sweep, notify the admin, drain the queue.
+    // Graceful stop (Ctrl+C / SIGTERM): stop the sweep, notify the admin,
+    // drain the queue. Bounded: a worker mid-download (30 s timeout) or a
+    // long ugoira encode must not hold the shutdown hostage forever.
     log::info!("Stopping bot");
-    let _ = stop_tx.send(true);
-    handlers::stop_url_workers();
-    if let Some(admin) = CONFIG.admin_ids.first() {
-        let _ = bot.send_message(ChatId(*admin), "Shutting down...").await;
+    const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let shutdown = async {
+        let _ = stop_tx.send(true);
+        handlers::stop_url_workers();
+        if let Some(admin) = CONFIG.admin_ids.first() {
+            let _ = bot.send_message(ChatId(*admin), "Shutting down...").await;
+        }
+        TASK_QUEUE.stop().await;
+    };
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown).await.is_err() {
+        log::warn!("graceful shutdown timed out after {SHUTDOWN_TIMEOUT:?}; exiting");
+    } else {
+        log::info!("Bot stopped");
     }
-    TASK_QUEUE.stop().await;
-    log::info!("Bot stopped");
 }
