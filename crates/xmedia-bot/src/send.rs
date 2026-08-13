@@ -147,6 +147,39 @@ impl Task {
     fn is_cached_send(&self) -> bool {
         self.cache_data().is_some_and(|c| !c.media.is_empty())
     }
+
+    /// All media payloads of this task (sequence batches flattened plus the
+    /// lone animation).
+    fn media_items(&self) -> Vec<&MediaItemPayload> {
+        match self {
+            Task::SendMediaSequence { media_batches, .. } => {
+                media_batches.iter().flatten().collect()
+            }
+            Task::SendAnimation { animation, .. } => std::slice::from_ref(animation).iter().collect(),
+            Task::ForwardMessages { .. } => Vec::new(),
+        }
+    }
+
+    /// Local file paths referenced by this task's media (ugoira / bsky remux
+    /// MP4 and the like); empty for URL or Telegram file-id sends.
+    fn local_media_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for item in self.media_items() {
+            let is_file_id = match item {
+                MediaItemPayload::Photo { file_id, .. }
+                | MediaItemPayload::Video { file_id, .. }
+                | MediaItemPayload::Animation { file_id, .. } => *file_id,
+            };
+            if is_file_id {
+                continue;
+            }
+            let media = item_url(item);
+            if !media.starts_with("http://") && !media.starts_with("https://") {
+                out.push(std::path::PathBuf::from(media));
+            }
+        }
+        out
+    }
 }
 
 /// Telegram file id of the message's media, matched to the payload kind.
@@ -225,6 +258,30 @@ pub async fn invalidate_cache(task: &Task) {
         log::info!("removing stale link cache entry for {url}");
         LINK_CACHE.remove(&key).await;
     }
+}
+
+/// Locally produced media files (ugoira MP4, bsky remux MP4) whose temp dirs
+/// must stay alive while their task may be retried by the queue. The fetch
+/// pipeline hands ownership here via [`x_media::site::Fetched::take_keep_alive`]
+/// before the [`Fetched`] is dropped; a queued retry runs after that drop, so
+/// without this the local file would be gone by the time the retry sends it.
+/// Entries are removed when the task settles (see [`release_keep_alive`]).
+pub static KEEP_ALIVE: LazyLock<parking_lot::Mutex<Vec<tempfile::TempDir>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
+
+/// Drops the keep-alive temp dirs holding media referenced by `task` (matched
+/// by path prefix). Called once a task settles — sent or permanently failed —
+/// so retry-only temp files do not leak; retryable tasks keep them alive.
+pub fn release_keep_alive(task: &Task) {
+    let paths = task.local_media_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let mut alive = KEEP_ALIVE.lock();
+    alive.retain(|dir| {
+        let dir_path = dir.path();
+        !paths.iter().any(|p| p.starts_with(dir_path))
+    });
 }
 
 pub const MAX_MEDIA_GROUP: usize = 9;
@@ -595,6 +652,18 @@ async fn send_batch_via_upload(
     let mut items = Vec::new();
     for (i, item) in batch.iter().enumerate() {
         let item_caption = if i == 0 { caption } else { None };
+        // Locally produced files (ugoira / bsky remux MP4): nothing to
+        // download or shrink — upload the file directly. The send is a
+        // multipart upload, so the only remaining failure is an upload-cap
+        // error, which is permanent (a video cannot be re-encoded here).
+        let media_url = item_url(item);
+        if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
+            let path = std::path::PathBuf::from(media_url);
+            let media = media_from_file(item, path, item_caption, item.thumbnail_url())
+                .map_err(|message| FallbackError::Permanent { message })?;
+            items.push(media);
+            continue;
+        }
         // Size check before downloading/uploading: over the cap, use the
         // smaller URL instead of the file. Photos are exempt — they are
         // downloaded and processed (downscale / PNG→JPEG) before uploading.
@@ -1199,6 +1268,8 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                 }
                 Err(SendError::Permanent { message, task }) => {
                     invalidate_cache(&task).await;
+                    // The task settles here: drop any keep-alive temp media.
+                    release_keep_alive(&task);
                     return Err(QueueError::Permanent {
                         message,
                         payload: serde_json::to_value(task).expect("task serializes"),
@@ -1208,6 +1279,7 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
             if !resumed {
                 post_send_actions(&bot, &task, message_ids).await;
             }
+            release_keep_alive(&task);
             Ok(())
         }
         Task::ForwardMessages { .. } => match forward_messages(&bot, &task).await {
@@ -1219,10 +1291,13 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                 delay_seconds,
                 payload: serde_json::to_value(task).expect("task serializes"),
             }),
-            Err(SendError::Permanent { message, task }) => Err(QueueError::Permanent {
-                message,
-                payload: serde_json::to_value(task).expect("task serializes"),
-            }),
+            Err(SendError::Permanent { message, task }) => {
+                release_keep_alive(&task);
+                Err(QueueError::Permanent {
+                    message,
+                    payload: serde_json::to_value(task).expect("task serializes"),
+                })
+            }
         },
     }
 }

@@ -95,6 +95,14 @@ impl Fetched {
             )
         })
     }
+
+    /// Hands over the temp dir keeping locally produced media (ugoira MP4,
+    /// bsky remux MP4) alive. The bot keeps it while its task may still be
+    /// retried by the queue, which runs after this [`Fetched`] is dropped and
+    /// its temp files would otherwise be gone. `None` when no such dir exists.
+    pub fn take_keep_alive(&mut self) -> Option<tempfile::TempDir> {
+        self._keep_alive.take()
+    }
 }
 
 /// Renders a user-supplied caption format from raw (already-escaped) field

@@ -516,6 +516,8 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
         Ok(message_ids) => {
             log::info!("sent {} message(s) for {url}", message_ids.len());
             send::post_send_actions(&bot, task, message_ids).await;
+            // The task settled: drop any keep-alive temp media.
+            send::release_keep_alive(task);
         }
         Err(send::SendError::Retryable {
             delay_seconds,
@@ -530,6 +532,7 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
             task,
         }) => {
             send::invalidate_cache(&task).await;
+            send::release_keep_alive(&task);
             log::error!("send for {url} failed permanently: {err_message}");
             let _ = reply(bot, message.clone(), format!("Send failed: {err_message}")).await;
         }
@@ -667,7 +670,7 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
             )
             .await;
         }
-        Ok(Some(fetched)) => {
+        Ok(Some(mut fetched)) => {
             if fetched.media.is_empty() {
                 let _ = reply(
                     bot,
@@ -712,6 +715,13 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
                 items,
                 cache_data,
             );
+            // Hand the keep-alive temp dir (ugoira / bsky remux MP4) to the
+            // retry registry: a queued retry runs after this function returns
+            // and the fetch's own TempDir is dropped, so without this the
+            // local file would be gone by the time the retry sends it.
+            if let Some(dir) = fetched.take_keep_alive() {
+                send::KEEP_ALIVE.lock().push(dir);
+            }
             dispatch_send(bot, message, &task, url).await;
         }
     }
