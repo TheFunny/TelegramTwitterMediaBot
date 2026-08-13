@@ -66,7 +66,8 @@ impl Fetched {
     /// HTML-escaped in full, then the (already-escaped) placeholder values
     /// are substituted — users can structure text but never inject raw HTML
     /// or attributes. An empty/unknown format falls back to the built-in
-    /// caption.
+    /// caption. The result is truncated to [`MAX_CAPTION_CHARS`] (Telegram's
+    /// caption limit for HTML parse mode).
     pub fn caption_with(&self, format: &str) -> String {
         match (&self.render_data, format.is_empty()) {
             (Some(data), false) => caption_from_fields(
@@ -78,7 +79,7 @@ impl Fetched {
                 &data.title,
                 &data.tags,
             ),
-            _ => self.caption.clone(),
+            _ => truncate_caption(&self.caption),
         }
     }
 
@@ -105,9 +106,37 @@ impl Fetched {
     }
 }
 
+/// Telegram's caption length limit (chars) for HTML parse mode; longer
+/// captions are rejected with a 400.
+pub const MAX_CAPTION_CHARS: usize = 1024;
+
+/// Truncates a caption to at most [`MAX_CAPTION_CHARS`] chars, appending an
+/// ellipsis when cut. Backs off to before an unclosed HTML entity (`&amp`
+/// without its `;` would be malformed HTML and rejected by Telegram).
+pub fn truncate_caption(caption: &str) -> String {
+    if caption.chars().count() <= MAX_CAPTION_CHARS {
+        return caption.to_string();
+    }
+    // Leave one char for the ellipsis; floor_char_boundary lands on a char
+    // edge (byte index ≤ MAX-1, so chars ≤ MAX-1).
+    let mut end = caption.floor_char_boundary(MAX_CAPTION_CHARS - 1);
+    // Don't split an entity: if the last '&' before `end` has no closing ';'
+    // inside the kept part, cut before it.
+    if let Some(amp) = caption[..end].rfind('&')
+        && !caption[amp..end].contains(';')
+    {
+        end = amp;
+    }
+    let mut s = caption[..end].to_string();
+    s.push('…');
+    s
+}
+
 /// Renders a user-supplied caption format from raw (already-escaped) field
 /// values with the same escaping/substitution rules as
 /// [`Fetched::caption_with`]. An empty format returns `built_in` unchanged.
+/// The result is truncated to [`MAX_CAPTION_CHARS`] (Telegram's caption
+/// limit for HTML parse mode).
 pub fn caption_from_fields(
     format: &str,
     built_in: &str,
@@ -118,15 +147,17 @@ pub fn caption_from_fields(
     tags: &str,
 ) -> String {
     if format.is_empty() {
-        return built_in.to_string();
+        return truncate_caption(built_in);
     }
     let escaped = html_escape::encode_text(format).into_owned();
-    escaped
-        .replace("{url}", url)
-        .replace("{author}", author)
-        .replace("{author_url}", author_url)
-        .replace("{title}", title)
-        .replace("{tags}", tags)
+    truncate_caption(
+        &escaped
+            .replace("{url}", url)
+            .replace("{author}", author)
+            .replace("{author_url}", author_url)
+            .replace("{title}", title)
+            .replace("{tags}", tags),
+    )
 }
 
 /// Stable per-post cache key derived from any supported URL, so variant
@@ -404,6 +435,41 @@ mod tests {
             caption_from_fields("", "built-in", "u", "a", "au", "t", "g"),
             "built-in"
         );
+    }
+
+    #[test]
+    fn truncate_caption_keeps_short_text() {
+        assert_eq!(truncate_caption("short"), "short");
+        // Exactly at the limit: untouched.
+        let exact = "x".repeat(MAX_CAPTION_CHARS);
+        assert_eq!(truncate_caption(&exact), exact);
+    }
+
+    #[test]
+    fn truncate_caption_cuts_long_text_with_ellipsis() {
+        let long = "x".repeat(MAX_CAPTION_CHARS + 100);
+        let out = truncate_caption(&long);
+        assert!(out.chars().count() <= MAX_CAPTION_CHARS, "len {}", out.chars().count());
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_caption_does_not_split_an_html_entity() {
+        // An entity crossing the cut must not be left half-open (&amp without ;).
+        let mut long = "a".repeat(MAX_CAPTION_CHARS - 4);
+        long.push_str("&amp;bbbb");
+        let out = truncate_caption(&long);
+        assert!(out.chars().count() <= MAX_CAPTION_CHARS);
+        assert!(!out.contains("&amp"), "half entity left: {out:?}");
+        assert!(!out.ends_with('&'));
+    }
+
+    #[test]
+    fn truncate_caption_handles_multibyte_boundary() {
+        // Multi-byte chars near the cut must not panic (char-boundary cut).
+        let long = "界".repeat(MAX_CAPTION_CHARS + 10);
+        let out = truncate_caption(&long);
+        assert!(out.chars().count() <= MAX_CAPTION_CHARS);
     }
 
     #[tokio::test]

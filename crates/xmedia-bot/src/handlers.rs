@@ -608,7 +608,7 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
             .cloned()
             .unwrap_or_default();
         let caption = if format.is_empty() {
-            cached.caption.clone()
+            x_media::site::truncate_caption(&cached.caption)
         } else {
             x_media::site::caption_from_fields(
                 &format,
@@ -859,6 +859,9 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
     match x_media::site::fetch(&query.query).await {
         Ok(Some(fetched)) => {
             let mut results: Vec<InlineQueryResult> = Vec::new();
+            // Inline results have the same 1024-char caption limit as regular
+            // messages; truncate once here for all items.
+            let caption = x_media::site::truncate_caption(&fetched.caption);
             for (i, media) in fetched.media.iter().enumerate() {
                 let id = format!("{i}");
                 let Some(url) = url::Url::parse(media.url()).ok() else {
@@ -868,7 +871,7 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
                     .thumbnail_url()
                     .and_then(|t| url::Url::parse(t).ok())
                     .unwrap_or_else(|| url.clone());
-                let caption = fetched.caption.clone();
+                let caption = caption.clone();
                 let result = match media {
                     Media::Illustration { .. } => {
                         // Inline photo results have their own (smaller) size
