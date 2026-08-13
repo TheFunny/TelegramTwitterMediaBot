@@ -2,6 +2,11 @@
 members = ["crates/x-media", "crates/xmedia-bot"]
 resolver = "3"
 
-# Smaller production binary; debug symbols are not shipped anyway.
+# Smaller/faster production binary: strip debug symbols, link-time
+# optimization across crates, and one codegen unit per crate (bigger LTO
+# wins). panic=abort is intentionally NOT set: queue workers and db
+# closures rely on JoinHandle catching panics, which abort would defeat.
 [profile.release]
 strip = true
+lto = "thin"
+codegen-units = 1
