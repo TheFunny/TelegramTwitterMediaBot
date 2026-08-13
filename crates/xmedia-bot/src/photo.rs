@@ -223,7 +223,7 @@ fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
         return Ok(PhotoPrep::Upload(file));
     }
-    log::info!(
+    log::debug!(
         "photo {w}x{h} ({_bit_depth:?} {color_type:?}, {} bytes) needs processing",
         bytes.len()
     );
@@ -269,7 +269,7 @@ fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
         let (nw, nh) = target_dims(w, h);
         pix = resize_pix(pix, w, h, nw, nh)?;
         (w, h) = (nw, nh);
-        log::info!("downscaled photo to {w}x{h} (Lanczos3)");
+        log::debug!("downscaled photo to {w}x{h} (Lanczos3)");
     }
 
     let mut png_bytes = Vec::new();
@@ -277,7 +277,7 @@ fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     if png_bytes.len() as u64 <= MAX_UPLOAD_BYTES {
         return Ok(PhotoPrep::Upload(write_temp(&png_bytes, "png")?));
     }
-    log::info!("PNG still over the upload cap after processing; transcoding to JPEG");
+    log::debug!("PNG still over the upload cap after processing; transcoding to JPEG");
     let jpeg_bytes = encode_jpeg(&pix, w, h)?;
     if jpeg_bytes.len() as u64 <= MAX_UPLOAD_BYTES {
         return Ok(PhotoPrep::Upload(write_temp(&jpeg_bytes, "jpg")?));
@@ -311,7 +311,7 @@ fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> 
         let (nw, nh) = target_dims(w, h);
         pix = resize_pix(pix, w, h, nw, nh)?;
         (w, h) = (nw, nh);
-        log::info!("downscaled jpeg to {w}x{h} (Lanczos3)");
+        log::debug!("downscaled jpeg to {w}x{h} (Lanczos3)");
     }
     let jpeg_bytes = encode_jpeg(&pix, w, h)?;
     if jpeg_bytes.len() as u64 <= MAX_UPLOAD_BYTES {

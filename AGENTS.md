@@ -60,7 +60,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 - **Serde**: per-site `model.rs` are pure `Deserialize` DTOs mirroring API JSON; site structs in `interface.rs` have private fields, a `caption()` builder, and `impl From<SiteStruct> for Fetched`. Persisted payloads use internally-tagged enums (`#[serde(tag = "kind")]` / `type`).
 - **Naming**: module-per-concern, snake_case files, `CamelCase` types, `snake_case` fns. `//!` module docs and `///` docs on non-obvious logic (syndication token, ugoira encoding, `display_text_range`).
 - **Retries**: only `x-media::site::fetch` retries (3 attempts, `1 << attempt` backoff, HTTP errors only). Queue retries are explicit `QueueError::Retryable` with computed delay (`retry_delay_seconds`).
-- Logging via `log` macros (`pretty_env_logger`, level from `RUST_LOG`).
+- Logging via `log` macros (`pretty_env_logger`, level from `RUST_LOG`). Level convention: `info` = lifecycle + per-post business results (`sent`/`forwarded`/`copied`), admin/operator actions and anomalies (fallback, retry enqueue, dead-letter is `error`); `debug` = per-request detail (message/command/URL extraction, `fetching`/`fetched`, batch sends, queue processing, photo processing, inline queries). Full user-submitted URLs and message text only appear at `debug`; at `info` and above links are printed via the normalized cache key (`handlers::log_key`, e.g. `[key=twitter:123...]`) so logs stay short and do not echo user data.
 
 ## Important Files
 

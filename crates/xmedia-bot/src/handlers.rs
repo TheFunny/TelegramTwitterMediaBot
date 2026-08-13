@@ -131,6 +131,14 @@ where
         .await
 }
 
+/// Log prefix tying the whole lifecycle of one link (fetch → send → cache →
+/// forward) together: the normalized cache key (`twitter:123…`, `pixiv:123`,
+/// `bsky:handle/rkey`) instead of the raw URL, so logs stay short and do not
+/// echo full user-submitted URLs at info level.
+pub fn log_key(url: &str) -> String {
+    x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
+}
+
 /// Extracts URL and text-link entities (text + caption), deduped in order.
 pub fn extract_urls(message: &Message) -> Vec<String> {
     let mut urls = Vec::new();
@@ -534,7 +542,11 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
     };
     match result {
         Ok(message_ids) => {
-            log::info!("sent {} message(s) for {url}", message_ids.len());
+            log::info!(
+                "sent {} message(s) for [key={}]",
+                message_ids.len(),
+                log_key(url)
+            );
             send::post_send_actions(&bot, task, message_ids).await;
             // The task settled: drop any keep-alive temp media.
             send::release_keep_alive(task);
@@ -543,7 +555,10 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
             delay_seconds,
             task,
         }) => {
-            log::info!("send for {url} failed, queued for retry in {delay_seconds:.1}s");
+            log::info!(
+                "send for [key={}] failed, queued for retry in {delay_seconds:.1}s",
+                log_key(url)
+            );
             enqueue_retry(task, delay_seconds).await;
             let _ = reply(bot, message.clone(), "Send failed. Task queued for retry.").await;
         }
@@ -619,7 +634,7 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
     if let Some(key) = x_media::site::cache_key(url)
         && let Some(cached) = LINK_CACHE.get(&key, CONFIG.link_cache_ttl).await
     {
-        log::info!("link cache hit for {url}");
+        log::debug!("link cache hit for {key}");
         let chat_data = CHAT_STORE.get(chat_id).await;
         let site = key.split(':').next().unwrap_or("unknown");
         let format = chat_data
@@ -676,11 +691,11 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
         return;
     }
 
-    log::info!("fetching {url}");
+    log::debug!("fetching {url} [key={}]", log_key(url));
     match x_media::site::fetch(url).await {
         // Unsupported links are ignored silently (Python parity).
         Ok(None) => {
-            log::info!("no site pattern matches {url}; ignoring");
+            log::debug!("no site pattern matches {url}; ignoring");
         }
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
@@ -763,7 +778,8 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
             &t[..end]
         })
         .unwrap_or("<no text>");
-    log::info!(
+    // Per-request detail: debug only (message text is user data).
+    log::debug!(
         "message from {sender} in {} (private={is_private}): {text_preview}",
         message.chat.id
     );
@@ -774,14 +790,16 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
     if let Some(text) = message.text()
         && let Ok(command) = Command::parse(text, "")
     {
-        log::info!("command from {}: {text_preview}", message.chat.id);
+        log::debug!("command from {}: {text_preview}", message.chat.id);
         execute_command(&bot, &message, command).await?;
         return respond(());
     }
     if is_private {
         let urls = extract_urls(&message);
         if !urls.is_empty() {
-            log::info!("extracted {} URL(s): {urls:?}", urls.len());
+            // Debug only, and echo the normalized keys instead of the raw URLs.
+            let keys: Vec<String> = urls.iter().map(|u| log_key(u)).collect();
+            log::debug!("extracted {} URL(s): {keys:?}", urls.len());
         }
         for url in urls {
             // Clone out of the lock: the parking_lot guard is !Send and must
@@ -875,7 +893,11 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
 /// Fetches the post behind an inline query and answers it. The caller has
 /// already applied the debounce. Returns `true` when an answer was sent.
 async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, RequestError> {
-    log::info!("inline query: {}", query.query);
+    log::debug!(
+        "inline query: {} [key={}]",
+        query.query,
+        log_key(&query.query)
+    );
     match x_media::site::fetch(&query.query).await {
         Ok(Some(fetched)) => {
             let mut results: Vec<InlineQueryResult> = Vec::new();
@@ -952,7 +974,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
     let chat_data = CHAT_STORE.get(chat_id).await;
     let edit = chat_data.edit_message.get(&prompt_message_id).cloned();
     let Some(edit) = edit else {
-        log::info!(
+        log::debug!(
             "callback from {}: no edit record for prompt {prompt_message_id}",
             chat_id
         );
@@ -1028,7 +1050,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                 }
             }
             None => {
-                log::info!("forward callback without a forward channel set");
+                log::debug!("forward callback without a forward channel set");
                 bot.answer_callback_query(callback_query_id)
                     .text("No forward channel set.")
                     .await?;

@@ -3,7 +3,7 @@
 //! URL is blocked by hotlink protection; the bot downloads the file itself
 //! and uploads it via multipart).
 
-use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE};
+use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE, log_key};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
 use crate::queue::QueueError;
@@ -232,7 +232,7 @@ async fn cache_sent_task(task: &Task, media: Vec<CachedMedia>) {
     post.media = media;
     if let Some(key) = x_media::site::cache_key(&post.url) {
         LINK_CACHE.put(&key, &post).await;
-        log::info!("cached send for {}", post.url);
+        log::debug!("cached send for [key={}]", log_key(&post.url));
     }
 }
 
@@ -257,7 +257,7 @@ pub async fn invalidate_cache(task: &Task) {
         && let Some(url) = task.source_url()
         && let Some(key) = x_media::site::cache_key(url)
     {
-        log::info!("removing stale link cache entry for {url}");
+        log::debug!("removing stale link cache entry for [key={}]", log_key(url));
         LINK_CACHE.remove(&key).await;
     }
 }
@@ -941,7 +941,7 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
             .await
         {
             Ok(messages) => {
-                log::info!(
+                log::debug!(
                     "media group batch {idx}/{} sent ({} item(s))",
                     media_batches.len(),
                     batch.len()
@@ -952,7 +952,11 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
             Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
                 log::info!(
                     "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
-                    batch.first().map(item_url).unwrap_or("?")
+                    batch
+                        .first()
+                        .map(item_url)
+                        .map(log_key)
+                        .unwrap_or_else(|| "?".into())
                 );
                 match send_batch_via_upload(bot, chat_id, reply_to, batch, caption).await {
                     Ok(messages) => {
@@ -1048,8 +1052,8 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
         }
         Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
             log::info!(
-                "Telegram could not fetch animation URL, downloading and reuploading: {}",
-                media_url
+                "Telegram could not fetch animation URL, downloading and reuploading: [key={}]",
+                log_key(media_url)
             );
             match download_to_temp(animation).await {
                 Ok((file, _bytes)) => {

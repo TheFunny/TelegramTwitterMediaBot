@@ -188,7 +188,7 @@ impl PersistentTaskQueue {
             self.counter.fetch_add(1, Ordering::Relaxed)
         );
         let payload = payload.to_string();
-        log::info!("enqueued {id} (run_after {run_after:.1})");
+        log::debug!("enqueued {id} (run_after {run_after:.1})");
         self.pool.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
@@ -339,10 +339,10 @@ impl QueueWorker {
                 return;
             }
         };
-        log::info!("processing {} (attempt {})", row.id, row.attempts + 1);
+        log::debug!("processing {} (attempt {})", row.id, row.attempts + 1);
         match (self.handler)(payload).await {
             Ok(()) => {
-                log::info!("task {} completed", row.id);
+                log::debug!("task {} completed", row.id);
                 self.delete_row(&row.id).await;
             }
             Err(QueueError::Retryable {
@@ -356,7 +356,7 @@ impl QueueWorker {
                     (self.dead_letter)(payload, message).await;
                 } else {
                     let delay = scaled_retry_delay(delay_seconds, row.attempts);
-                    log::info!(
+                    log::debug!(
                         "task {} rescheduled in {delay:.1}s (attempt {})",
                         row.id,
                         row.attempts + 1

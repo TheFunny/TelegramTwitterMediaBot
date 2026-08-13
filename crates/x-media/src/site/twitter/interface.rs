@@ -35,7 +35,7 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                     }
                 }
             } else {
-                log::info!("tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media");
+                log::debug!("tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media");
                 Ok(empty_fetched(url))
             }
         }

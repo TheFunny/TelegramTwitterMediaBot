@@ -329,8 +329,10 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
     for attempt in 0..3u32 {
         match fetch_once(url).await {
             Ok(Some(fetched)) => {
-                log::info!(
-                    "fetched {url}: site {} returned {} media",
+                // Per-request detail: debug only, keyed by the post id.
+                log::debug!(
+                    "fetched [key={}]: site {} returned {} media",
+                    cache_key(url).unwrap_or_else(|| "?".into()),
                     fetched.site_name(),
                     fetched.media.len()
                 );
