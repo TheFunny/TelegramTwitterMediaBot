@@ -652,10 +652,138 @@ fn media_from_url(
     Ok(media)
 }
 
+/// One item prepared for the upload fallback: the ready-to-send media plus
+/// the temp file that must stay on disk until the group request completes.
+struct PreparedItem {
+    /// Original position in the batch (concurrent prep completes out of order).
+    index: usize,
+    media: InputMedia,
+    keep_alive: Option<NamedTempFile>,
+}
+
+/// Downloads / processes one media item for the upload fallback (see
+/// [`send_batch_via_upload`]). Local files are uploaded directly; oversized
+/// items fall back to their smaller URL; photos are downscaled/transcoded.
+async fn prepare_upload_item(
+    item: MediaItemPayload,
+    index: usize,
+    caption: Option<&str>,
+) -> Result<PreparedItem, FallbackError> {
+    // Locally produced files (ugoira / bsky remux MP4): nothing to download
+    // or shrink — upload the file directly. The send is a multipart upload,
+    // so the only remaining failure is an upload-cap error, which is
+    // permanent (a video cannot be re-encoded here).
+    let media_url = item_url(&item);
+    if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
+        let media = media_from_file(
+            &item,
+            std::path::PathBuf::from(media_url),
+            caption,
+            item.thumbnail_url(),
+        )
+        .map_err(|message| FallbackError::Permanent { message })?;
+        return Ok(PreparedItem {
+            index,
+            media,
+            keep_alive: None,
+        });
+    }
+    // Size check before downloading/uploading: over the cap, use the
+    // smaller URL instead of the file. Photos are exempt — they are
+    // downloaded and processed (downscale / PNG→JPEG) before uploading.
+    let too_large = match x_media::site::media_size(media_url).await {
+        Ok(Some(size)) => size > MAX_UPLOAD_BYTES,
+        _ => false,
+    };
+    let too_large = too_large && !matches!(item, MediaItemPayload::Photo { .. });
+    if too_large {
+        let url = item
+            .fallback_url()
+            .ok_or_else(|| FallbackError::Permanent {
+                message: "media too large".into(),
+            })?;
+        let media = media_from_url(&item, url, caption, item.thumbnail_url())
+            .map_err(|message| FallbackError::Permanent { message })?;
+        return Ok(PreparedItem {
+            index,
+            media,
+            keep_alive: None,
+        });
+    }
+    match download_to_temp(&item).await {
+        Ok(file) => {
+            if matches!(item, MediaItemPayload::Photo { .. }) {
+                // Telegram rejects photos wider+taller than 10000 px combined
+                // (PHOTO_INVALID_DIMENSIONS): downscale the downloaded file
+                // before uploading; photos that cannot be brought within the
+                // limits degrade to the smaller URL. CPU-heavy work runs off
+                // the async executor thread.
+                let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file))
+                    .await
+                    .map_err(|e| FallbackError::Permanent {
+                        message: format!("photo worker panicked: {e}"),
+                    })?
+                    .map_err(|message| FallbackError::Permanent { message })?;
+                match prep {
+                    PhotoPrep::Upload(upload) => {
+                        let path = upload.path().to_path_buf();
+                        let media = media_from_file(&item, path, caption, item.thumbnail_url())
+                            .map_err(|message| FallbackError::Permanent { message })?;
+                        Ok(PreparedItem {
+                            index,
+                            media,
+                            keep_alive: Some(upload),
+                        })
+                    }
+                    PhotoPrep::UseFallback => {
+                        let url = item.fallback_url().ok_or_else(|| FallbackError::Permanent {
+                            message: "photo dimensions exceed Telegram limits and no smaller variant is available"
+                                .into(),
+                        })?;
+                        let media = media_from_url(&item, url, caption, item.thumbnail_url())
+                            .map_err(|message| FallbackError::Permanent { message })?;
+                        Ok(PreparedItem {
+                            index,
+                            media,
+                            keep_alive: None,
+                        })
+                    }
+                }
+            } else {
+                let path = file.path().to_path_buf();
+                let media = media_from_file(&item, path, caption, item.thumbnail_url())
+                    .map_err(|message| FallbackError::Permanent { message })?;
+                Ok(PreparedItem {
+                    index,
+                    media,
+                    keep_alive: Some(file),
+                })
+            }
+        }
+        Err(FallbackError::MediaTooLarge) => {
+            let url = item
+                .fallback_url()
+                .ok_or_else(|| FallbackError::Permanent {
+                    message: "media too large".into(),
+                })?;
+            let media = media_from_url(&item, url, caption, item.thumbnail_url())
+                .map_err(|message| FallbackError::Permanent { message })?;
+            Ok(PreparedItem {
+                index,
+                media,
+                keep_alive: None,
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Download-and-reupload fallback for one media batch. Files over the upload
 /// cap are not downloaded/uploaded; the item falls back to its smaller URL
-/// (which Telegram fetches itself). Returns the fallback-error without the
-/// task attached; callers wrap it with the updated task state.
+/// (which Telegram fetches itself). Items are prepared concurrently (bounded)
+/// because the downloads are network-bound; the batch is then uploaded in its
+/// original order. Returns the fallback-error without the task attached;
+/// callers wrap it with the updated task state.
 async fn send_batch_via_upload(
     bot: &Bot,
     chat_id: i64,
@@ -663,121 +791,57 @@ async fn send_batch_via_upload(
     batch: &[MediaItemPayload],
     caption: Option<&str>,
 ) -> Result<Vec<Message>, FallbackError> {
-    let mut files = Vec::new();
-    let mut items = Vec::new();
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+    let mut set = tokio::task::JoinSet::new();
     for (i, item) in batch.iter().enumerate() {
-        let item_caption = if i == 0 { caption } else { None };
-        // Locally produced files (ugoira / bsky remux MP4): nothing to
-        // download or shrink — upload the file directly. The send is a
-        // multipart upload, so the only remaining failure is an upload-cap
-        // error, which is permanent (a video cannot be re-encoded here).
-        let media_url = item_url(item);
-        if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
-            let path = std::path::PathBuf::from(media_url);
-            let media = media_from_file(item, path, item_caption, item.thumbnail_url())
-                .map_err(|message| FallbackError::Permanent { message })?;
-            items.push(media);
-            continue;
-        }
-        // Size check before downloading/uploading: over the cap, use the
-        // smaller URL instead of the file. Photos are exempt — they are
-        // downloaded and processed (downscale / PNG→JPEG) before uploading.
-        let too_large = match x_media::site::media_size(item_url(item)).await {
-            Ok(Some(size)) => size > MAX_UPLOAD_BYTES,
-            _ => false,
-        };
-        let too_large = too_large && !matches!(item, MediaItemPayload::Photo { .. });
-        let media = if too_large {
-            match item.fallback_url() {
-                Some(url) => match media_from_url(item, url, item_caption, item.thumbnail_url()) {
-                    Ok(media) => media,
-                    Err(message) => {
-                        return Err(FallbackError::Permanent { message });
-                    }
-                },
-                None => {
-                    return Err(FallbackError::Permanent {
-                        message: "media too large".into(),
-                    });
-                }
-            }
+        let item_caption = if i == 0 {
+            caption.map(str::to_string)
         } else {
-            match download_to_temp(item).await {
-                Ok(file) => {
-                    // Telegram rejects photos wider+taller than 10000 px
-                    // combined (PHOTO_INVALID_DIMENSIONS): downscale the
-                    // downloaded file before uploading; photos that cannot be
-                    // brought within the limits degrade to the smaller URL.
-                    if matches!(item, MediaItemPayload::Photo { .. }) {
-                        // CPU-heavy (decode/resize/encode): run off the async
-                        // executor thread.
-                        let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file))
-                            .await
-                            .map_err(|e| FallbackError::Permanent {
-                                message: format!("photo worker panicked: {e}"),
-                            })?
-                            .map_err(|message| FallbackError::Permanent { message })?;
-                        match prep {
-                            PhotoPrep::Upload(upload) => {
-                                let path = upload.path().to_path_buf();
-                                files.push(upload);
-                                media_from_file(item, path, item_caption, item.thumbnail_url())
-                                    .map_err(|message| FallbackError::Permanent { message })?
-                            }
-                            PhotoPrep::UseFallback => match item.fallback_url() {
-                                Some(url) => match media_from_url(
-                                    item,
-                                    url,
-                                    item_caption,
-                                    item.thumbnail_url(),
-                                ) {
-                                    Ok(media) => media,
-                                    Err(message) => {
-                                        return Err(FallbackError::Permanent { message });
-                                    }
-                                },
-                                None => {
-                                    return Err(FallbackError::Permanent {
-                                        message:
-                                            "photo dimensions exceed Telegram limits and no smaller variant is available"
-                                                .into(),
-                                    });
-                                }
-                            },
-                        }
-                    } else {
-                        let path = file.path().to_path_buf();
-                        files.push(file);
-                        media_from_file(item, path, item_caption, item.thumbnail_url())
-                            .map_err(|message| FallbackError::Permanent { message })?
-                    }
-                }
-                Err(FallbackError::MediaTooLarge) => match item.fallback_url() {
-                    Some(url) => {
-                        match media_from_url(item, url, item_caption, item.thumbnail_url()) {
-                            Ok(media) => media,
-                            Err(message) => {
-                                return Err(FallbackError::Permanent { message });
-                            }
-                        }
-                    }
-                    None => {
-                        return Err(FallbackError::Permanent {
-                            message: "media too large".into(),
-                        });
-                    }
-                },
-                Err(e) => return Err(e),
+            None
+        };
+        let item = item.clone();
+        let sem = std::sync::Arc::clone(&sem);
+        set.spawn(async move {
+            let _permit = sem.acquire().await.expect("upload semaphore closed");
+            prepare_upload_item(item, i, item_caption.as_deref()).await
+        });
+    }
+    let mut prepared: Vec<Option<InputMedia>> = (0..batch.len()).map(|_| None).collect();
+    let mut keep_alive: Vec<NamedTempFile> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        let item = match joined {
+            Ok(Ok(item)) => item,
+            // Dropping the JoinSet aborts the remaining prep tasks; their
+            // temp files are cleaned up on drop (short-circuit like before).
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(FallbackError::Permanent {
+                    message: format!("upload worker panicked: {e}"),
+                });
             }
         };
-        items.push(media);
+        let PreparedItem {
+            index,
+            media,
+            keep_alive: file_opt,
+        } = item;
+        if let Some(file) = file_opt {
+            keep_alive.push(file);
+        }
+        prepared[index] = Some(media);
     }
+    let items: Vec<InputMedia> = prepared
+        .into_iter()
+        .map(|m| m.expect("every upload item was prepared"))
+        .collect();
+    // `keep_alive` holds the temp files until the group request completes.
     let result = bot
         .send_media_group(ChatId(chat_id), items)
         .reply_parameters(
             ReplyParameters::new(MessageId(reply_to as i32)).allow_sending_without_reply(),
         )
         .await;
+    drop(keep_alive);
     match result {
         Ok(messages) => Ok(messages),
         Err(e) => Err(match classify_request_error(&e) {
@@ -1392,14 +1456,22 @@ mod tests {
         ];
         let ordered = photos_first(items);
         // All photos first (stable: p1 before p2), then all videos in order.
-        let kinds: Vec<&str> = ordered.iter().map(|i| match i {
-            Photo { media, .. } => media.as_str(),
-            Video { media, .. } => media.as_str(),
-            Animation { .. } => unreachable!(),
-        }).collect();
+        let kinds: Vec<&str> = ordered
+            .iter()
+            .map(|i| match i {
+                Photo { media, .. } => media.as_str(),
+                Video { media, .. } => media.as_str(),
+                Animation { .. } => unreachable!(),
+            })
+            .collect();
         assert_eq!(
             kinds,
-            ["https://p/1.jpg", "https://p/2.jpg", "https://v/1.mp4", "https://v/2.mp4"]
+            [
+                "https://p/1.jpg",
+                "https://p/2.jpg",
+                "https://v/1.mp4",
+                "https://v/2.mp4"
+            ]
         );
         // Already-photos-first input is unchanged.
         let items = vec![photo("https://p/1.jpg"), video("https://v/1.mp4")];
