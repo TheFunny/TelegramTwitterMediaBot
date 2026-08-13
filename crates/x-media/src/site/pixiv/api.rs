@@ -29,6 +29,10 @@ pub enum PixivError {
     NoAuth,
     Http(reqwest::Error),
     Json(serde_json::Error),
+    /// Non-2xx HTTP status from the app API. The code lets [`crate::site::fetch`]
+    /// retry only transient classes (429 / 5xx) instead of burning attempts on
+    /// permanent 4xx (bad token, forbidden, not found).
+    Status(u16),
     Api(String),
 }
 
@@ -38,6 +42,7 @@ impl fmt::Display for PixivError {
             PixivError::NoAuth => write!(f, "pixiv: no authentication"),
             PixivError::Http(e) => write!(f, "pixiv http error: {e}"),
             PixivError::Json(e) => write!(f, "pixiv json error: {e}"),
+            PixivError::Status(code) => write!(f, "pixiv status {code}"),
             PixivError::Api(message) => write!(f, "pixiv api error: {message}"),
         }
     }
@@ -137,7 +142,7 @@ impl PixivAPI {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(PixivError::Api(format!("status {}", response.status())));
+            return Err(PixivError::Status(response.status().as_u16()));
         }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {
@@ -190,7 +195,7 @@ impl PixivAPI {
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(PixivError::Api(format!("status {}", response.status())));
+            return Err(PixivError::Status(response.status().as_u16()));
         }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         if json.get("error").is_some() {

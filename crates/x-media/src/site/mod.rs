@@ -299,10 +299,32 @@ pub(crate) fn log_once_ffmpeg_missing() {
 /// Fetches a post from its URL. Returns `Ok(None)` when no site pattern
 /// matches (unsupported links are silently ignored by the bot).
 ///
-/// Transient network failures are retried: 3 total attempts with 1s then 2s
-/// delays. Retried classes: bare HTTP errors, [`FetchError::Transient`]
-/// (429/5xx from any site), and pixiv errors (its network failures arrive
-/// wrapped as `PixivError`). Non-retried: Json/NotFound/Blocked/Sensitive.
+/// Transient failures are retried: 3 total attempts with 1s then 2s delays.
+/// Retried classes: bare HTTP errors, [`FetchError::Transient`] (429/5xx
+/// from any site), pixiv network errors, and pixiv HTTP statuses that are
+/// actually transient (429 / 5xx). Permanent classes are returned
+/// immediately: Json, NotFound, Blocked, Sensitive, pixiv 4xx statuses
+/// (bad/expired token, forbidden, not found) and pixiv API/auth errors.
+/// Whether [`fetch`] should retry `err` (3 total attempts, 1s then 2s
+/// backoff). Permanent classes — 4xx statuses, invalid tokens, unparseable
+/// bodies, not-found/blocked/sensitive — are returned immediately; retrying
+/// them only wastes attempts against the source site.
+fn fetch_error_is_retryable(err: &FetchError) -> bool {
+    match err {
+        FetchError::Http(_) | FetchError::Transient(_) => true,
+        FetchError::Pixiv(e) => match e {
+            PixivError::Http(_) => true,
+            PixivError::Status(code) if *code == 429 || *code >= 500 => true,
+            // 4xx, invalid token, unparseable body: retrying cannot help.
+            PixivError::Status(_)
+            | PixivError::Api(_)
+            | PixivError::Json(_)
+            | PixivError::NoAuth => false,
+        },
+        _ => false,
+    }
+}
+
 pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
     for attempt in 0..3u32 {
         match fetch_once(url).await {
@@ -315,14 +337,13 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
                 return Ok(Some(fetched));
             }
             Ok(None) => return Ok(None),
-            Err(e @ (FetchError::Http(_) | FetchError::Transient(_) | FetchError::Pixiv(_))) => {
-                if attempt < 2 {
+            Err(err) => {
+                if fetch_error_is_retryable(&err) && attempt < 2 {
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 } else {
-                    return Err(e);
+                    return Err(err);
                 }
             }
-            Err(other) => return Err(other),
         }
     }
     unreachable!("retry loop always returns")
@@ -451,6 +472,51 @@ mod tests {
             Some("bsky:handle.example/3lorem".into())
         );
         assert_eq!(cache_key("https://example.com/not-a-post"), None);
+    }
+
+    #[test]
+    fn fetch_error_retryability_classification() {
+        // Transient: network errors, explicit transient, pixiv 429/5xx.
+        assert!(fetch_error_is_retryable(&FetchError::Transient(
+            "429".into()
+        )));
+        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(429)
+        )));
+        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(500)
+        )));
+        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(503)
+        )));
+        // Permanent: pixiv 4xx (bad/expired token, forbidden, not found),
+        // api/auth errors, unparseable bodies, not-found/blocked/sensitive.
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(400)
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(401)
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(403)
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Status(404)
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Api("invalid_grant".into())
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::NoAuth
+        )));
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
+            PixivError::Json(json_err)
+        )));
+        assert!(!fetch_error_is_retryable(&FetchError::NotFound));
+        assert!(!fetch_error_is_retryable(&FetchError::Blocked));
+        assert!(!fetch_error_is_retryable(&FetchError::Sensitive));
+        assert!(!fetch_error_is_retryable(&FetchError::TooLarge));
     }
 
     #[test]
