@@ -155,7 +155,9 @@ impl Task {
             Task::SendMediaSequence { media_batches, .. } => {
                 media_batches.iter().flatten().collect()
             }
-            Task::SendAnimation { animation, .. } => std::slice::from_ref(animation).iter().collect(),
+            Task::SendAnimation { animation, .. } => {
+                std::slice::from_ref(animation).iter().collect()
+            }
             Task::ForwardMessages { .. } => Vec::new(),
         }
     }
@@ -1333,9 +1335,10 @@ mod tests {
     #[test]
     fn oversized_photo_boundary() {
         // The empirical Telegram limit: sum 10000 passes, 10001 fails.
-        assert!(crate::photo::PHOTO_MAX_DIMENSION_SUM == 10000);
-        assert!(6100 + 3900 <= crate::photo::PHOTO_MAX_DIMENSION_SUM);
-        assert!(6300 + 3730 > crate::photo::PHOTO_MAX_DIMENSION_SUM);
+        // Const-block asserts so clippy's assertions_on_constants stays quiet.
+        const { assert!(crate::photo::PHOTO_MAX_DIMENSION_SUM == 10000) };
+        const { assert!(6100 + 3900 <= crate::photo::PHOTO_MAX_DIMENSION_SUM) };
+        const { assert!(6300 + 3730 > crate::photo::PHOTO_MAX_DIMENSION_SUM) };
     }
 
     #[test]

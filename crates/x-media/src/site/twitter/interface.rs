@@ -573,18 +573,21 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
     async fn live_fetch_with_photos() {
         let fetched = fetch("861627479294746624").await.unwrap();
         assert_eq!(fetched.media.len(), 4);
     }
 
     #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
     async fn live_fetch_text_only() {
         let fetched = fetch("1992471125734142256").await.unwrap();
         assert!(fetched.media.is_empty());
     }
 
     #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
     async fn live_fetch_deleted_tweet_is_not_found() {
         // Deleted tweet: the syndication endpoint answers with errors.
         let result = fetch("0").await;

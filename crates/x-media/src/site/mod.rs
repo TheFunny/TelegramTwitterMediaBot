@@ -422,7 +422,13 @@ mod tests {
     async fn download_media_pixiv_original_with_referer() {
         // Proves the Referer header is attached for i.pximg.net: a header-less
         // GET to a pixiv original URL is rejected with 403.
-        if std::env::var("PIXIV_REFRESH_TOKEN").is_err() {
+        // Empty-string check too: an unset CI secret arrives as "" (GitHub
+        // Actions), which would otherwise run the test tokenless and fail.
+        if std::env::var("PIXIV_REFRESH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
             eprintln!("skipping: no PIXIV_REFRESH_TOKEN");
             return;
         }

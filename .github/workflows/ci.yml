@@ -1,0 +1,64 @@
+name: CI
+
+# Test/lint gate (offline, no secrets) on every push/PR, plus a live-network
+# job that exercises the real source sites and the token-gated pixiv tests.
+#
+# Layering:
+#   test  — fmt + clippy + the full offline unit suite. Runs on every push
+#           and PR, including forks (it needs no secrets).
+#   live  — the #[ignore]d live-network tests plus the pixiv tests that are
+#           gated on PIXIV_REFRESH_TOKEN. Runs on schedule / manual dispatch
+#           / tag pushes only, because pull requests from forks cannot read
+#           repository secrets. continue-on-error keeps a flaky external site
+#           from blocking, while the run still records the outcome.
+#
+# Test gating convention (keep in sync with AGENTS.md "Testing & QA"):
+#   - pure unit tests: plain #[test] / #[tokio::test], always run.
+#   - live-network tests: #[ignore = "live network: ..."], only run here.
+#   - token-gated tests (pixiv): #[tokio::test] with an early return when
+#     PIXIV_REFRESH_TOKEN is absent or empty (empty = unset CI secret).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Weekly probe of the live endpoints, so external API changes surface.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Lint (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run offline tests
+        run: cargo test --workspace
+
+  live:
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      PIXIV_REFRESH_TOKEN: ${{ secrets.PIXIV_REFRESH_TOKEN }}
+      TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Full suite: with the secret present, the pixiv token-gated tests run;
+      # without it they skip themselves. Live tests stay #[ignore]d here.
+      - name: Run token-gated tests
+        run: cargo test --workspace
+      # The live-network tests, by the "live" name filter (all #[ignore]d).
+      - name: Run live-network tests
+        run: cargo test --workspace -- --ignored live

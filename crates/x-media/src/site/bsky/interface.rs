@@ -416,6 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to public.api.bsky.app"]
     async fn live_fetch_with_photos() {
         let fetched =
             fetch_from_url("https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m")
@@ -429,6 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to public.api.bsky.app"]
     async fn live_fetch_smoke() {
         let fetched =
             fetch_from_url("https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224")
