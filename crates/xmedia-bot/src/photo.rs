@@ -67,8 +67,9 @@ impl PixBuf {
 }
 
 /// Entry point: detects the format and processes the photo if needed.
-pub fn prepare_photo(file: NamedTempFile) -> Result<PhotoPrep, String> {
-    let bytes = std::fs::read(file.path()).map_err(|e| format!("prepare read failed: {e}"))?;
+/// The caller hands in the already-downloaded bytes (they are in memory from
+/// the download anyway; re-reading the temp file would double the I/O).
+pub fn prepare_photo(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         prepare_png(file, bytes)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -216,8 +217,8 @@ fn target_dims(w: u32, h: u32) -> (u32, u32) {
 /// PNG branch: decode (16→8, palette→RGB; gray/GA stay), flatten RGBA to
 /// RGB, Lanczos-downscale beyond the dimension cap, encode PNG — a PNG still
 /// over the upload cap afterwards becomes JPEG.
-fn prepare_png(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String> {
-    let (w, h, _bit_depth, color_type) = parse_png_header(&bytes).ok_or("invalid PNG header")?;
+fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
+    let (w, h, _bit_depth, color_type) = parse_png_header(bytes).ok_or("invalid PNG header")?;
     let size_over = bytes.len() as u64 > MAX_UPLOAD_BYTES;
     if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
         return Ok(PhotoPrep::Upload(file));
@@ -239,7 +240,7 @@ fn prepare_png(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String>
         png::ColorType::Indexed => png::Transformations::EXPAND,
         _ => png::Transformations::STRIP_16,
     };
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(transforms);
     let mut reader = decoder
         .read_info()
@@ -286,8 +287,8 @@ fn prepare_png(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String>
 }
 
 /// JPEG branch: zune-jpeg decode → Lanczos downscale → jpeg-encoder output.
-fn prepare_jpeg(file: NamedTempFile, bytes: Vec<u8>) -> Result<PhotoPrep, String> {
-    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(&bytes));
+fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
+    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
     // Decodes to RGB by default. Headers first so dimensions are known before
     // the (potentially huge) pixel decode.
     decoder
@@ -423,7 +424,7 @@ mod tests {
 
         let mut file = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
         std::io::Write::write_all(file.as_file_mut(), &bytes).unwrap();
-        prepare_photo(file)
+        prepare_photo(file, &bytes)
     }
 
     #[test]
@@ -468,7 +469,7 @@ mod tests {
         }
         let mut file = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
         std::io::Write::write_all(file.as_file_mut(), &bytes).unwrap();
-        match prepare_photo(file).unwrap() {
+        match prepare_photo(file, &bytes).unwrap() {
             PhotoPrep::Upload(file) => {
                 let out = std::fs::read(file.path()).unwrap();
                 assert!(out.starts_with(&[0xFF, 0xD8]), "output must stay jpeg");
@@ -516,7 +517,7 @@ mod tests {
 
         let mut file = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
         std::io::Write::write_all(file.as_file_mut(), &bytes).unwrap();
-        match prepare_photo(file).unwrap() {
+        match prepare_photo(file, &bytes).unwrap() {
             PhotoPrep::Upload(file) => {
                 let out = std::fs::read(file.path()).unwrap();
                 assert!(out.starts_with(&[0xFF, 0xD8]), "must transcode to JPEG");

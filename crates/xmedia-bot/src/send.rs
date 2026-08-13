@@ -556,9 +556,14 @@ enum FallbackError {
 /// only if still too big. Anything that cannot be fixed falls back to the
 /// item's smaller URL.
 ///
-/// Downloads one media item to a temp file (deleted on drop). Network errors
-/// are retryable; size over the upload cap and other download errors are not.
-async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, FallbackError> {
+/// Downloads one media item to a temp file (deleted on drop), returning the
+/// file plus the downloaded bytes (photos keep the bytes for
+/// [`photo::prepare_photo`] — re-reading the file would double the I/O).
+/// Network errors are retryable; size over the upload cap and other download
+/// errors are not.
+async fn download_to_temp(
+    item: &MediaItemPayload,
+) -> Result<(NamedTempFile, bytes::Bytes), FallbackError> {
     let media_url = match item {
         MediaItemPayload::Photo { media, .. }
         | MediaItemPayload::Video { media, .. }
@@ -601,7 +606,7 @@ async fn download_to_temp(item: &MediaItemPayload) -> Result<NamedTempFile, Fall
         .map_err(|e| FallbackError::Permanent {
             message: format!("temp file write failed: {e}"),
         })?;
-    Ok(file)
+    Ok((file, bytes))
 }
 
 /// Builds the media group item from an uploaded file.
@@ -711,14 +716,14 @@ async fn prepare_upload_item(
         });
     }
     match download_to_temp(&item).await {
-        Ok(file) => {
+        Ok((file, bytes)) => {
             if matches!(item, MediaItemPayload::Photo { .. }) {
                 // Telegram rejects photos wider+taller than 10000 px combined
                 // (PHOTO_INVALID_DIMENSIONS): downscale the downloaded file
                 // before uploading; photos that cannot be brought within the
                 // limits degrade to the smaller URL. CPU-heavy work runs off
                 // the async executor thread.
-                let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file))
+                let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file, &bytes))
                     .await
                     .map_err(|e| FallbackError::Permanent {
                         message: format!("photo worker panicked: {e}"),
@@ -1047,7 +1052,7 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                 media_url
             );
             match download_to_temp(animation).await {
-                Ok(file) => {
+                Ok((file, _bytes)) => {
                     let path = file.path().to_path_buf();
                     match send_animation_inner(
                         bot,

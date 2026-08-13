@@ -17,6 +17,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rand = "0.8"
 tempfile = "3"
 parking_lot = "0.12"
+bytes = "1"
 png = "0.18"
 zune-jpeg = "0.5"
 fast_image_resize = "6"
