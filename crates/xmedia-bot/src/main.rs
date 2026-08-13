@@ -185,7 +185,7 @@ async fn main() {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let shutdown = async {
         let _ = stop_tx.send(true);
-        handlers::stop_url_workers();
+        handlers::stop_url_workers().await;
         if let Some(admin) = CONFIG.admin_ids.first() {
             let _ = bot.send_message(ChatId(*admin), "Shutting down...").await;
         }

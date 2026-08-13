@@ -26,6 +26,10 @@ static URL_JOBS: LazyLock<parking_lot::Mutex<Option<tokio::sync::mpsc::Sender<Ur
 /// Set by main's shutdown sequence; workers stop pulling new jobs.
 static URL_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// JoinHandles of the URL workers, awaited by [`stop_url_workers`].
+static URL_WORKER_HANDLES: LazyLock<parking_lot::Mutex<Option<Vec<tokio::task::JoinHandle<()>>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(None));
+
 /// Worker count draining URL jobs; keeps the old 8-permit concurrency cap
 /// while bounding how many jobs can be queued at all.
 const URL_WORKERS: usize = 8;
@@ -40,9 +44,10 @@ pub async fn start_url_workers() {
     let (tx, rx) = tokio::sync::mpsc::channel::<UrlJob>(256);
     *URL_JOBS.lock() = Some(tx);
     let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    let mut handles = Vec::with_capacity(URL_WORKERS);
     for _ in 0..URL_WORKERS {
         let rx = std::sync::Arc::clone(&rx);
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = rx.lock().await.recv().await;
                 match job {
@@ -50,13 +55,28 @@ pub async fn start_url_workers() {
                     None => break,
                 }
             }
-        });
+        }));
     }
+    *URL_WORKER_HANDLES.lock() = Some(handles);
 }
 
-/// Stops URL workers (drains up to the 256 queued jobs, then exits).
-pub fn stop_url_workers() {
+/// Stops the URL workers: sets the stop flag, drops the job channel (so
+/// workers blocked in \`recv()\` wake with \`None\` and exit) and awaits the
+/// worker tasks. Each worker finishes its in-flight job first; jobs still
+/// queued in the channel are abandoned (the old implementation neither
+/// drained them nor woke blocked workers — it only set a flag checked
+/// between jobs).
+pub async fn stop_url_workers() {
     URL_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Dropping the sender makes every worker's recv() return None.
+    *URL_JOBS.lock() = None;
+    // Take the handles first so the lock guard drops before the awaits.
+    let handles = URL_WORKER_HANDLES.lock().take();
+    if let Some(handles) = handles {
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
 }
 
 pub static CHAT_STORE: LazyLock<ChatStore> =
