@@ -38,7 +38,7 @@ pub struct ChatStore {
     /// Per-chat async locks serializing get→mutate→set so concurrent handler
     /// tasks (batch-forwards, callbacks) cannot clobber each other's writes.
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
-    db_path: String,
+    pool: crate::db::DbPool,
 }
 
 pub fn unix_now() -> i64 {
@@ -67,7 +67,7 @@ impl ChatStore {
         Ok(ChatStore {
             cache: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
-            db_path: path.to_string(),
+            pool: crate::db::DbPool::new(path),
         })
     }
 
@@ -76,7 +76,7 @@ impl ChatStore {
             return data.clone();
         }
         let chat_key = chat_id.to_string();
-        let payload = crate::db::with_conn(&self.db_path, move |conn| {
+        let payload = self.pool.with_conn(move |conn| {
             // Concurrent handler tasks (batch-forwards) may write chat_state
             // while this read runs; the shared busy timeout handles the
             // write-lock collision instead of failing the query.
@@ -103,7 +103,7 @@ impl ChatStore {
         self.cache.lock().insert(chat_id, data.clone());
         let payload = serde_json::to_string(data).expect("chat state serializes");
         let chat_id = chat_id.to_string();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
                 params![chat_id, payload],

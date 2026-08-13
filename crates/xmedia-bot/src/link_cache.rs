@@ -47,7 +47,7 @@ pub struct CachedPost {
 /// SQLite-backed cache sharing `data/task_queue.db` with the queue and chat
 /// state (same `open_db` pattern: busy timeout, `spawn_blocking` I/O).
 pub struct LinkCache {
-    db_path: String,
+    pool: crate::db::DbPool,
 }
 
 impl LinkCache {
@@ -61,7 +61,7 @@ impl LinkCache {
             log::error!("failed to initialize link cache schema: {e}");
         }
         Self {
-            db_path: db_path.to_string(),
+            pool: crate::db::DbPool::new(db_path),
         }
     }
 
@@ -70,7 +70,7 @@ impl LinkCache {
     pub async fn get(&self, key: &str, ttl: Duration) -> Option<CachedPost> {
         let key = key.to_string();
         let ttl = ttl.as_secs_f64();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             let mut stmt =
                 conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
             let mut rows = stmt.query(params![key])?;
@@ -100,7 +100,7 @@ impl LinkCache {
     pub async fn put(&self, key: &str, post: &CachedPost) {
         let key = key.to_string();
         let payload = serde_json::to_string(post).expect("cached post serializes");
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
                 params![key, payload, now_f64()],
@@ -116,7 +116,7 @@ impl LinkCache {
     /// Drops an entry (e.g. a cached file id that turned out invalid).
     pub async fn remove(&self, key: &str) {
         let key = key.to_string();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
             Ok(())
         })
@@ -129,7 +129,7 @@ impl LinkCache {
     /// Removes expired entries; returns how many were deleted.
     pub async fn prune(&self, ttl: Duration) -> usize {
         let cutoff = now_f64() - ttl.as_secs_f64();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute(
                 "DELETE FROM link_cache WHERE created_at < ?1",
                 params![cutoff],
@@ -149,7 +149,7 @@ impl LinkCache {
     /// `key` is `None`. Returns how many rows were removed.
     pub async fn clear(&self, key: Option<&str>) -> usize {
         let key = key.map(str::to_string);
-        let result = crate::db::with_conn(&self.db_path, move |conn| match &key {
+        let result = self.pool.with_conn(move |conn| match &key {
             Some(key) => conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key]),
             None => conn.execute("DELETE FROM link_cache", []),
         })

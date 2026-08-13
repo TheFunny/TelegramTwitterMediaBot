@@ -40,7 +40,7 @@ type Handler = dyn Fn(Value) -> BoxFuture<'static, Result<(), QueueError>> + Sen
 type DeadLetter = dyn Fn(Value, String) -> BoxFuture<'static, ()> + Send + Sync;
 
 pub struct PersistentTaskQueue {
-    db_path: String,
+    pool: std::sync::Arc<crate::db::DbPool>,
     notify: Arc<Notify>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Vec<JoinHandle<()>>>,
@@ -56,7 +56,7 @@ struct LeasedRow {
 /// Owned worker state so the spawned loop does not borrow the queue handle.
 #[derive(Clone)]
 struct QueueWorker {
-    db_path: String,
+    pool: std::sync::Arc<crate::db::DbPool>,
     notify: Arc<Notify>,
     stop: Arc<AtomicBool>,
     handler: Arc<Handler>,
@@ -108,7 +108,7 @@ impl PersistentTaskQueue {
             log::error!("failed to initialize queue schema: {e}");
         }
         Self {
-            db_path: db_path.to_string(),
+            pool: std::sync::Arc::new(crate::db::DbPool::new(db_path)),
             notify: Arc::new(Notify::new()),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(Vec::new()),
@@ -132,7 +132,7 @@ impl PersistentTaskQueue {
         let mut handles = Vec::with_capacity(QUEUE_WORKERS + 1);
         for _ in 0..QUEUE_WORKERS {
             let worker = QueueWorker {
-                db_path: self.db_path.clone(),
+                pool: std::sync::Arc::clone(&self.pool),
                 notify: Arc::clone(&self.notify),
                 stop: Arc::clone(&self.stop),
                 handler: Arc::clone(&handler),
@@ -145,7 +145,7 @@ impl PersistentTaskQueue {
         // the same notify as the workers, so enqueue and stop interrupt the
         // sleep; the first interval tick fires immediately (harmless extra
         // recovery at startup).
-        let sweep_db_path = self.db_path.clone();
+        let sweep_pool = std::sync::Arc::clone(&self.pool);
         let sweep_notify = Arc::clone(&self.notify);
         let sweep_stop = Arc::clone(&self.stop);
         handles.push(tokio::spawn(async move {
@@ -161,7 +161,7 @@ impl PersistentTaskQueue {
                     break;
                 }
                 let result =
-                    crate::db::with_conn(&sweep_db_path, move |conn| recover_update(conn)).await;
+                    sweep_pool.with_conn(move |conn| recover_update(conn)).await;
                 if let Err(e) = result {
                     log::error!("queue sweep failed: {e}");
                 }
@@ -190,7 +190,7 @@ impl PersistentTaskQueue {
         );
         let payload = payload.to_string();
         log::info!("enqueued {id} (run_after {run_after:.1})");
-        crate::db::with_conn(&self.db_path, move |conn| {
+        self.pool.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
                  VALUES (?1, ?2, ?3, 0, 'pending', 0, ?4)",
@@ -212,7 +212,7 @@ impl PersistentTaskQueue {
     }
 
     async fn recover_sweep(&self) {
-        let result = crate::db::with_conn(&self.db_path, move |conn| recover_update(conn)).await;
+        let result = self.pool.with_conn(move |conn| recover_update(conn)).await;
         if let Err(e) = result {
             log::error!("queue recovery failed: {e}");
         }
@@ -267,7 +267,7 @@ impl QueueWorker {
     /// Leases the oldest due row (sets it `in_progress` with a lock TTL).
     /// Errors are surfaced so the caller can back off instead of spinning.
     async fn lease_next(&self) -> Result<Option<LeasedRow>, rusqlite::Error> {
-        crate::db::with_conn(&self.db_path, |conn| {
+        self.pool.with_conn(|conn| {
             // BEGIN IMMEDIATE: with several workers, a deferred transaction
             // that read before another worker's lease commit would fail with
             // SQLITE_BUSY_SNAPSHOT. Taking the write lock up front serializes
@@ -309,7 +309,7 @@ impl QueueWorker {
     }
 
     async fn earliest_run_after(&self) -> Option<f64> {
-        let result = crate::db::with_conn(&self.db_path, |conn| {
+        let result = self.pool.with_conn(|conn| {
             let mut stmt =
                 conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
             let mut rows = stmt.query([])?;
@@ -374,7 +374,7 @@ impl QueueWorker {
 
     async fn delete_row(&self, id: &str) {
         let id = id.to_string();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
             Ok(())
         })
@@ -387,7 +387,7 @@ impl QueueWorker {
     async fn reschedule(&self, id: &str, payload: Value, delay_seconds: f64, attempts: i32) {
         let id = id.to_string();
         let payload = payload.to_string();
-        let result = crate::db::with_conn(&self.db_path, move |conn| {
+        let result = self.pool.with_conn(move |conn| {
             conn.execute(
                 "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
                 params![payload, now_f64() + delay_seconds, attempts, id],
@@ -575,7 +575,7 @@ mod tests {
         // Insert a stale leased row AFTER startup: without a runtime sweep it
         // would stay `in_progress` forever (only start() used to recover).
         {
-            let conn = Connection::open(&queue.db_path).unwrap();
+            let conn = Connection::open(queue.pool.path()).unwrap();
             ensure_schema(&conn).unwrap();
             conn.execute(
                 "INSERT INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
