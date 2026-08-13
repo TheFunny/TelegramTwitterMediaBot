@@ -46,19 +46,17 @@ impl Config {
                 if !bad.is_empty() {
                     log::warn!("BOT_ADMIN: ignoring non-numeric ids: {bad:?}");
                 }
-                ids.into_iter().filter_map(|p| p.parse::<i64>().ok()).collect()
+                ids.into_iter()
+                    .filter_map(|p| p.parse::<i64>().ok())
+                    .collect()
             }
             Err(_) => Vec::new(),
         };
 
-        let edit_message_ttl = Duration::from_secs(parse_u64(
-            "EDIT_MESSAGE_TTL_SECONDS",
-            24 * 3600,
-        ));
-        let link_cache_ttl = Duration::from_secs(parse_u64(
-            "LINK_CACHE_TTL_SECONDS",
-            7 * 24 * 3600,
-        ));
+        let edit_message_ttl =
+            Duration::from_secs(parse_u64("EDIT_MESSAGE_TTL_SECONDS", 24 * 3600));
+        let link_cache_ttl =
+            Duration::from_secs(parse_u64("LINK_CACHE_TTL_SECONDS", 7 * 24 * 3600));
 
         let webhook_enabled = env::var("WEBHOOK")
             .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"));

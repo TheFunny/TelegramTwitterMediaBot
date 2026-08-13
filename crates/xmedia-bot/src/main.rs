@@ -191,7 +191,10 @@ async fn main() {
         }
         TASK_QUEUE.stop().await;
     };
-    if tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown).await.is_err() {
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown)
+        .await
+        .is_err()
+    {
         log::warn!("graceful shutdown timed out after {SHUTDOWN_TIMEOUT:?}; exiting");
     } else {
         log::info!("Bot stopped");
