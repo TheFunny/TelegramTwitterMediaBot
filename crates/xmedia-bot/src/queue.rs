@@ -160,8 +160,7 @@ impl PersistentTaskQueue {
                 if sweep_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let result =
-                    sweep_pool.with_conn(move |conn| recover_update(conn)).await;
+                let result = sweep_pool.with_conn(move |conn| recover_update(conn)).await;
                 if let Err(e) = result {
                     log::error!("queue sweep failed: {e}");
                 }
@@ -309,16 +308,18 @@ impl QueueWorker {
     }
 
     async fn earliest_run_after(&self) -> Option<f64> {
-        let result = self.pool.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
-            let mut rows = stmt.query([])?;
-            match rows.next()? {
-                Some(row) => Ok(row.get::<_, Option<f64>>(0)?),
-                None => Ok(None),
-            }
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
+                let mut rows = stmt.query([])?;
+                match rows.next()? {
+                    Some(row) => Ok(row.get::<_, Option<f64>>(0)?),
+                    None => Ok(None),
+                }
+            })
+            .await;
         match result {
             Ok(v) => v,
             Err(e) => {
@@ -374,11 +375,13 @@ impl QueueWorker {
 
     async fn delete_row(&self, id: &str) {
         let id = id.to_string();
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
-            Ok(())
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+                Ok(())
+            })
+            .await;
         if let Err(e) = result {
             log::error!("queue delete failed: {e}");
         }

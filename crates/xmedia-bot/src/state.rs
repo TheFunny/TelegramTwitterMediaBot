@@ -76,23 +76,25 @@ impl ChatStore {
             return data.clone();
         }
         let chat_key = chat_id.to_string();
-        let payload = self.pool.with_conn(move |conn| {
-            // Concurrent handler tasks (batch-forwards) may write chat_state
-            // while this read runs; the shared busy timeout handles the
-            // write-lock collision instead of failing the query.
-            let mut stmt = conn.prepare("SELECT payload FROM chat_state WHERE chat_id = ?1")?;
-            let mut rows = stmt.query(params![chat_key])?;
-            match rows.next()? {
-                Some(row) => Ok(Some(row.get::<_, String>(0)?)),
-                None => Ok(None),
-            }
-        })
-        .await
-        .unwrap_or_else(|e| {
-            log::error!("chat_state read failed: {e}");
-            None
-        })
-        .unwrap_or_default();
+        let payload = self
+            .pool
+            .with_conn(move |conn| {
+                // Concurrent handler tasks (batch-forwards) may write chat_state
+                // while this read runs; the shared busy timeout handles the
+                // write-lock collision instead of failing the query.
+                let mut stmt = conn.prepare("SELECT payload FROM chat_state WHERE chat_id = ?1")?;
+                let mut rows = stmt.query(params![chat_key])?;
+                match rows.next()? {
+                    Some(row) => Ok(Some(row.get::<_, String>(0)?)),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| {
+                log::error!("chat_state read failed: {e}");
+                None
+            })
+            .unwrap_or_default();
         let data: ChatData = serde_json::from_str(&payload).unwrap_or_default();
         self.cache.lock().insert(chat_id, data.clone());
         data
@@ -103,14 +105,16 @@ impl ChatStore {
         self.cache.lock().insert(chat_id, data.clone());
         let payload = serde_json::to_string(data).expect("chat state serializes");
         let chat_id = chat_id.to_string();
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
-                params![chat_id, payload],
-            )?;
-            Ok(())
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
+                    params![chat_id, payload],
+                )?;
+                Ok(())
+            })
+            .await;
         if let Err(e) = result {
             log::error!("chat_state write failed: {e}");
         }

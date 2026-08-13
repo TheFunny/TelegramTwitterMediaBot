@@ -70,24 +70,26 @@ impl LinkCache {
     pub async fn get(&self, key: &str, ttl: Duration) -> Option<CachedPost> {
         let key = key.to_string();
         let ttl = ttl.as_secs_f64();
-        let result = self.pool.with_conn(move |conn| {
-            let mut stmt =
-                conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
-            let mut rows = stmt.query(params![key])?;
-            let Some(row) = rows.next()? else {
-                return Ok(None);
-            };
-            let payload: String = row.get(0)?;
-            let created_at: f64 = row.get(1)?;
-            if now_f64() - created_at > ttl {
-                conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
-                return Ok(None);
-            }
-            Ok(Some(serde_json::from_str::<CachedPost>(&payload).map_err(
-                |e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )?))
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
+                let mut rows = stmt.query(params![key])?;
+                let Some(row) = rows.next()? else {
+                    return Ok(None);
+                };
+                let payload: String = row.get(0)?;
+                let created_at: f64 = row.get(1)?;
+                if now_f64() - created_at > ttl {
+                    conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
+                    return Ok(None);
+                }
+                Ok(Some(serde_json::from_str::<CachedPost>(&payload).map_err(
+                    |e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
+                )?))
+            })
+            .await;
         match result {
             Ok(v) => v,
             Err(e) => {
@@ -100,14 +102,16 @@ impl LinkCache {
     pub async fn put(&self, key: &str, post: &CachedPost) {
         let key = key.to_string();
         let payload = serde_json::to_string(post).expect("cached post serializes");
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute(
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                conn.execute(
                 "INSERT OR REPLACE INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
                 params![key, payload, now_f64()],
             )?;
-            Ok(())
-        })
-        .await;
+                Ok(())
+            })
+            .await;
         if let Err(e) = result {
             log::error!("link cache write failed: {e}");
         }
@@ -116,11 +120,13 @@ impl LinkCache {
     /// Drops an entry (e.g. a cached file id that turned out invalid).
     pub async fn remove(&self, key: &str) {
         let key = key.to_string();
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
-            Ok(())
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
+                Ok(())
+            })
+            .await;
         if let Err(e) = result {
             log::error!("link cache delete failed: {e}");
         }
@@ -129,13 +135,15 @@ impl LinkCache {
     /// Removes expired entries; returns how many were deleted.
     pub async fn prune(&self, ttl: Duration) -> usize {
         let cutoff = now_f64() - ttl.as_secs_f64();
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute(
-                "DELETE FROM link_cache WHERE created_at < ?1",
-                params![cutoff],
-            )
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM link_cache WHERE created_at < ?1",
+                    params![cutoff],
+                )
+            })
+            .await;
         match result {
             Ok(n) => n,
             Err(e) => {
@@ -149,11 +157,13 @@ impl LinkCache {
     /// `key` is `None`. Returns how many rows were removed.
     pub async fn clear(&self, key: Option<&str>) -> usize {
         let key = key.map(str::to_string);
-        let result = self.pool.with_conn(move |conn| match &key {
-            Some(key) => conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key]),
-            None => conn.execute("DELETE FROM link_cache", []),
-        })
-        .await;
+        let result = self
+            .pool
+            .with_conn(move |conn| match &key {
+                Some(key) => conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key]),
+                None => conn.execute("DELETE FROM link_cache", []),
+            })
+            .await;
         match result {
             Ok(n) => n,
             Err(e) => {
