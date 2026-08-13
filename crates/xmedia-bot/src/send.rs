@@ -296,6 +296,19 @@ pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
         .collect()
 }
 
+/// Orders media for a Telegram media group: when photos and videos are
+/// mixed, the first item must be a photo (Telegram's sendMediaGroup rule).
+/// Stable sort keeps the source order within each kind; a lone animation is
+/// untouched (it takes the SendAnimation path before this runs).
+pub fn photos_first(items: Vec<MediaItemPayload>) -> Vec<MediaItemPayload> {
+    let mut items = items;
+    items.sort_by_key(|item| match item {
+        MediaItemPayload::Photo { .. } => 0,
+        MediaItemPayload::Video { .. } | MediaItemPayload::Animation { .. } => 1,
+    });
+    items
+}
+
 /// Exponential backoff with jitter, capped at 30s.
 pub fn retry_delay_seconds(attempts: u32) -> f64 {
     let jitter: f64 = rand::thread_rng().gen_range(0.2..0.8);
@@ -1353,6 +1366,44 @@ mod tests {
                 .iter()
                 .all(|c| c.len() <= 9)
         );
+    }
+
+    #[test]
+    fn photos_first_orders_photos_before_videos() {
+        use MediaItemPayload::{Animation, Photo, Video};
+        let photo = |u: &str| Photo {
+            media: u.into(),
+            has_spoiler: false,
+            fallback_url: None,
+            file_id: false,
+        };
+        let video = |u: &str| Video {
+            media: u.into(),
+            has_spoiler: false,
+            thumbnail: None,
+            fallback_url: None,
+            file_id: false,
+        };
+        let items = vec![
+            video("https://v/1.mp4"),
+            photo("https://p/1.jpg"),
+            video("https://v/2.mp4"),
+            photo("https://p/2.jpg"),
+        ];
+        let ordered = photos_first(items);
+        // All photos first (stable: p1 before p2), then all videos in order.
+        let kinds: Vec<&str> = ordered.iter().map(|i| match i {
+            Photo { media, .. } => media.as_str(),
+            Video { media, .. } => media.as_str(),
+            Animation { .. } => unreachable!(),
+        }).collect();
+        assert_eq!(
+            kinds,
+            ["https://p/1.jpg", "https://p/2.jpg", "https://v/1.mp4", "https://v/2.mp4"]
+        );
+        // Already-photos-first input is unchanged.
+        let items = vec![photo("https://p/1.jpg"), video("https://v/1.mp4")];
+        assert!(matches!(photos_first(items)[0], Photo { .. }));
     }
 
     #[test]

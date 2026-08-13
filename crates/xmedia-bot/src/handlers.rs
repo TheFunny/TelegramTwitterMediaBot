@@ -569,7 +569,9 @@ fn build_send_task(
             chat_id,
             reply_to_message_id: message.id.0 as i64,
             caption,
-            media_batches: send::chunk_media_items(items),
+            // Photos first so a mixed photo+video group starts with a photo
+            // (Telegram's sendMediaGroup rule); order within each kind is kept.
+            media_batches: send::chunk_media_items(send::photos_first(items)),
             batch_index: 0,
             sent_message_ids: vec![],
             source_url,
