@@ -191,6 +191,9 @@ pub enum FetchError {
     TooLarge,
     /// A transient server-side failure (429 / 5xx); [`fetch`] retries these.
     Transient(String),
+    /// A local I/O failure while streaming a download to disk
+    /// (see [`download_media_to_file`]).
+    Io(std::io::Error),
 }
 
 impl fmt::Display for FetchError {
@@ -204,6 +207,7 @@ impl fmt::Display for FetchError {
             FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
             FetchError::TooLarge => write!(f, "media too large"),
             FetchError::Transient(message) => write!(f, "transient: {message}"),
+            FetchError::Io(e) => write!(f, "io error: {e}"),
         }
     }
 }
@@ -217,6 +221,7 @@ impl std::error::Error for FetchError {
             FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
             FetchError::TooLarge => None,
             FetchError::Transient(_) => None,
+            FetchError::Io(e) => Some(e),
         }
     }
 }
@@ -384,6 +389,41 @@ pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
     download_media_limited(url, u64::MAX).await
 }
 
+/// Streams a download to `out`, aborting with [`FetchError::TooLarge`] the
+/// moment the body crosses `max_bytes` (or when a declared Content-Length
+/// already exceeds it). Unlike [`download_media_limited`] the body is never
+/// buffered in memory — used for large files (e.g. the pixiv ugoira frame
+/// zip, which can be hundreds of MB) that would otherwise spike RAM.
+/// Returns the number of bytes written.
+pub async fn download_media_to_file(
+    url: &str,
+    max_bytes: u64,
+    out: &mut std::fs::File,
+) -> Result<u64, FetchError> {
+    use std::io::Write;
+    let mut request = CLIENT.get(url);
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("pximg.net") {
+        request = request.header("Referer", "https://www.pixiv.net/");
+    }
+    let response = request.send().await?.error_for_status()?;
+    if let Some(len) = response.content_length()
+        && len > max_bytes
+    {
+        return Err(FetchError::TooLarge);
+    }
+    let mut response = response;
+    let mut total: u64 = 0;
+    while let Some(chunk) = response.chunk().await? {
+        total += chunk.len() as u64;
+        if total > max_bytes {
+            return Err(FetchError::TooLarge);
+        }
+        out.write_all(&chunk).map_err(FetchError::Io)?;
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,7 +489,11 @@ mod tests {
     fn truncate_caption_cuts_long_text_with_ellipsis() {
         let long = "x".repeat(MAX_CAPTION_CHARS + 100);
         let out = truncate_caption(&long);
-        assert!(out.chars().count() <= MAX_CAPTION_CHARS, "len {}", out.chars().count());
+        assert!(
+            out.chars().count() <= MAX_CAPTION_CHARS,
+            "len {}",
+            out.chars().count()
+        );
         assert!(out.ends_with('…'));
     }
 

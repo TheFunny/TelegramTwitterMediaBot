@@ -9,7 +9,7 @@ use crate::media::Media;
 use crate::site::FetchError;
 use std::env;
 use std::fmt;
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -228,7 +228,14 @@ impl PixivAPI {
         let Some(zip_url) = zip_url else {
             return Ok(None);
         };
-        let zip_bytes = crate::site::download_media_limited(&zip_url, 512 * 1024 * 1024)
+        // Stream the frame zip to a temp file instead of buffering it in
+        // memory: ugoira zips can be hundreds of MB, and the old
+        // download_media_limited path spiked RAM up to the size cap.
+        let mut zip_file = tempfile::Builder::new()
+            .suffix(".zip")
+            .tempfile()
+            .map_err(|e| PixivError::Api(format!("temp zip failed: {e}")))?;
+        crate::site::download_media_to_file(&zip_url, 512 * 1024 * 1024, zip_file.as_file_mut())
             .await
             .map_err(|e| match e {
                 FetchError::Http(e) => PixivError::Http(e),
@@ -241,9 +248,12 @@ impl PixivAPI {
                 let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
 
                 // Extract frames to canonical zero-padded names; pixiv ugoira
-                // frames are uniformly jpg or png per artwork.
-                let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))
-                    .map_err(|e| format!("unzip: {e}"))?;
+                // frames are uniformly jpg or png per artwork. The zip is read
+                // from disk; `zip_file` stays alive for the whole extraction.
+                let mut archive = zip::ZipArchive::new(
+                    std::fs::File::open(zip_file.path()).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| format!("unzip: {e}"))?;
                 if archive.is_empty() {
                     return Err("empty frame zip".to_string());
                 }
