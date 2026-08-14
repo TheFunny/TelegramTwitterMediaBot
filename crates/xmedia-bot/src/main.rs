@@ -11,6 +11,7 @@ mod config;
 mod db;
 mod handlers;
 mod link_cache;
+mod media_sender;
 mod photo;
 mod queue;
 mod send;
