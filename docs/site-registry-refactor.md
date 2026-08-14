@@ -1,8 +1,10 @@
 # 站点适配器重构方案：让新增站点变成"新模块 + 注册一行"
 
-> 状态：设计稿（未实施）。目标：把"加一个新站点"从改 8-9 处收敛到 3 处，
-> 并让站点身份、重试策略、下载 header 等站点能力归位到站点模块自身。
-> 本文只改文档，不动代码；每阶段均可独立合入、独立回滚。
+> 状态：**已实施**（阶段 1-5，提交 `7ca8fd1` / `5e23916` / `bf4e615` / `5679a8c` +
+> 本文档收尾）。目标：把"加一个新站点"从改 8-9 处收敛到 3 处，并让站点身份、
+> 重试策略、下载 header 等站点能力归位到站点模块自身。实施过程中的关键偏差
+> （async 形态）见 §3 的 "async 形态" 段——原生 AFIT 实测不可用于 dyn 分派，
+> 最终采用手写 `BoxFuture`（`SiteFuture` 别名）。
 
 ---
 
@@ -117,21 +119,23 @@ PATTERN（pixiv 的 PATTERN 只匹配 `pixiv.net/artworks/...`），所以 `medi
 
 **动机**：加站点时 bot crate 与中央分派零改动；站点列表成为唯一注册点。
 
-**新增**（`site/mod.rs`）：
+**新增**（`site/mod.rs`，按实施后的实际形态）：
 
 ```rust
+/// Boxed, Send future produced by a Site async method. Boxed so the trait
+/// stays dyn-compatible; Send because URL/queue workers tokio::spawn these.
+type SiteFuture<'a, T, E = FetchError> =
+    Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+
 pub trait Site: Send + Sync {
     fn id(&self) -> &'static str;
     fn pattern(&self) -> &'static Regex;
-    fn enabled(&self) -> bool;
-    fn cache_key(&self, url: &str) -> Option<String>;   // 默认: id + 捕获组1
-    // 原生 AFIT（async fn in trait，Rust 1.75+）。dyn 调用需 Send future：
-    // 见下方 "async 形态" 选项 (c)，必要时反糖为
-    // `fn fetch_from_url(&self, url: &str) -> impl Future<Output = ...> + Send + '_`
-    async fn fetch_from_url(&self, url: &str) -> Result<Fetched, FetchError>;
-    fn is_retryable(&self, err: &FetchError) -> bool;   // 默认: Http|Transient
+    fn enabled(&self) -> bool { true }                 // 默认: true
+    fn cache_key(&self, url: &str) -> Option<String>;
+    fn fetch_from_url<'a>(&'a self, url: &'a str) -> SiteFuture<'a, Fetched>;
+    fn is_retryable(&self, err: &FetchError) -> bool;  // 默认: Http|Transient
     fn media_headers(&self, url: &str) -> Option<Vec<(&'static str, String)>>; // 默认: None
-    async fn validate(&self) -> Result<(), String>;     // 默认: Ok(())
+    fn validate(&self) -> SiteFuture<'static, (), String>;  // 默认: Ok(())
 }
 
 static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
@@ -139,53 +143,45 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
 ]);
 ```
 
-- `fetch_once` → `find_site(url)`（首个 PATTERN 命中且 `enabled()` 的站点）
-  → `site.fetch_from_url(url).await`；
-- `cache_key` / `site_ids()` / `media_headers` / `validate_all()` 全部遍历 `SITES`；
-- `fetch_error_is_retryable` 删除，重试判定走 `site.is_retryable`；
-- `main.rs:74-84` 的 pixiv 特判 → `site::validate_all()`（pixiv 的 `validate` 失败时
-  内部调用现有 `pixiv::disable()`，行为保持）；
-- 保留各站点的 `PATTERN`/`enabled()`/`fetch_from_url()` 顶层导出（兼容现有
-  `fetch_once` 及测试），trait 只是包一层薄壳。
+- `fetch` → `find_site(url)`（注册表中首个 PATTERN 命中且 `enabled()` 的站点，
+  返回 `&'static dyn Site`）→ `site.fetch_from_url(url).await`；
+- `cache_key` / `site_ids()` / `site_id_from_key()` / `apply_media_headers()` /
+  `validate_all()` 全部遍历 `SITES`；`validate_all` 返回失败列表，pixiv 的
+  `Site::validate` 失败时自行 `disable()`；
+- `match_site`/`SiteKind`（阶段 2 的静态分派）与中央 `fetch_error_is_retryable`
+  删除，重试判定走 `site.is_retryable`；
+- `main.rs` 的 pixiv 特判 → `site::validate_all()` + 通用失败通知；
+- 保留各站点的 `PATTERN`/`enabled()`/`fetch_from_url()` 顶层导出（兼容既有
+  测试），trait impl 只是薄壳。
 
-**async 形态**：三个选择，**优先 (c)**。
+**async 形态**（实施结论）：**原生 AFIT 不可行**。
 
-- **(c) 原生 AFIT（async fn in trait，首选）**：Rust 1.75 起稳定且支持 dyn 分派，
-  仓库是 recent stable + edition 2024、无 MSRV pin，完全可用。零新依赖，trait/impl
-  都是原生 `async fn` 语法。两点注意：
-  - **静态分派调用点不产生 box**（`SITES` 之外若还有直接调 `TwitterSite::fetch_from_url`
-    的路径，零分配）；dyn 调用时编译器按需 box，这是 dyn 分派的固有成本。
-  - **dyn 上要 Send future 必须反糖**：直接 `async fn` 在 `dyn Site` 上不保证
-    future 是 Send（URL/队列工人 `tokio::spawn` 需要），要写成
-    `fn fetch_from_url(&self, url: &str) -> impl Future<Output = Result<Fetched, FetchError>> + Send + '_`。
-    反糖后方法仍可 `site.fetch_from_url(url).await` 调用，语义不变。
-- **(b) `async-trait`**：语法与 (c) 相同，但新增一个依赖（唯一新包；
-  proc-macro2/quote/syn 树里已有），且**无论静态还是 dyn 调用都 box**（生成
-  `BoxFuture`）。适用场景是 MSRV < 1.75 或需要 `?Send` 的 trait，本仓库都不占。
-- **(a) 手写 `Pin<Box<dyn Future>>`**：零新依赖、静态分派也 box；签名噪音大，
-  且"借 `&self`/参数却写成 `'static`"这类生命周期错误要自己防（async-trait/AFIT
-  自动处理）。
-
-结论：先按 (c) 设计，trait 里直接写 `async fn`；若将来工具链约束出现（MSRV 下调）
-再降级到 (b)，实现方签名几乎不用改（async fn ↔ `#[async_trait] async fn`）。
+- 实测（rustc 1.95.0，edition 2024）：trait 里写 `async fn` 报
+  "method is `async`"（非 dyn 兼容）；写反糖 `-> impl Future<...> + Send + '_`
+  报 "references an `impl Trait` type in its return type"（同样非 dyn 兼容）。
+  即：**RPITIT/AFIT 目前无法用于 `Vec<Box<dyn Site>>` 注册表**，与早期设计的
+  判断相反。
+- **采用 (a) 手写 `Pin<Box<dyn Future + Send + '_>>`**（`SiteFuture` 别名）：
+  零新依赖、dyn 兼容、future 保证 Send。签名噪音靠别名缓解；生命周期坑因
+  站点是无状态单元结构体 + `'a` 同时约束 `&self` 与 `url` 而完全可控
+  （future 只借用调用域内的 url）。
+- **(b) `async-trait`** 仍是可行备选（语法更干净、同样 box），但新增依赖；
+  本仓库采用 (a) 后无需引入。
+- 若未来 Rust 稳定版放开 RPITIT 的 dyn 兼容，可再评估换回原生 `async fn`。
 
 **风险**：中。动中央分派，但每站点行为不变；注册表迭代 + `find_site` 补单测
 （`fetch`/`cache_key` 对既有 URL 集合的结果与阶段 2 完全一致）。
 **回滚**：revert。
 
-### 阶段 4：FetchError 泛化（可选，配合阶段 3）
+### 阶段 4：FetchError 泛化（已实施）
 
-**动机**：`FetchError::Pixiv(PixivError)`（`site/mod.rs:16,184,241-245`）是站点特有
-错误嵌进通用枚举；第 4 个站点要么再加变体，要么用泛化变体。
+**改动**：`FetchError` 新增 `Site { site: &'static str, error: Box<dyn std::error::Error + Send + Sync> }`
+变体（`Display`/`source()` 同步）。**`Pixiv(PixivError)` 变体保留**（未迁移）——
+它已有完整的 `Display`/`source()`/`is_retryable` 处理，替换纯属 churn。`Site`
+变体默认永久性（各站点 `is_retryable` 都不匹配它）；需要可重试站点错误的站点
+应自行转换为 `Http`/`Transient` 再返回。
 
-**改动**：`FetchError` 增加 `Site { site: &'static str, error: Box<dyn std::error::Error + Send + Sync> }`，
-`Pixiv(PixivError)` 变体保留但内部迁移到 `Site`（或直接替换并更新
-`is_retryable`/`Display`/`source()` 与测试）。重试判定在阶段 3 已归站点，
-中央枚举只剩通用类（Http/Json/NotFound/Blocked/Sensitive/TooLarge/Transient/Io）。
-
-**风险**：中。`Display`/`source()`/`From<PixivError>` 与 `fetch_error_is_retryable`
-测试（`site/mod.rs:480-522`）需同步。
-**回滚**：revert。
+**风险**：低（纯增量变体）。测试：`site_error_variant_displays_and_sources`。
 
 ### 阶段 5：收尾
 
@@ -215,20 +211,20 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
   模式是仓库惯例，与站点扩展无关）。
 - **不做**：schema 迁移——新站点只产生新的 cache key 前缀与 `message_format` JSON
   key，`link_cache`/`chat_state` 表结构均无需变化。
-- **代价**：阶段 3 引入 `dyn Site` 与 trait 方法（async 形态选 (c) 原生 AFIT，零新依赖、
-  静态分派零 box，见 §3）；`Send` 约束前移到 trait 边界，站点 impl 的 future 必须
-  Send（现仅在各 `tokio::spawn` 点检查，重构后在 impl 处即报错，提前暴露问题）。
-  若站点数量长期 ≤5 且无新增迹象，阶段 2 的折中方案已够用，阶段 3/4 可无限期推迟。
+- **代价**：阶段 3 引入 `dyn Site` 与 boxed future 签名（`SiteFuture`，见 §3）；
+  `Send` 约束前移到 trait 边界，站点 impl 的 future 必须 Send（现仅在各
+  `tokio::spawn` 点检查，重构后在 impl 处即报错，提前暴露问题）。
+  若站点数量长期 ≤5 且无新增迹象，阶段 2 的折中方案已够用；本次已按完整方案
+  实施到阶段 4。
 
-## 6. 建议的提交序列
+## 6. 提交序列（已按此实施）
 
-| 阶段 | 提交消息（建议） |
-|---|---|
-| 1 | `refactor(site): carry site_id on Fetched; unify cache-key site lookup` |
-| 2 | `refactor(site): move cache_key/is_retryable/media_headers into site modules` |
-| 3 | `refactor(site): introduce Site trait and SITES registry` |
-| 4 | `refactor(site): genericize FetchError::Site` |
-| 5 | `docs: update site adapter convention in AGENTS.md` |
+| 阶段 | 提交 | hash |
+|---|---|---|
+| 1 | `refactor(site): carry site_id on Fetched; unify cache-key site lookup` | `7ca8fd1` |
+| 2 | `refactor(site): move cache_key/is_retryable/media_headers into site modules` | `5e23916` |
+| 3 | `refactor(site): introduce Site trait and SITES registry` | `bf4e615` |
+| 4 | `refactor(site): genericize FetchError::Site` | `5679a8c` |
+| 5 | `docs: update site adapter convention in AGENTS.md` | 本文档收尾提交 |
 
-每阶段独立合入、独立回滚；阶段 2 完成后即可认为"加站点"摩擦已收敛，
-3/4 为可选深化。
+每阶段独立合入、独立回滚；阶段 2 完成后"加站点"摩擦已收敛，3/4 为深化。
