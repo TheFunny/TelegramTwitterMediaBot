@@ -142,6 +142,7 @@ impl From<Illustration> for Fetched {
             title: illustration.title.clone(),
             media: illustration.media,
             sensitive: illustration.nsfw,
+            site_id: "pixiv",
             render_data,
             _keep_alive: illustration._keep_alive,
         }

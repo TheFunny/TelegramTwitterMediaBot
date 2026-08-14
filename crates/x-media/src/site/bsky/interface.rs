@@ -299,6 +299,7 @@ impl From<Post> for Fetched {
             title: post.text.clone(),
             media: post.media,
             sensitive: post.sensitive,
+            site_id: "bsky",
             render_data,
             _keep_alive: None,
         }

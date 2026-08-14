@@ -402,7 +402,7 @@ async fn execute_command(
                     return Ok(());
                 }
             };
-            if !["twitter", "bsky", "pixiv"].contains(&site) {
+            if !x_media::site::site_ids().contains(&site) {
                 reply(
                     bot.clone(),
                     message.clone(),
@@ -636,7 +636,9 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
     {
         log::debug!("link cache hit for {key}");
         let chat_data = CHAT_STORE.get(chat_id).await;
-        let site = key.split(':').next().unwrap_or("unknown");
+        // Cache keys are prefixed with the site id ("twitter:…"), matching
+        // the value a fresh fetch would read from Fetched::site_id.
+        let site = x_media::site::site_id_from_key(&key);
         let format = chat_data
             .message_format
             .get(site)

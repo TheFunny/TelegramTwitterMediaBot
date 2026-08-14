@@ -30,6 +30,10 @@ pub struct Fetched {
     pub media: Vec<crate::media::Media>,
     /// Spoiler flag for all media of this post.
     pub sensitive: bool,
+    /// Site id (`"twitter"` / `"bsky"` / `"pixiv"`): the single source of
+    /// truth for site identity — caption-format lookup, cache-key prefix and
+    /// the SetFormat whitelist all derive from it. Set by the producing site.
+    pub site_id: &'static str,
     /// Raw values (pre-escaped) for user-customizable caption formats.
     pub(crate) render_data: Option<RenderData>,
     /// Keeps temp files (e.g. an encoded ugoira MP4) alive until the caller
@@ -50,16 +54,10 @@ pub(crate) struct RenderData {
 
 impl Fetched {
     /// The site this post came from (used for per-site format overrides).
+    /// A thin alias over [`Fetched::site_id`] kept for callers that read the
+    /// site off a fetched post.
     pub fn site_name(&self) -> &'static str {
-        if self.source_url.contains("x.com") || self.source_url.contains("twitter.com") {
-            "twitter"
-        } else if self.source_url.contains("bsky.app") {
-            "bsky"
-        } else if self.source_url.contains("pixiv.net") {
-            "pixiv"
-        } else {
-            "unknown"
-        }
+        self.site_id
     }
 
     /// Renders a user-supplied caption format. The format string is
@@ -175,6 +173,25 @@ pub fn cache_key(url: &str) -> Option<String> {
         return Some(format!("bsky:{}/{}", &caps[1], &caps[2]));
     }
     None
+}
+
+/// The site id carried by a cache key (`"twitter:123"` → `"twitter"`).
+/// Unknown prefixes fall back to `"unknown"`. The bot uses this on the
+/// link-cache hit path, where no [`Fetched`] is available — the same value
+/// a fresh fetch would read from [`Fetched::site_id`].
+pub fn site_id_from_key(key: &str) -> &'static str {
+    match key.split(':').next() {
+        Some("twitter") => "twitter",
+        Some("pixiv") => "pixiv",
+        Some("bsky") => "bsky",
+        _ => "unknown",
+    }
+}
+
+/// Every supported site id, in dispatch order. The bot's SetFormat whitelist
+/// and per-site caption-format lookup derive from this list.
+pub fn site_ids() -> Vec<&'static str> {
+    vec!["twitter", "bsky", "pixiv"]
 }
 
 #[derive(Debug)]
@@ -474,6 +491,15 @@ mod tests {
             Some("bsky:handle.example/3lorem".into())
         );
         assert_eq!(cache_key("https://example.com/not-a-post"), None);
+    }
+
+    #[test]
+    fn site_id_from_key_parses_prefix() {
+        assert_eq!(site_id_from_key("twitter:123"), "twitter");
+        assert_eq!(site_id_from_key("pixiv:123"), "pixiv");
+        assert_eq!(site_id_from_key("bsky:handle.example/3lorem"), "bsky");
+        assert_eq!(site_id_from_key("unknown:1"), "unknown");
+        assert_eq!(site_id_from_key("no-colon"), "unknown");
     }
 
     #[test]

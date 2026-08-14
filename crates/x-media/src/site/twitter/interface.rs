@@ -60,6 +60,7 @@ fn empty_fetched(url: &str) -> Fetched {
         title: String::new(),
         media: vec![],
         sensitive: true,
+        site_id: "twitter",
         render_data: None,
         _keep_alive: None,
     }
@@ -301,6 +302,7 @@ impl From<Tweet> for Fetched {
             title: tweet.text.clone(),
             media: tweet.media,
             sensitive: tweet.sensitive,
+            site_id: "twitter",
             render_data,
             _keep_alive: None,
         }
