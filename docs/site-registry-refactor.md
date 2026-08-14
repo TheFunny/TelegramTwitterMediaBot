@@ -156,11 +156,12 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
 
 **async 形态**（实施结论）：**原生 AFIT 不可行**。
 
-- 实测（rustc 1.95.0，edition 2024）：trait 里写 `async fn` 报
-  "method is `async`"（非 dyn 兼容）；写反糖 `-> impl Future<...> + Send + '_`
-  报 "references an `impl Trait` type in its return type"（同样非 dyn 兼容）；
-  纯 RPITIT（无 `+ Send`）也一样。即：**RPITIT/AFIT 目前无法用于
-  `Vec<Box<dyn Site>>` 注册表**，与早期设计的判断相反。
+- 实测（rustc 1.95.0，edition 2024；**1.97.1 复测一致**）：trait 里写
+  `async fn` 报 "method is `async`"（非 dyn 兼容）；写反糖
+  `-> impl Future<...> + Send + '_` 报 "references an `impl Trait` type in its
+  return type"（同样非 dyn 兼容）；纯 RPITIT（无 `+ Send`）也一样。即：
+  **RPITIT/AFIT 目前无法用于 `Vec<Box<dyn Site>>` 注册表**，与早期设计的
+  判断相反。
 - **为什么**：dyn 分派要求调用方在编译期知道返回值大小以分配空间，而
   `async fn`/RPITIT 返回不透明的 Future——这是"非定长返回值走 dyn"的普遍问题，
   与 async 无关。Rust 1.75 稳定的 AFIT 只覆盖**静态分派**，dyn 路径被排除；
