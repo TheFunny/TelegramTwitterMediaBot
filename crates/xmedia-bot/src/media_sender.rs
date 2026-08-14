@@ -8,7 +8,7 @@ use teloxide::RequestError;
 use teloxide::prelude::Requester;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatId, InlineKeyboardMarkup, InputFile, InputMedia, Message, MessageId, ParseMode,
+    ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, Message, MessageId, ParseMode,
     ReplyParameters,
 };
 
@@ -56,6 +56,13 @@ pub trait MediaSender: Send + Sync {
         reply_to: Option<MessageId>,
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<Message, RequestError>>;
+
+    /// Sets the chat's "typing / uploading …" indicator (cosmetic).
+    fn send_chat_action(
+        &self,
+        chat_id: ChatId,
+        action: ChatAction,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
 }
 
 impl MediaSender for Bot {
@@ -122,6 +129,20 @@ impl MediaSender for Bot {
             request.await
         })
     }
+
+    fn send_chat_action(
+        &self,
+        chat_id: ChatId,
+        action: ChatAction,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            // teloxide's `send_chat_action` returns `Result<True, _>` (its
+            // unit marker type); map the success to `()`.
+            <Bot as Requester>::send_chat_action(self, chat_id, action)
+                .await
+                .map(|_| ())
+        })
+    }
 }
 
 /// Test support: a scripted [`MediaSender`] mock (no Telegram API involved).
@@ -139,6 +160,9 @@ pub(crate) mod test_support {
         AnimationErr,
         CopyOk,
         CopyErr,
+        /// An error from `send_message` (replies are fire-and-forget, so an
+        /// error is fine for tests).
+        MessageErr,
     }
 
     /// Replays a script and records the method names that were called.
@@ -241,7 +265,23 @@ pub(crate) mod test_support {
             _reply_to: Option<MessageId>,
             _reply_markup: Option<InlineKeyboardMarkup>,
         ) -> BoxFuture<'_, Result<Message, RequestError>> {
-            Box::pin(async move { panic!("send_message should not be called in these tests") })
+            Box::pin(async move {
+                match self.next("send_message") {
+                    Outcome::MessageErr => Err(self.error()),
+                    other => panic!("unexpected outcome {other:?} for send_message"),
+                }
+            })
+        }
+
+        fn send_chat_action(
+            &self,
+            _chat_id: ChatId,
+            _action: ChatAction,
+        ) -> BoxFuture<'_, Result<(), RequestError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push("send_chat_action");
+                Ok(())
+            })
         }
     }
 }

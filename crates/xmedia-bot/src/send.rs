@@ -4,7 +4,7 @@
 //! and uploads it via multipart).
 
 use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE, log_key};
-use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
+use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost, LinkCache};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
 use crate::queue::QueueError;
@@ -254,12 +254,17 @@ async fn cache_animation_send(task: &Task, message: &Message) {
 /// A cached Telegram file id failed permanently (stale/expired); drop the
 /// cache entry so the next request re-fetches instead of repeating it.
 pub async fn invalidate_cache(task: &Task) {
+    invalidate_cache_with(&LINK_CACHE, task).await;
+}
+
+/// [`invalidate_cache`] against an injected cache (tests pass a tempdir one).
+pub async fn invalidate_cache_with(cache: &LinkCache, task: &Task) {
     if task.is_cached_send()
         && let Some(url) = task.source_url()
         && let Some(key) = x_media::site::cache_key(url)
     {
         log::debug!("removing stale link cache entry for [key={}]", log_key(url));
-        LINK_CACHE.remove(&key).await;
+        cache.remove(&key).await;
     }
 }
 

@@ -2,18 +2,21 @@
 //! worker pool, link-cache fast path, fetch, task build and send dispatch.
 
 use super::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE, log_key, reply};
+use crate::config::Config;
 use crate::db::now_f64;
-use crate::link_cache::{CachedMediaKind, CachedPost};
+use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
+use crate::media_sender::MediaSender;
+use crate::queue::PersistentTaskQueue;
 use crate::send::{self, MediaItemPayload, Task};
-use crate::state::ChatData;
+use crate::state::{ChatData, ChatStore};
 use std::collections::HashSet;
 use std::sync::LazyLock;
-use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatId, Message, MessageEntityKind};
+use teloxide::types::{ChatAction, ChatId, Message, MessageEntityKind, MessageId};
 use x_media::media::Media;
 
-/// One URL job: bot handle + the message + the extracted URL.
-type UrlJob = (Bot, Message, String);
+/// One URL job: the message + the extracted URL (the sender and stores come
+/// from the shared [`AppContext`], assembled from statics inside the worker).
+type UrlJob = (Message, String);
 /// Bounded channel of URL jobs drained by [`start_url_workers`]. The bound
 /// caps both queued memory and shutdown backlog; a full channel applies
 /// backpressure to the per-chat handler instead of spawning unbounded tasks.
@@ -32,6 +35,27 @@ static URL_WORKER_HANDLES: LazyLock<parking_lot::Mutex<Option<Vec<tokio::task::J
 /// while bounding how many jobs can be queued at all.
 const URL_WORKERS: usize = 8;
 
+/// Dependencies of the per-URL pipeline, injected so tests can substitute a
+/// mock sender and tempdir-backed stores.
+pub(crate) struct AppContext<'a> {
+    pub sender: &'a dyn MediaSender,
+    pub chat_store: &'a ChatStore,
+    pub task_queue: &'a PersistentTaskQueue,
+    pub link_cache: &'a LinkCache,
+    pub config: &'a Config,
+}
+
+/// Assembles the production context from the process-wide statics.
+fn app_context() -> AppContext<'static> {
+    AppContext {
+        sender: &*crate::send::BOT,
+        chat_store: &CHAT_STORE,
+        task_queue: &TASK_QUEUE,
+        link_cache: &LINK_CACHE,
+        config: &CONFIG,
+    }
+}
+
 /// Starts the URL job workers (called once from main after the queue starts).
 /// teloxide dispatches updates to a per-chat worker that handles them
 /// sequentially, so a batch-forward of many messages would otherwise be
@@ -46,10 +70,13 @@ pub async fn start_url_workers() {
     for _ in 0..URL_WORKERS {
         let rx = std::sync::Arc::clone(&rx);
         handles.push(tokio::spawn(async move {
+            let ctx = app_context();
             while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = rx.lock().await.recv().await;
                 match job {
-                    Some((bot, message, url)) => url_media(bot, &message, &url).await,
+                    Some((message, url)) => {
+                        url_media(&ctx, message.chat.id.0, message.id.0 as i64, &url).await
+                    }
                     None => break,
                 }
             }
@@ -142,10 +169,10 @@ fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
     }
 }
 
-pub(crate) async fn enqueue_retry(task: Task, delay_seconds: f64) {
+pub(crate) async fn enqueue_retry(queue: &PersistentTaskQueue, task: Task, delay_seconds: f64) {
     let payload = serde_json::to_value(task).expect("task serializes");
     let run_after = now_f64() + delay_seconds;
-    if let Err(e) = TASK_QUEUE.enqueue(payload, run_after).await {
+    if let Err(e) = queue.enqueue(payload, run_after).await {
         log::error!("failed to enqueue retry: {e}");
     }
 }
@@ -153,10 +180,16 @@ pub(crate) async fn enqueue_retry(task: Task, delay_seconds: f64) {
 /// Sends a task and handles the outcome: post-send actions on success, retry
 /// enqueue on retryable failure, reply + link-cache invalidation on
 /// permanent failure (a stale cached file id must not repeat forever).
-async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
+async fn dispatch_send(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to: MessageId,
+    task: &Task,
+    url: &str,
+) {
     let result = match task {
-        Task::SendAnimation { .. } => send::send_animation(&bot, task).await,
-        Task::SendMediaSequence { .. } => send::send_media_sequence(&bot, task).await,
+        Task::SendAnimation { .. } => send::send_animation(ctx.sender, task).await,
+        Task::SendMediaSequence { .. } => send::send_media_sequence(ctx.sender, task).await,
         Task::ForwardMessages { .. } => unreachable!(),
     };
     match result {
@@ -166,7 +199,7 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
                 message_ids.len(),
                 log_key(url)
             );
-            send::post_send_actions(&bot, task, message_ids).await;
+            send::post_send_actions(ctx.sender, task, message_ids).await;
             // The task settled: drop any keep-alive temp media.
             send::release_keep_alive(task);
         }
@@ -178,17 +211,29 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
                 "send for [key={}] failed, queued for retry in {delay_seconds:.1}s",
                 log_key(url)
             );
-            enqueue_retry(task, delay_seconds).await;
-            let _ = reply(bot, message.clone(), "Send failed. Task queued for retry.").await;
+            enqueue_retry(ctx.task_queue, task, delay_seconds).await;
+            let _ = reply(
+                ctx.sender,
+                chat_id,
+                reply_to,
+                "Send failed. Task queued for retry.",
+            )
+            .await;
         }
         Err(send::SendError::Permanent {
             message: err_message,
             task,
         }) => {
-            send::invalidate_cache(&task).await;
+            send::invalidate_cache_with(ctx.link_cache, &task).await;
             send::release_keep_alive(&task);
             log::error!("send for {url} failed permanently: {err_message}");
-            let _ = reply(bot, message.clone(), format!("Send failed: {err_message}")).await;
+            let _ = reply(
+                ctx.sender,
+                chat_id,
+                reply_to,
+                format!("Send failed: {err_message}"),
+            )
+            .await;
         }
     }
 }
@@ -198,30 +243,30 @@ async fn dispatch_send(bot: Bot, message: &Message, task: &Task, url: &str) {
 #[allow(clippy::too_many_arguments)]
 fn build_send_task(
     chat_data: &ChatData,
-    message: &Message,
+    chat_id: i64,
+    reply_to_message_id: i64,
     source_url: String,
     caption: String,
     items: Vec<MediaItemPayload>,
     cache_data: Option<CachedPost>,
 ) -> Task {
-    let chat_id = message.chat.id.0;
     if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
         Task::SendAnimation {
             chat_id,
-            reply_to_message_id: message.id.0 as i64,
+            reply_to_message_id,
             caption,
             animation: items.into_iter().next().unwrap(),
             source_url,
             edit_before_forward: chat_data.edit_before_forward,
             forward_channel_id: chat_data.forward_channel_id,
             notify_chat_id: Some(chat_id),
-            notify_message_id: Some(message.id.0 as i64),
+            notify_message_id: Some(reply_to_message_id),
             cache_data,
         }
     } else {
         Task::SendMediaSequence {
             chat_id,
-            reply_to_message_id: message.id.0 as i64,
+            reply_to_message_id,
             caption,
             // Photos first so a mixed photo+video group starts with a photo
             // (Telegram's sendMediaGroup rule); order within each kind is kept.
@@ -232,15 +277,16 @@ fn build_send_task(
             edit_before_forward: chat_data.edit_before_forward,
             forward_channel_id: chat_data.forward_channel_id,
             notify_chat_id: Some(chat_id),
-            notify_message_id: Some(message.id.0 as i64),
+            notify_message_id: Some(reply_to_message_id),
             cache_data,
         }
     }
 }
 
-async fn url_media(bot: Bot, message: &Message, url: &str) {
-    let chat_id = message.chat.id.0;
-    if let Err(e) = bot
+async fn url_media(ctx: &AppContext<'_>, chat_id: i64, reply_to_message_id: i64, url: &str) {
+    let reply_to = MessageId(reply_to_message_id as i32);
+    if let Err(e) = ctx
+        .sender
         .send_chat_action(ChatId(chat_id), ChatAction::Typing)
         .await
     {
@@ -251,10 +297,10 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
     // no source-site request, no download, no upload. Keyed by the
     // normalized post id so x.com / fxtwitter / /photo/N variants collide.
     if let Some(key) = x_media::site::cache_key(url)
-        && let Some(cached) = LINK_CACHE.get(&key, CONFIG.link_cache_ttl).await
+        && let Some(cached) = ctx.link_cache.get(&key, ctx.config.link_cache_ttl).await
     {
         log::debug!("link cache hit for {key}");
-        let chat_data = CHAT_STORE.get(chat_id).await;
+        let chat_data = ctx.chat_store.get(chat_id).await;
         // Cache keys are prefixed with the site id ("twitter:…"), matching
         // the value a fresh fetch would read from Fetched::site_id.
         let site = x_media::site::site_id_from_key(&key);
@@ -302,13 +348,14 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
             .collect();
         let task = build_send_task(
             &chat_data,
-            message,
+            chat_id,
+            reply_to_message_id,
             cached.url.clone(),
             caption,
             items,
             Some(cached),
         );
-        dispatch_send(bot, message, &task, url).await;
+        dispatch_send(ctx, chat_id, reply_to, &task, url).await;
         return;
     }
 
@@ -322,8 +369,9 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
         Err(e) => {
             log::error!("fetch {url}: {e}");
             let _ = reply(
-                bot,
-                message.clone(),
+                ctx.sender,
+                chat_id,
+                reply_to,
                 "Failed to fetch media from this link.",
             )
             .await;
@@ -331,14 +379,15 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
         Ok(Some(mut fetched)) => {
             if fetched.media.is_empty() {
                 let _ = reply(
-                    bot,
-                    message.clone(),
+                    ctx.sender,
+                    chat_id,
+                    reply_to,
                     "No media found or media type is not supported.",
                 )
                 .await;
                 return;
             }
-            let chat_data = CHAT_STORE.get(chat_id).await;
+            let chat_data = ctx.chat_store.get(chat_id).await;
             // Per-site caption format override (empty -> built-in caption).
             let format = chat_data
                 .message_format
@@ -367,7 +416,8 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
                 .collect();
             let task = build_send_task(
                 &chat_data,
-                message,
+                chat_id,
+                reply_to_message_id,
                 fetched.source_url.clone(),
                 caption,
                 items,
@@ -380,7 +430,131 @@ async fn url_media(bot: Bot, message: &Message, url: &str) {
             if let Some(dir) = fetched.take_keep_alive() {
                 send::KEEP_ALIVE.lock().push(dir);
             }
-            dispatch_send(bot, message, &task, url).await;
+            dispatch_send(ctx, chat_id, reply_to, &task, url).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::link_cache::CachedMedia;
+    use crate::media_sender::test_support::{MockSender, Outcome};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use teloxide::{ApiError, RequestError};
+
+    fn permanent_error() -> RequestError {
+        RequestError::Api(ApiError::Unknown(
+            "Bad Request: message is not modified".into(),
+        ))
+    }
+
+    fn cached_photo_entry() -> CachedPost {
+        CachedPost {
+            url: "https://x.com/u/status/1".into(),
+            caption: "cap".into(),
+            title: "t".into(),
+            author: "a".into(),
+            author_url: "au".into(),
+            tags: "".into(),
+            sensitive: false,
+            media: vec![CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "file-1".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_hit_sends_file_ids_and_invalidates_on_permanent_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let chat_store = ChatStore::new(Arc::clone(&pool));
+        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
+        let link_cache = LinkCache::new(Arc::clone(&pool));
+        let config = Config::load();
+        let sender = MockSender::scripted(
+            vec![Outcome::GroupErr, Outcome::MessageErr],
+            permanent_error,
+        );
+        let ctx = AppContext {
+            sender: &sender,
+            chat_store: &chat_store,
+            task_queue: &task_queue,
+            link_cache: &link_cache,
+            config: &config,
+        };
+        link_cache.put("twitter:1", &cached_photo_entry()).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
+
+        // The cached file id went out as a group send; the permanent failure
+        // then triggered the fire-and-forget reply (its mock error is fine).
+        assert_eq!(
+            sender.calls(),
+            vec!["send_chat_action", "send_media_group", "send_message"]
+        );
+        // The stale cache entry was invalidated so the next request re-fetches.
+        assert!(
+            link_cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_hit_success_keeps_the_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let chat_store = ChatStore::new(Arc::clone(&pool));
+        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
+        let link_cache = LinkCache::new(Arc::clone(&pool));
+        let config = Config::load();
+        let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
+        let ctx = AppContext {
+            sender: &sender,
+            chat_store: &chat_store,
+            task_queue: &task_queue,
+            link_cache: &link_cache,
+            config: &config,
+        };
+        link_cache.put("twitter:1", &cached_photo_entry()).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
+
+        assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
+        // Success must not evict the entry.
+        assert!(
+            link_cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_url_is_ignored_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let chat_store = ChatStore::new(Arc::clone(&pool));
+        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
+        let link_cache = LinkCache::new(Arc::clone(&pool));
+        let config = Config::load();
+        let sender = MockSender::scripted(vec![], permanent_error);
+        let ctx = AppContext {
+            sender: &sender,
+            chat_store: &chat_store,
+            task_queue: &task_queue,
+            link_cache: &link_cache,
+            config: &config,
+        };
+
+        // No cache key → the fetch dispatcher returns Ok(None) without any
+        // network; nothing is sent or replied.
+        url_media(&ctx, 1, 2, "https://example.com/not-a-post").await;
+        assert_eq!(sender.calls(), vec!["send_chat_action"]);
     }
 }

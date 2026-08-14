@@ -18,21 +18,27 @@ pub use inline::inline_query_handler;
 pub use statics::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
 pub use urls::{start_url_workers, stop_url_workers};
 
+use crate::media_sender::MediaSender;
 use commands::{Command, execute_command};
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, ChatKind, Message, MessageId, ParseMode, ReplyParameters};
+use teloxide::types::{ChatId, ChatKind, Message, MessageId, ParseMode};
 use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
-/// Reply to a message, keeping the reply decoration even if the original was
-/// already deleted.
-pub(crate) async fn reply<T>(bot: Bot, message: Message, text: T) -> Result<Message, RequestError>
+/// Reply to a message by id, keeping the reply decoration even if the
+/// original was already deleted.
+pub(crate) async fn reply<T>(
+    sender: &dyn MediaSender,
+    chat_id: i64,
+    reply_to: MessageId,
+    text: T,
+) -> Result<Message, RequestError>
 where
     T: Into<String>,
 {
-    bot.send_message(message.chat.id, text)
-        .reply_parameters(ReplyParameters::new(message.id).allow_sending_without_reply())
+    sender
+        .send_message(ChatId(chat_id), text.into(), Some(reply_to), None)
         .await
 }
 
@@ -134,7 +140,7 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
                 log::warn!("url workers not started; dropping link");
                 break;
             };
-            let _ = tx.send((bot.clone(), message.clone(), url)).await;
+            let _ = tx.send((message.clone(), url)).await;
         }
     }
     respond(())

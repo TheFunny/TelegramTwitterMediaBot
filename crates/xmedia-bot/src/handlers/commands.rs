@@ -153,7 +153,7 @@ pub(crate) async fn execute_command(
                     "Bot can't post messages to the channel".to_string()
                 }
             };
-            reply(bot.clone(), message.clone(), result).await?;
+            reply(bot, message.chat.id.0, message.id, result).await?;
         }
         Command::RemoveForwardChannel => {
             let chat_id = message.chat.id.0;
@@ -167,7 +167,7 @@ pub(crate) async fn execute_command(
                     }
                 })
                 .await;
-            reply(bot.clone(), message.clone(), text).await?;
+            reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::EditBeforeForward => {
             let chat_id = message.chat.id.0;
@@ -185,7 +185,7 @@ pub(crate) async fn execute_command(
                     }
                 })
                 .await;
-            reply(bot.clone(), message.clone(), text).await?;
+            reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::SetTemplate(name) => {
             let chat_id = message.chat.id.0;
@@ -210,13 +210,13 @@ pub(crate) async fn execute_command(
                     }
                 }
             };
-            reply(bot.clone(), message.clone(), text).await?;
+            reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::BotDict => {
             let chat_data = CHAT_STORE.get(message.chat.id.0).await;
             let debug = format!("{chat_data:?}");
             let text = html_escape::encode_text(&debug).into_owned();
-            reply(bot.clone(), message.clone(), text).await?;
+            reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::SetFormat(arg) => {
             let chat_id = message.chat.id.0;
@@ -226,8 +226,9 @@ pub(crate) async fn execute_command(
                 }
                 _ => {
                     reply(
-                        bot.clone(),
-                        message.clone(),
+                        bot,
+                        message.chat.id.0,
+                        message.id,
                         "Usage: /set_format <site> <format>",
                     )
                     .await?;
@@ -236,8 +237,9 @@ pub(crate) async fn execute_command(
             };
             if !x_media::site::site_ids().contains(&site) {
                 reply(
-                    bot.clone(),
-                    message.clone(),
+                    bot,
+                    message.chat.id.0,
+                    message.id,
                     "Unknown site. Use twitter, bsky or pixiv.",
                 )
                 .await?;
@@ -248,7 +250,7 @@ pub(crate) async fn execute_command(
                     data.message_format.insert(site.to_string(), format);
                 })
                 .await;
-            reply(bot.clone(), message.clone(), "Format set.").await?;
+            reply(bot, message.chat.id.0, message.id, "Format set.").await?;
         }
         Command::ClearCache(arg) => {
             let sender_id = message
@@ -257,7 +259,7 @@ pub(crate) async fn execute_command(
                 .map(|user| user.id.0 as i64)
                 .unwrap_or(-1);
             if !CONFIG.admin_ids.contains(&sender_id) {
-                reply(bot.clone(), message.clone(), "Admin only.").await?;
+                reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
                 return Ok(());
             }
             let arg = arg.trim();
@@ -265,8 +267,9 @@ pub(crate) async fn execute_command(
                 let removed = LINK_CACHE.clear(None).await;
                 log::info!("cache cleared by {sender_id}: {removed} entries");
                 reply(
-                    bot.clone(),
-                    message.clone(),
+                    bot,
+                    message.chat.id.0,
+                    message.id,
                     format!("Cleared {removed} cached entr{}.", plural(removed)),
                 )
                 .await?;
@@ -275,8 +278,9 @@ pub(crate) async fn execute_command(
                     Some(key) => key,
                     None => {
                         reply(
-                            bot.clone(),
-                            message.clone(),
+                            bot,
+                            message.chat.id.0,
+                            message.id,
                             "Unrecognized link. Use a twitter/x, pixiv or bsky post URL.",
                         )
                         .await?;
@@ -286,8 +290,9 @@ pub(crate) async fn execute_command(
                 let removed = LINK_CACHE.clear(Some(&key)).await;
                 log::info!("cache entry cleared by {sender_id}: {key} ({removed} rows)");
                 reply(
-                    bot.clone(),
-                    message.clone(),
+                    bot,
+                    message.chat.id.0,
+                    message.id,
                     format!(
                         "Cleared cache for {arg} ({} entr{}).",
                         removed,

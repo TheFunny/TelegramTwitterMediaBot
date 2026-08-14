@@ -2,7 +2,7 @@
 //! "template|<name>" buttons.
 
 use super::urls::enqueue_retry;
-use super::{CHAT_STORE, CONFIG};
+use super::{CHAT_STORE, CONFIG, TASK_QUEUE};
 use crate::send::{self, Task};
 use crate::state::unix_now;
 use teloxide::RequestError;
@@ -83,7 +83,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                         task,
                     }) => {
                         log::info!("forward queued for retry in {delay_seconds:.1}s");
-                        enqueue_retry(task, delay_seconds).await;
+                        enqueue_retry(&TASK_QUEUE, task, delay_seconds).await;
                         bot.answer_callback_query(callback_query_id)
                             .text("Forward queued for retry.")
                             .await?;
