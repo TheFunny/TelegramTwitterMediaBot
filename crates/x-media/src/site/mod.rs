@@ -188,6 +188,15 @@ pub enum FetchError {
     Http(reqwest::Error),
     Json(serde_json::Error),
     Pixiv(PixivError),
+    /// A site-specific error from a site that keeps its own error type.
+    /// Permanent by default (sites that need retryable site errors convert
+    /// them to [`FetchError::Http`] / [`FetchError::Transient`] before
+    /// returning). Pixiv predates this and keeps the dedicated
+    /// [`FetchError::Pixiv`] variant.
+    Site {
+        site: &'static str,
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
     NotFound,
     Blocked,
     /// The post exists but its content is withheld (twitter NSFW /
@@ -208,6 +217,7 @@ impl fmt::Display for FetchError {
             FetchError::Http(e) => write!(f, "http error: {e}"),
             FetchError::Json(e) => write!(f, "json error: {e}"),
             FetchError::Pixiv(e) => write!(f, "pixiv error: {e}"),
+            FetchError::Site { site, error } => write!(f, "{site} error: {error}"),
             FetchError::NotFound => write!(f, "not found"),
             FetchError::Blocked => write!(f, "blocked"),
             FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
@@ -224,6 +234,7 @@ impl std::error::Error for FetchError {
             FetchError::Http(e) => Some(e),
             FetchError::Json(e) => Some(e),
             FetchError::Pixiv(e) => Some(e),
+            FetchError::Site { error, .. } => Some(error.as_ref()),
             FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
             FetchError::TooLarge => None,
             FetchError::Transient(_) => None,
@@ -570,6 +581,19 @@ mod tests {
             cache_key("https://www.pixiv.net/artworks/1"),
             Some("pixiv:1".into())
         );
+    }
+
+    #[test]
+    fn site_error_variant_displays_and_sources() {
+        use std::error::Error as _;
+        let err = FetchError::Site {
+            site: "example",
+            error: Box::new(std::io::Error::other("boom")),
+        };
+        assert_eq!(err.to_string(), "example error: boom");
+        assert!(err.source().is_some());
+        // Permanent by default: no site's is_retryable matches it.
+        assert!(!twitter::is_retryable(&err));
     }
 
     #[test]
