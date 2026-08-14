@@ -9,8 +9,9 @@
 //! by the periodic prune in `main`.
 
 use crate::db::now_f64;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -45,24 +46,16 @@ pub struct CachedPost {
 }
 
 /// SQLite-backed cache sharing `data/task_queue.db` with the queue and chat
-/// state (same `open_db` pattern: busy timeout, `spawn_blocking` I/O).
+/// state (same shared pool, see [`crate::db::open_store`]).
 pub struct LinkCache {
-    pool: crate::db::DbPool,
+    pool: Arc<crate::db::DbPool>,
 }
 
 impl LinkCache {
-    pub fn open(db_path: &str) -> Self {
-        if let Ok(conn) = Connection::open(db_path)
-            && let Err(e) = conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS link_cache (url TEXT PRIMARY KEY, \
-                 payload TEXT NOT NULL, created_at REAL NOT NULL);",
-            )
-        {
-            log::error!("failed to initialize link cache schema: {e}");
-        }
-        Self {
-            pool: crate::db::DbPool::new(db_path),
-        }
+    /// Wraps the shared DB pool (the `link_cache` table lives in the merged
+    /// schema alongside `tasks` and `chat_state`).
+    pub fn new(pool: Arc<crate::db::DbPool>) -> Self {
+        LinkCache { pool }
     }
 
     /// Returns the cached post if present and not expired; a stale entry is
@@ -197,7 +190,9 @@ mod tests {
     #[tokio::test]
     async fn put_get_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        let cache = LinkCache::new(
+            crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
+        );
         cache.put("twitter:1", &entry()).await;
         let got = cache.get("twitter:1", Duration::from_secs(3600)).await;
         assert!(got.is_some());
@@ -209,11 +204,13 @@ mod tests {
     #[tokio::test]
     async fn expired_entry_removed_on_read() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        let cache = LinkCache::new(
+            crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
+        );
         cache.put("twitter:1", &entry()).await;
         // Force the row into the past so a 1s TTL expires it.
         {
-            let conn = Connection::open(dir.path().join("c.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("c.db")).unwrap();
             conn.execute("UPDATE link_cache SET created_at = created_at - 100", [])
                 .unwrap();
         }
@@ -234,7 +231,9 @@ mod tests {
     #[tokio::test]
     async fn remove_and_prune() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        let cache = LinkCache::new(
+            crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
+        );
         cache.put("twitter:1", &entry()).await;
         cache.put("pixiv:2", &entry()).await;
         cache.remove("twitter:1").await;
@@ -251,7 +250,7 @@ mod tests {
                 .is_some()
         );
         {
-            let conn = Connection::open(dir.path().join("c.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("c.db")).unwrap();
             conn.execute("UPDATE link_cache SET created_at = created_at - 100", [])
                 .unwrap();
         }
@@ -267,7 +266,9 @@ mod tests {
     #[tokio::test]
     async fn clear_one_entry_or_all() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LinkCache::open(dir.path().join("c.db").to_str().unwrap());
+        let cache = LinkCache::new(
+            crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
+        );
         cache.put("twitter:1", &entry()).await;
         cache.put("pixiv:2", &entry()).await;
         // By key: only the matching row is removed.

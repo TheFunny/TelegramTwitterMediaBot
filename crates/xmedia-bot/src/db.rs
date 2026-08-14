@@ -113,6 +113,39 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Opens the shared DB file, runs the merged schema for all three tables and
+/// returns a pool for it. One call per process in production (the stores
+/// share the returned pool); tests call it per tempdir.
+pub fn open_store(path: &str) -> rusqlite::Result<Arc<DbPool>> {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(rusqlite_error)?;
+    }
+    let conn = open_db(path)?;
+    schema_init(&conn)?;
+    Ok(Arc::new(DbPool::new(path)))
+}
+
+fn rusqlite_error(e: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+}
+
+/// Creates the `tasks`, `chat_state` and `link_cache` tables (idempotent).
+/// The three stores used to own their own schema; keeping it in one place
+/// means one initialization for the whole database file.
+pub fn schema_init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
+         run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
+         locked_until REAL NOT NULL, created_at REAL NOT NULL); \
+         CREATE INDEX IF NOT EXISTS idx_tasks_pending ON tasks(status, run_after); \
+         CREATE TABLE IF NOT EXISTS chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL); \
+         CREATE TABLE IF NOT EXISTS link_cache (url TEXT PRIMARY KEY, payload TEXT NOT NULL, \
+         created_at REAL NOT NULL);",
+    )
+}
+
 /// Unix timestamp in fractional seconds. Shared by the queue, chat store and
 /// link cache (previously four private copies).
 pub fn now_f64() -> f64 {

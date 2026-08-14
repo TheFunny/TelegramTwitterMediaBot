@@ -5,7 +5,6 @@ use parking_lot::Mutex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +37,7 @@ pub struct ChatStore {
     /// Per-chat async locks serializing get→mutate→set so concurrent handler
     /// tasks (batch-forwards, callbacks) cannot clobber each other's writes.
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
-    pool: crate::db::DbPool,
+    pool: Arc<crate::db::DbPool>,
 }
 
 pub fn unix_now() -> i64 {
@@ -49,26 +48,15 @@ pub fn unix_now() -> i64 {
 }
 
 impl ChatStore {
-    /// Creates the parent directory and the `chat_state` table (idempotent).
-    /// The shared `tasks` / `link_cache` tables are owned by `queue.rs` and
-    /// `link_cache.rs` respectively.
-    pub fn open(path: &str) -> rusqlite::Result<Self> {
-        if let Some(parent) = Path::new(path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        }
-        let conn = crate::db::open_db(path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
-        )?;
-        drop(conn);
-        Ok(ChatStore {
+    /// Wraps the shared DB pool (schema initialized once by
+    /// [`crate::db::open_store`]; the `chat_state` table lives in the merged
+    /// schema alongside `tasks` and `link_cache`).
+    pub fn new(pool: Arc<crate::db::DbPool>) -> Self {
+        ChatStore {
             cache: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
-            pool: crate::db::DbPool::new(path),
-        })
+            pool,
+        }
     }
 
     pub async fn get(&self, chat_id: i64) -> ChatData {
@@ -209,9 +197,8 @@ mod tests {
     #[tokio::test]
     async fn concurrent_updates_do_not_lose_edit_records() {
         let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(
-            ChatStore::open(dir.path().join("s.db").to_str().unwrap()).unwrap(),
-        );
+        let pool = crate::db::open_store(dir.path().join("s.db").to_str().unwrap()).unwrap();
+        let store = std::sync::Arc::new(ChatStore::new(pool));
         let mut handles = Vec::new();
         for i in 0..4 {
             let store = Arc::clone(&store);

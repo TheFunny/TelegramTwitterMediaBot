@@ -7,7 +7,7 @@
 
 use crate::db::now_f64;
 use parking_lot::Mutex;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{TransactionBehavior, params};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -81,34 +81,12 @@ fn scaled_retry_delay(base: f64, attempts: i32) -> f64 {
     (base * 2f64.powi(attempts)).min(300.0)
 }
 
-fn ensure_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; \
-         CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
-         run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
-         locked_until REAL NOT NULL, created_at REAL NOT NULL); \
-         CREATE INDEX IF NOT EXISTS idx_tasks_pending ON tasks(status, run_after);",
-    )
-}
-
 impl PersistentTaskQueue {
-    pub fn new(db_path: &str) -> Self {
-        // Ensure the parent dir and table exist even if only the queue (not
-        // ChatStore) is used — a fresh container without a mounted data dir
-        // must still be able to open the DB.
-        if let Some(parent) = std::path::Path::new(db_path).parent()
-            && !parent.as_os_str().is_empty()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            log::error!("failed to create queue dir: {e}");
-        }
-        if let Ok(conn) = Connection::open(db_path)
-            && let Err(e) = ensure_schema(&conn)
-        {
-            log::error!("failed to initialize queue schema: {e}");
-        }
+    /// Wraps the shared DB pool; the schema is initialized once by
+    /// [`crate::db::open_store`] (all three stores share the pool).
+    pub fn new(pool: std::sync::Arc<crate::db::DbPool>) -> Self {
         Self {
-            pool: std::sync::Arc::new(crate::db::DbPool::new(db_path)),
+            pool,
             notify: Arc::new(Notify::new()),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(Vec::new()),
@@ -424,7 +402,8 @@ mod tests {
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.db");
-        let queue = PersistentTaskQueue::new(path.to_str().unwrap());
+        let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
+        let queue = PersistentTaskQueue::new(pool);
         (queue, dir)
     }
 
@@ -531,10 +510,11 @@ mod tests {
     async fn stale_in_progress_row_is_recovered_on_start() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.db");
-        // Insert a stale leased row directly (lease expired).
+        // Insert a stale leased row directly (lease expired). open_store runs
+        // the schema; the queue below shares the same pool.
+        let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
         {
-            let conn = Connection::open(&path).unwrap();
-            ensure_schema(&conn).unwrap();
+            let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute(
                 "INSERT INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
                  VALUES ('task_stale', '{\"s\":1}', 0, 0, 'in_progress', ?1, 0)",
@@ -542,7 +522,7 @@ mod tests {
             )
             .unwrap();
         }
-        let queue = PersistentTaskQueue::new(path.to_str().unwrap());
+        let queue = PersistentTaskQueue::new(pool);
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         queue
@@ -578,8 +558,7 @@ mod tests {
         // Insert a stale leased row AFTER startup: without a runtime sweep it
         // would stay `in_progress` forever (only start() used to recover).
         {
-            let conn = Connection::open(queue.pool.path()).unwrap();
-            ensure_schema(&conn).unwrap();
+            let conn = rusqlite::Connection::open(queue.pool.path()).unwrap();
             conn.execute(
                 "INSERT INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
                  VALUES ('task_stale_runtime', '{\"s\":1}', 0, 0, 'in_progress', ?1, 0)",

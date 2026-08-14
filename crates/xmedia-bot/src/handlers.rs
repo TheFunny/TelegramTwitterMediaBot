@@ -1,11 +1,11 @@
 use crate::config::Config;
-use crate::db::now_f64;
+use crate::db::{self, now_f64};
 use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
 use crate::queue::PersistentTaskQueue;
 use crate::send::{self, MediaItemPayload, Task};
 use crate::state::{ChatData, ChatStore, unix_now};
 use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -79,12 +79,17 @@ pub async fn stop_url_workers() {
     }
 }
 
-pub static CHAT_STORE: LazyLock<ChatStore> =
-    LazyLock::new(|| ChatStore::open("data/task_queue.db").expect("failed to open chat store"));
+/// One shared SQLite pool for the three stores (chat state, task queue, link
+/// cache): a single pool bounds concurrent DB work on `data/task_queue.db`
+/// instead of three independent pools competing for the same file. The schema
+/// for all three tables is initialized once, here.
+static DB: LazyLock<Arc<db::DbPool>> =
+    LazyLock::new(|| db::open_store("data/task_queue.db").expect("failed to open database"));
+
+pub static CHAT_STORE: LazyLock<ChatStore> = LazyLock::new(|| ChatStore::new(Arc::clone(&DB)));
 pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
-    LazyLock::new(|| PersistentTaskQueue::new("data/task_queue.db"));
-pub static LINK_CACHE: LazyLock<LinkCache> =
-    LazyLock::new(|| LinkCache::open("data/task_queue.db"));
+    LazyLock::new(|| PersistentTaskQueue::new(Arc::clone(&DB)));
+pub static LINK_CACHE: LazyLock<LinkCache> = LazyLock::new(|| LinkCache::new(Arc::clone(&DB)));
 pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 
 #[derive(BotCommands, Clone)]
