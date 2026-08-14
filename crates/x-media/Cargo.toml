@@ -13,6 +13,7 @@ url = "2.5.2"
 bytes = "1"
 zip = "2"
 tempfile = "3"
+thiserror = "2"
 rand = "0.8"
 log = "0.4"
 tokio = { version = "1.40", features = ["time"] }

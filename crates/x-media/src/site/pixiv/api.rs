@@ -8,11 +8,11 @@ use super::model::{IllustrationModel, TypeModel, UgoiraMetadataModel};
 use crate::media::Media;
 use crate::site::FetchError;
 use std::env;
-use std::fmt;
 use std::io::Read;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
+use thiserror::Error;
 
 const AUTH_TOKEN_URL: &str = "https://oauth.secure.pixiv.net/auth/token";
 const APP_API_URL: &str = "https://app-api.pixiv.net";
@@ -23,51 +23,22 @@ const APP_USER_AGENT: &str = "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)";
 /// Token refresh safe margin (seconds).
 const TOKEN_REFRESH_SAFE_MARGIN: u64 = 300;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PixivError {
     /// No refresh token available (PIXIV_REFRESH_TOKEN unset).
+    #[error("pixiv: no authentication")]
     NoAuth,
-    Http(reqwest::Error),
-    Json(serde_json::Error),
+    #[error("pixiv http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("pixiv json error: {0}")]
+    Json(#[from] serde_json::Error),
     /// Non-2xx HTTP status from the app API. The code lets [`crate::site::fetch`]
     /// retry only transient classes (429 / 5xx) instead of burning attempts on
     /// permanent 4xx (bad token, forbidden, not found).
+    #[error("pixiv status {0}")]
     Status(u16),
+    #[error("pixiv api error: {0}")]
     Api(String),
-}
-
-impl fmt::Display for PixivError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PixivError::NoAuth => write!(f, "pixiv: no authentication"),
-            PixivError::Http(e) => write!(f, "pixiv http error: {e}"),
-            PixivError::Json(e) => write!(f, "pixiv json error: {e}"),
-            PixivError::Status(code) => write!(f, "pixiv status {code}"),
-            PixivError::Api(message) => write!(f, "pixiv api error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for PixivError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PixivError::Http(e) => Some(e),
-            PixivError::Json(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<reqwest::Error> for PixivError {
-    fn from(e: reqwest::Error) -> Self {
-        PixivError::Http(e)
-    }
-}
-
-impl From<serde_json::Error> for PixivError {
-    fn from(e: serde_json::Error) -> Self {
-        PixivError::Json(e)
-    }
 }
 
 /// Native pixiv app-API client.

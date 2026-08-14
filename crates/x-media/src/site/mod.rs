@@ -4,7 +4,6 @@
 //! `PATTERN`, `enabled()` and `fetch_from_url()`; a future site plugs in by
 //! adding one guarded entry in [`fetch_once`].
 
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::LazyLock;
@@ -12,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use regex::Regex;
+use thiserror::Error;
 
 pub mod bsky;
 pub mod pixiv;
@@ -183,82 +183,43 @@ pub fn site_id_from_key(key: &str) -> &'static str {
         .unwrap_or("unknown")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum FetchError {
-    Http(reqwest::Error),
-    Json(serde_json::Error),
-    Pixiv(PixivError),
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("pixiv error: {0}")]
+    Pixiv(#[from] PixivError),
     /// A site-specific error from a site that keeps its own error type.
     /// Permanent by default (sites that need retryable site errors convert
     /// them to [`FetchError::Http`] / [`FetchError::Transient`] before
     /// returning). Pixiv predates this and keeps the dedicated
     /// [`FetchError::Pixiv`] variant.
+    #[error("{site} error: {error}")]
     Site {
         site: &'static str,
+        #[source]
         error: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("not found")]
     NotFound,
+    #[error("blocked")]
     Blocked,
     /// The post exists but its content is withheld (twitter NSFW /
     /// age-restricted tweets come back as an empty `{}` from syndication).
+    #[error("content withheld (sensitive)")]
     Sensitive,
     /// A download exceeded the caller's size cap (see [`download_media_limited`]).
+    #[error("media too large")]
     TooLarge,
     /// A transient server-side failure (429 / 5xx); [`fetch`] retries these.
+    #[error("transient: {0}")]
     Transient(String),
     /// A local I/O failure while streaming a download to disk
     /// (see [`download_media_to_file`]).
+    #[error("io error: {0}")]
     Io(std::io::Error),
-}
-
-impl fmt::Display for FetchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FetchError::Http(e) => write!(f, "http error: {e}"),
-            FetchError::Json(e) => write!(f, "json error: {e}"),
-            FetchError::Pixiv(e) => write!(f, "pixiv error: {e}"),
-            FetchError::Site { site, error } => write!(f, "{site} error: {error}"),
-            FetchError::NotFound => write!(f, "not found"),
-            FetchError::Blocked => write!(f, "blocked"),
-            FetchError::Sensitive => write!(f, "content withheld (sensitive)"),
-            FetchError::TooLarge => write!(f, "media too large"),
-            FetchError::Transient(message) => write!(f, "transient: {message}"),
-            FetchError::Io(e) => write!(f, "io error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for FetchError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            FetchError::Http(e) => Some(e),
-            FetchError::Json(e) => Some(e),
-            FetchError::Pixiv(e) => Some(e),
-            FetchError::Site { error, .. } => Some(error.as_ref()),
-            FetchError::NotFound | FetchError::Blocked | FetchError::Sensitive => None,
-            FetchError::TooLarge => None,
-            FetchError::Transient(_) => None,
-            FetchError::Io(e) => Some(e),
-        }
-    }
-}
-
-impl From<reqwest::Error> for FetchError {
-    fn from(e: reqwest::Error) -> Self {
-        FetchError::Http(e)
-    }
-}
-
-impl From<serde_json::Error> for FetchError {
-    fn from(e: serde_json::Error) -> Self {
-        FetchError::Json(e)
-    }
-}
-
-impl From<PixivError> for FetchError {
-    fn from(e: PixivError) -> Self {
-        FetchError::Pixiv(e)
-    }
 }
 
 /// Shared HTTP client (browser User-Agent) for twitter/bsky fetches and
