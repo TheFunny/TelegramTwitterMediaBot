@@ -1,8 +1,8 @@
 # 架构优化设计：可测试性接缝 + handlers 拆分
 
-> 状态：设计稿（未实施）。目标：把仓库最大的测试空白（`handlers.rs`/`send.rs` 的
-> 发送与分派逻辑）补上可测试接缝，并把 ~1100 行的 handlers 单体拆成模块。
-> 每个阶段独立提交、独立回滚；全程 fmt / clippy / test 全绿，行为不变。
+> 状态：**阶段 A、B 已实施**（A: `c9e72fd`，B: `50206a9`）；C、D 为可选后续。
+> 目标：把仓库最大的测试空白（`handlers.rs`/`send.rs` 的发送与分派逻辑）补上
+> 可测试接缝，并把 ~1100 行的 handlers 单体拆成模块。
 
 ---
 
@@ -121,14 +121,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 - **不引入 DI 框架**：仓库惯例是 LazyLock 静态 + 显式传参，保持。
 - **不抽象 main.rs 的 teloxide 装配**。
 
-## 7. 提交序列
+## 7. 实施记录
 
-| 阶段 | 提交消息（建议） |
-|---|---|
-| A | `refactor(handlers): split monolithic handlers.rs into modules` |
-| B | `refactor(send): introduce MediaSender seam for testable send paths` |
-| B+ | `test(send): cover fallback and classification via MockSender` |
-| C | `feat(send): add per-chat token bucket rate limiting` |
-| D | `refactor(db): versioned schema migrations` |
+| 阶段 | 提交 | 说明 |
+|---|---|---|
+| A | `c9e72fd` | handlers 拆为 `{mod, statics, commands, urls, inline, callback}` |
+| B | `50206a9` | `media_sender.rs`：`trait MediaSender` + `impl for Bot`（`<Bot as Requester>::` 消歧）；send.rs 8 处签名改 `&dyn MediaSender`；`MockSender` 测试覆盖兜底触发与错误分类（+5 测试） |
+| B 待办 | — | url_media 的 `AppContext` 注入（sender/store/queue/cache），解锁 url_media 全链路测试 |
+| C / D | — | 可选后续 |
 
 每阶段独立合入；A、B 为核心，C、D 可选。
