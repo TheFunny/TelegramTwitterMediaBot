@@ -59,6 +59,25 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     Ok(fetched)
 }
 
+/// Cache key for a bsky URL: `"bsky:<handle>/<rkey>"`. The prefix is the
+/// site id used for caption-format lookup and link-cache keys.
+pub fn cache_key(url: &str) -> Option<String> {
+    PATTERN
+        .captures(url)
+        .map(|caps| format!("bsky:{}/{}", &caps[1], &caps[2]))
+}
+
+/// Bluesky's fetch-retry policy: transient classes only. Not-found, blocked
+/// and parse failures are permanent.
+pub fn is_retryable(err: &FetchError) -> bool {
+    matches!(err, FetchError::Http(_) | FetchError::Transient(_))
+}
+
+/// bsky media (cdn.bsky.app) needs no extra headers.
+pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
+    None
+}
+
 /// Downloads an HLS playlist (master or media) and remuxes its segments to a
 /// single MP4 via ffmpeg. Returns the MP4 path plus the temp dir that must
 /// stay alive until the file is uploaded. `Ok(None)` when ffmpeg is missing.

@@ -160,19 +160,17 @@ pub fn caption_from_fields(
 
 /// Stable per-post cache key derived from any supported URL, so variant
 /// domains (x.com / twitter.com / fxtwitter.com, mobile, `/photo/N`
-/// suffixes) map to the same post. Returns `"twitter:<id>"`,
-/// `"pixiv:<id>"` or `"bsky:<handle>/<rkey>"`.
+/// suffixes) map to the same post. Delegates to the per-site `cache_key`
+/// implementations (dispatch order twitter → bsky → pixiv).
 pub fn cache_key(url: &str) -> Option<String> {
-    if let Some(caps) = twitter::PATTERN.captures(url) {
-        return Some(format!("twitter:{}", &caps[1]));
-    }
-    if let Some(caps) = pixiv::PATTERN.captures(url) {
-        return Some(format!("pixiv:{}", &caps[1]));
-    }
-    if let Some(caps) = bsky::PATTERN.captures(url) {
-        return Some(format!("bsky:{}/{}", &caps[1], &caps[2]));
-    }
-    None
+    [
+        twitter::cache_key(url),
+        bsky::cache_key(url),
+        pixiv::cache_key(url),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
 }
 
 /// The site id carried by a cache key (`"twitter:123"` → `"twitter"`).
@@ -317,35 +315,18 @@ pub(crate) fn log_once_ffmpeg_missing() {
 /// matches (unsupported links are silently ignored by the bot).
 ///
 /// Transient failures are retried: 3 total attempts with 1s then 2s delays.
-/// Retried classes: bare HTTP errors, [`FetchError::Transient`] (429/5xx
-/// from any site), pixiv network errors, and pixiv HTTP statuses that are
-/// actually transient (429 / 5xx). Permanent classes are returned
-/// immediately: Json, NotFound, Blocked, Sensitive, pixiv 4xx statuses
-/// (bad/expired token, forbidden, not found) and pixiv API/auth errors.
-/// Whether [`fetch`] should retry `err` (3 total attempts, 1s then 2s
-/// backoff). Permanent classes — 4xx statuses, invalid tokens, unparseable
-/// bodies, not-found/blocked/sensitive — are returned immediately; retrying
-/// them only wastes attempts against the source site.
-fn fetch_error_is_retryable(err: &FetchError) -> bool {
-    match err {
-        FetchError::Http(_) | FetchError::Transient(_) => true,
-        FetchError::Pixiv(e) => match e {
-            PixivError::Http(_) => true,
-            PixivError::Status(code) if *code == 429 || *code >= 500 => true,
-            // 4xx, invalid token, unparseable body: retrying cannot help.
-            PixivError::Status(_)
-            | PixivError::Api(_)
-            | PixivError::Json(_)
-            | PixivError::NoAuth => false,
-        },
-        _ => false,
-    }
-}
-
+/// What counts as transient is the matched site's own policy
+/// (`SiteKind::is_retryable` — e.g. pixiv retries only network errors and
+/// 429/5xx). Permanent classes (not-found, blocked, sensitive, parse
+/// failures, pixiv 4xx/auth errors) are returned immediately; retrying them
+/// only wastes attempts against the source site.
 pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
+    let Some(site) = match_site(url) else {
+        return Ok(None);
+    };
     for attempt in 0..3u32 {
-        match fetch_once(url).await {
-            Ok(Some(fetched)) => {
+        match fetch_once(url, site).await {
+            Ok(fetched) => {
                 // Per-request detail: debug only, keyed by the post id.
                 log::debug!(
                     "fetched [key={}]: site {} returned {} media",
@@ -355,9 +336,8 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
                 );
                 return Ok(Some(fetched));
             }
-            Ok(None) => return Ok(None),
             Err(err) => {
-                if fetch_error_is_retryable(&err) && attempt < 2 {
+                if site.is_retryable(&err) && attempt < 2 {
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 } else {
                     return Err(err);
@@ -368,33 +348,80 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
     unreachable!("retry loop always returns")
 }
 
-async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
+/// Which site owns a URL (dispatch order twitter → bsky → pixiv), honoring
+/// each site's `enabled()` gate. `None` for unsupported links.
+fn match_site(url: &str) -> Option<SiteKind> {
     if twitter::enabled() && twitter::PATTERN.is_match(url) {
-        return Ok(Some(twitter::fetch_from_url(url).await?));
+        Some(SiteKind::Twitter)
+    } else if bsky::enabled() && bsky::PATTERN.is_match(url) {
+        Some(SiteKind::Bsky)
+    } else if pixiv::enabled() && pixiv::PATTERN.is_match(url) {
+        Some(SiteKind::Pixiv)
+    } else {
+        None
     }
-    if bsky::enabled() && bsky::PATTERN.is_match(url) {
-        return Ok(Some(bsky::fetch_from_url(url).await?));
+}
+
+/// Statically-dispatched site handle: keeps per-site fetch + retry policy
+/// callable from the central dispatcher without a trait object (stage 2 of
+/// the site-registry refactor; stage 3 replaces this with `dyn Site`).
+#[derive(Clone, Copy)]
+enum SiteKind {
+    Twitter,
+    Bsky,
+    Pixiv,
+}
+
+impl SiteKind {
+    /// The matched site's own retry policy (see each site's `is_retryable`).
+    fn is_retryable(&self, err: &FetchError) -> bool {
+        match self {
+            SiteKind::Twitter => twitter::is_retryable(err),
+            SiteKind::Bsky => bsky::is_retryable(err),
+            SiteKind::Pixiv => pixiv::is_retryable(err),
+        }
     }
-    if pixiv::enabled() && pixiv::PATTERN.is_match(url) {
-        return Ok(Some(pixiv::fetch_from_url(url).await?));
+}
+
+async fn fetch_once(url: &str, site: SiteKind) -> Result<Fetched, FetchError> {
+    match site {
+        SiteKind::Twitter => twitter::fetch_from_url(url).await,
+        SiteKind::Bsky => bsky::fetch_from_url(url).await,
+        SiteKind::Pixiv => pixiv::fetch_from_url(url).await,
     }
-    Ok(None)
+}
+
+/// Applies every site's media-header rule to a download request (pixiv's
+/// `Referer` for pximg.net hotlink protection). Sites contribute via their
+/// `media_headers(url)` — the central download code carries no per-site logic.
+fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    for headers in [
+        twitter::media_headers(url),
+        bsky::media_headers(url),
+        pixiv::media_headers(url),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+    }
+    request
 }
 
 /// Downloads media bytes for the bot's upload fallback: when Telegram's own
 /// fetch of a media URL is blocked (hotlink protection), the bot downloads
-/// the file itself and uploads it via multipart. Site-appropriate headers:
-/// pixiv image hosts need the `Referer` header.
+/// the file itself and uploads it via multipart. Site-appropriate headers
+/// come from each site's `media_headers` (pixiv image hosts need `Referer`).
 /// Returns the Content-Length of a media URL, or `None` when the server does
 /// not report one. Used to check whether a file fits Telegram's size limits
 /// before downloading/uploading it.
 pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
-    let mut request = CLIENT.get(url);
-    let lower = url.to_ascii_lowercase();
-    if lower.contains("pximg.net") {
-        request = request.header("Referer", "https://www.pixiv.net/");
-    }
-    let response = request.send().await?.error_for_status()?;
+    let response = apply_media_headers(CLIENT.get(url), url)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(response.content_length())
 }
 
@@ -403,12 +430,10 @@ pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
 /// crossed (or when a declared Content-Length already exceeds it). Keeps the
 /// bot from buffering arbitrarily large bodies into memory.
 pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
-    let mut request = CLIENT.get(url);
-    let lower = url.to_ascii_lowercase();
-    if lower.contains("pximg.net") {
-        request = request.header("Referer", "https://www.pixiv.net/");
-    }
-    let response = request.send().await?.error_for_status()?;
+    let response = apply_media_headers(CLIENT.get(url), url)
+        .send()
+        .await?
+        .error_for_status()?;
     if let Some(len) = response.content_length()
         && len > max_bytes
     {
@@ -441,12 +466,10 @@ pub async fn download_media_to_file(
     out: &mut std::fs::File,
 ) -> Result<u64, FetchError> {
     use std::io::Write;
-    let mut request = CLIENT.get(url);
-    let lower = url.to_ascii_lowercase();
-    if lower.contains("pximg.net") {
-        request = request.header("Referer", "https://www.pixiv.net/");
-    }
-    let response = request.send().await?.error_for_status()?;
+    let response = apply_media_headers(CLIENT.get(url), url)
+        .send()
+        .await?
+        .error_for_status()?;
     if let Some(len) = response.content_length()
         && len > max_bytes
     {
@@ -500,51 +523,6 @@ mod tests {
         assert_eq!(site_id_from_key("bsky:handle.example/3lorem"), "bsky");
         assert_eq!(site_id_from_key("unknown:1"), "unknown");
         assert_eq!(site_id_from_key("no-colon"), "unknown");
-    }
-
-    #[test]
-    fn fetch_error_retryability_classification() {
-        // Transient: network errors, explicit transient, pixiv 429/5xx.
-        assert!(fetch_error_is_retryable(&FetchError::Transient(
-            "429".into()
-        )));
-        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(429)
-        )));
-        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(500)
-        )));
-        assert!(fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(503)
-        )));
-        // Permanent: pixiv 4xx (bad/expired token, forbidden, not found),
-        // api/auth errors, unparseable bodies, not-found/blocked/sensitive.
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(400)
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(401)
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(403)
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Status(404)
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Api("invalid_grant".into())
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::NoAuth
-        )));
-        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
-        assert!(!fetch_error_is_retryable(&FetchError::Pixiv(
-            PixivError::Json(json_err)
-        )));
-        assert!(!fetch_error_is_retryable(&FetchError::NotFound));
-        assert!(!fetch_error_is_retryable(&FetchError::Blocked));
-        assert!(!fetch_error_is_retryable(&FetchError::Sensitive));
-        assert!(!fetch_error_is_retryable(&FetchError::TooLarge));
     }
 
     #[test]

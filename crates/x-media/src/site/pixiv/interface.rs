@@ -1,6 +1,6 @@
 use super::model::{IllustrationModel, TypeModel};
 use crate::media::Media;
-use crate::site::{FetchError, Fetched};
+use crate::site::{FetchError, Fetched, PixivError};
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -21,6 +21,43 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
         .ok_or(FetchError::NotFound)?;
     let id = id.parse::<u64>().map_err(|_| FetchError::NotFound)?;
     Ok(super::api::fetch(id).await?.into())
+}
+
+/// Cache key for a pixiv URL: `"pixiv:<id>"`. The prefix is the site id used
+/// for caption-format lookup and link-cache keys.
+pub fn cache_key(url: &str) -> Option<String> {
+    PATTERN
+        .captures(url)
+        .map(|caps| format!("pixiv:{}", &caps[1]))
+}
+
+/// Pixiv's fetch-retry policy: transient classes only — network errors and
+/// HTTP 429/5xx. Permanent 4xx (bad/expired token, forbidden, not found),
+/// API/auth errors, unparseable bodies and missing auth are not retried.
+pub fn is_retryable(err: &FetchError) -> bool {
+    match err {
+        FetchError::Http(_) | FetchError::Transient(_) => true,
+        FetchError::Pixiv(e) => match e {
+            PixivError::Http(_) => true,
+            PixivError::Status(code) if *code == 429 || *code >= 500 => true,
+            PixivError::Status(_)
+            | PixivError::Api(_)
+            | PixivError::Json(_)
+            | PixivError::NoAuth => false,
+        },
+        _ => false,
+    }
+}
+
+/// pximg.net is hotlink-protected: downloads must carry the pixiv Referer.
+/// The match is on the media host, not the site PATTERN — pixiv's PATTERN
+/// only matches `pixiv.net/artworks/...`, never `i.pximg.net`.
+pub fn media_headers(url: &str) -> Option<Vec<(&'static str, String)>> {
+    if url.to_ascii_lowercase().contains("pximg.net") {
+        Some(vec![("Referer", "https://www.pixiv.net/".to_string())])
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -231,6 +268,43 @@ mod tests {
         ] {
             assert!(!PATTERN.is_match(url), "{url}");
         }
+    }
+
+    #[test]
+    fn is_retryable_classifies_transient_and_permanent() {
+        // Transient: network errors, explicit transient, pixiv 429/5xx.
+        assert!(is_retryable(&FetchError::Transient("429".into())));
+        assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(429))));
+        assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(500))));
+        assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(503))));
+        // Permanent: pixiv 4xx (bad/expired token, forbidden, not found),
+        // api/auth errors, unparseable bodies, not-found/blocked/sensitive.
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Status(400))));
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Status(401))));
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Status(403))));
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Status(404))));
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Api(
+            "invalid_grant".into()
+        ))));
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::NoAuth)));
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert!(!is_retryable(&FetchError::Pixiv(PixivError::Json(
+            json_err
+        ))));
+        assert!(!is_retryable(&FetchError::NotFound));
+        assert!(!is_retryable(&FetchError::Blocked));
+        assert!(!is_retryable(&FetchError::Sensitive));
+        assert!(!is_retryable(&FetchError::TooLarge));
+    }
+
+    #[test]
+    fn media_headers_adds_referer_only_for_pximg() {
+        assert_eq!(
+            media_headers("https://i.pximg.net/img-original/img/1.png"),
+            Some(vec![("Referer", "https://www.pixiv.net/".to_string())])
+        );
+        assert_eq!(media_headers("https://www.pixiv.net/artworks/1"), None);
+        assert_eq!(media_headers("https://x.com/u/status/1"), None);
     }
 
     #[test]
