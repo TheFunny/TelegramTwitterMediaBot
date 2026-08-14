@@ -134,6 +134,12 @@ fn rusqlite_error(e: std::io::Error) -> rusqlite::Error {
 /// Creates the `tasks`, `chat_state` and `link_cache` tables (idempotent).
 /// The three stores used to own their own schema; keeping it in one place
 /// means one initialization for the whole database file.
+///
+/// ⚠️ Schema-change reminder (deferred, see `docs/architecture-refactor.md`
+/// §5): this is a plain `CREATE TABLE IF NOT EXISTS` with no versioning.
+/// Before any column/table change that must migrate existing databases, land
+/// the `PRAGMA user_version` migration chain first (`MIGRATIONS: &[&str]` +
+/// `migrate(conn)`), then restructure this function.
 pub fn schema_init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \

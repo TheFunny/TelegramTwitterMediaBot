@@ -14,6 +14,7 @@ mod link_cache;
 mod media_sender;
 mod photo;
 mod queue;
+mod rate_limit;
 mod send;
 mod state;
 

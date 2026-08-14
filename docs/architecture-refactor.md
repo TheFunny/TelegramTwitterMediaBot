@@ -1,6 +1,7 @@
 # 架构优化设计：可测试性接缝 + handlers 拆分
 
-> 状态：**阶段 A、B 已实施**（A: `c9e72fd`，B: `50206a9`）；C、D 为可选后续。
+> 状态：**阶段 A、B、C 已实施**（A: `c9e72fd`，B: `50206a9` + `ae69d72`，C:
+> rate_limit 提交）；**D 已延迟**——待下次数据库 schema 变化时实施（见 §5）。
 > 目标：把仓库最大的测试空白（`handlers.rs`/`send.rs` 的发送与分派逻辑）补上
 > 可测试接缝，并把 ~1100 行的 handlers 单体拆成模块。
 
@@ -74,26 +75,34 @@ impl MediaSender for Bot { /* 委托现有 teloxide 调用 */ }
 **风险**：中。动 `send.rs`/`handlers.rs` 签名（约 15 处调用点），行为不变。
 **不做**：`main.rs` 的 teloxide 装配不抽象（那是真正的胶水，无测试价值）。
 
-## 4. 阶段 C（可选）：主动限流
+## 4. 阶段 C：主动限流（已实施）
 
 批量转发时的突发会触发 Telegram 频道限速，现在靠 `RetryAfter → 队列重试` 被动
-应对。新增轻量令牌桶（`rate_limit.rs`，~50 行）：
+应对。新增轻量令牌桶（`rate_limit.rs`）：
 
 ```rust
-pub struct TokenBucket { /* capacity, refill_rate, state */ }
+pub struct TokenBucket { capacity, refill_per_sec, state: Mutex<State> }
 impl TokenBucket {
-    pub async fn acquire(&self, n: u64) -> Duration; // 等待时长（或 Notify 唤醒）
+    pub async fn acquire(&self, n: f64); // 按 n 个 token 等待并消费
 }
+pub fn limiter_for(chat_id: i64) -> Arc<TokenBucket>; // 每频道一个桶
 ```
 
-- 按频道粒度（`HashMap<ChatId, Arc<TokenBucket>>`），在 `send_media_group`/
-  `copy_messages` 前置 `acquire`。
-- 收益：减少 429 → 重试 → 死信；风险低，独立模块。
-- 不做的理由（若选不做）：当前重试链路已能自愈，容量可按需再加。
+- 默认 `CAPACITY = 20`、`REFILL_PER_SEC = 20/60`（约 20 msg/min）；
+  单次 acquire 可超出容量（记为债务，由后续 refill 偿还）。
+- 挂点：`MediaSender for Bot` 的 `send_media_group`（按 items 数）、
+  `copy_messages`（按 ids 数）、`send_animation`（1 token）前置 `acquire`；
+  MockSender 不受影响（测试不经过限流）。
+- 收益：减少 429 → 重试 → 死信；队列重试仍是全局限速的安全网。
+- 风险：低，独立模块；`tokio::time`（paused-clock 可测）。
 
-## 5. 阶段 D（可选）：DB 版本化迁移
+## 5. 阶段 D：DB 版本化迁移（**已延迟**）
 
-`schema_init` 是 `CREATE TABLE IF NOT EXISTS`，无版本概念。改为：
+> ⚠️ **待办提醒**：本阶段**推迟到下次数据库 schema 变化时实施**（给
+> `link_cache`/`chat_state`/`tasks` 加列、改结构等）。当前 `schema_init` 是
+> `CREATE TABLE IF NOT EXISTS`，无版本概念；一旦需要迁移已有线上库，必须先落地
+> 本方案（`PRAGMA user_version` 迁移链）再改 schema。`db.rs` 的 `schema_init`
+> 处已留注释指向这里。
 
 ```rust
 // db.rs
@@ -127,7 +136,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 |---|---|---|
 | A | `c9e72fd` | handlers 拆为 `{mod, statics, commands, urls, inline, callback}` |
 | B | `50206a9` | `media_sender.rs`：`trait MediaSender` + `impl for Bot`（`<Bot as Requester>::` 消歧）；send.rs 8 处签名改 `&dyn MediaSender`；`MockSender` 测试覆盖兜底触发与错误分类（+5 测试） |
-| B 待办 | — | url_media 的 `AppContext` 注入（sender/store/queue/cache），解锁 url_media 全链路测试 |
-| C / D | — | 可选后续 |
+| B | `ae69d72` | `AppContext` 注入 `url_media`（sender/store/queue/cache），url_media 全链路测试（缓存命中/失效/成功/不支持 URL，+3 测试） |
+| C | rate_limit 提交 | `rate_limit.rs` 令牌桶 + 每频道注册表；`MediaSender for Bot` 的 group/copy/animation 前置 `acquire`（+3 测试） |
+| D | — | **已延迟**：待下次数据库 schema 变化时实施（见 §5） |
 
-每阶段独立合入；A、B 为核心，C、D 可选。
+A、B、C 为核心并已实施；D 在 schema 变更时落地。

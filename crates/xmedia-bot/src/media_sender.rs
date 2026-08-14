@@ -73,6 +73,11 @@ impl MediaSender for Bot {
         items: Vec<InputMedia>,
     ) -> BoxFuture<'_, Result<Vec<Message>, RequestError>> {
         Box::pin(async move {
+            // Pace media sends per chat (one token per item) so bursts do not
+            // trip Telegram's flood control.
+            crate::rate_limit::limiter_for(chat_id.0)
+                .acquire(items.len() as f64)
+                .await;
             // `<Bot as Requester>::` disambiguates from this trait's same-named
             // method (teloxide's API lives in the `Requester` trait).
             <Bot as Requester>::send_media_group(self, chat_id, items)
@@ -90,6 +95,7 @@ impl MediaSender for Bot {
         file: InputFile,
     ) -> BoxFuture<'a, Result<Message, RequestError>> {
         Box::pin(async move {
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
             let mut request = <Bot as Requester>::send_animation(self, chat_id, file)
                 .caption(caption)
                 .parse_mode(ParseMode::Html)
@@ -107,7 +113,14 @@ impl MediaSender for Bot {
         from: ChatId,
         ids: Vec<MessageId>,
     ) -> BoxFuture<'_, Result<Vec<MessageId>, RequestError>> {
-        Box::pin(async move { <Bot as Requester>::copy_messages(self, to, from, ids).await })
+        Box::pin(async move {
+            // Channel forwards are the burstiest path (batch copies); pace
+            // them per message against the channel's budget.
+            crate::rate_limit::limiter_for(to.0)
+                .acquire(ids.len() as f64)
+                .await;
+            <Bot as Requester>::copy_messages(self, to, from, ids).await
+        })
     }
 
     fn send_message(

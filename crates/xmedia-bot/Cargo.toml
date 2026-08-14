@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 teloxide = { version = "0.17", default-features = false, features = ["webhooks-axum", "macros", "rustls", "ctrlc_handler"] }
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
@@ -23,3 +23,6 @@ zune-jpeg = "0.5"
 fast_image_resize = "6"
 jpeg-encoder = "0.7"
 x-media = { path = "../x-media" }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["test-util"] }
