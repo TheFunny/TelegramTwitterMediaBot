@@ -29,6 +29,12 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
             if super::auth::enabled() {
                 match super::auth::fetch(id).await {
                     Ok(tweet) => Ok(tweet.into()),
+                    // The tweet is genuinely gone (deleted / suspended /
+                    // tombstoned): report it instead of degrading to an
+                    // empty result ("No media found"). Only unexpected
+                    // fallback failures (network, parse) keep the NSFW
+                    // placeholder.
+                    Err(FetchError::NotFound) => Err(FetchError::NotFound),
                     Err(e) => {
                         log::warn!("twitter auth fallback failed for {id}: {e}");
                         Ok(empty_fetched(url))
@@ -59,8 +65,8 @@ fn empty_fetched(url: &str) -> Fetched {
     }
 }
 
-/// Fetches a tweet from the syndication endpoint. Deleted/blocked tweets
-/// surface as `FetchError::NotFound`.
+/// Fetches a tweet from the syndication endpoint. Deleted/blocked/tombstoned
+/// tweets surface as `FetchError::NotFound`.
 pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     let id_num = id.parse::<u64>().map_err(|_| FetchError::NotFound)?;
     let response = crate::site::CLIENT
@@ -79,23 +85,33 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         };
     }
     let text = response.text().await?;
-    // Deleted tweets answer with {"errors": [...]} instead of a tweet.
-    if serde_json::from_str::<serde_json::Value>(&text)
-        .map(|v| v.get("errors").is_some())
-        .unwrap_or(false)
-    {
+    // Deleted/blocked tweets answer with an `errors` array or a
+    // TweetTombstone (HTTP 200, no `id_str`); NSFW withholding is an empty
+    // `{}`. Both classes are permanent — classify before parsing the tweet.
+    parse_syndication_body(&text)?;
+    Tweet::from_syndication_json(&text).map_err(FetchError::Json)
+}
+
+/// Parses and classifies a syndication response body. `Ok` means the body is
+/// a real tweet payload; `Err` carries the permanent error class:
+/// - `NotFound`: an `errors` array (deleted/blocked) or a `TweetTombstone`
+///   (deleted by the author / suspended — HTTP 200, no `errors`, no `id_str`).
+/// - `Sensitive`: an empty `{}` (NSFW / age-restricted withholding).
+/// - `Json`: an unparseable body.
+///
+/// The tombstone shape must NOT fall through to `Sensitive`: the bot would
+/// otherwise answer "No media found" for a deleted tweet instead of failing.
+fn parse_syndication_body(text: &str) -> Result<serde_json::Value, FetchError> {
+    let body: serde_json::Value = serde_json::from_str(text)?;
+    let tombstoned = body.get("tombstone").is_some()
+        || body.get("__typename").and_then(|t| t.as_str()) == Some("TweetTombstone");
+    if body.get("errors").is_some() || tombstoned {
         return Err(FetchError::NotFound);
     }
-    // NSFW / age-restricted tweets exist but are served as an empty `{}` —
-    // they surface as FetchError::Sensitive so the caller can retry as a
-    // logged-in user.
-    if serde_json::from_str::<serde_json::Value>(&text)
-        .map(|v| v.get("id_str").is_none())
-        .unwrap_or(false)
-    {
+    if body.get("id_str").is_none() {
         return Err(FetchError::Sensitive);
     }
-    Tweet::from_syndication_json(&text).map_err(FetchError::Json)
+    Ok(body)
 }
 
 /// The syndication token: JS `((id / 1e15) * PI).toString(36)` (the
@@ -572,6 +588,48 @@ mod tests {
         assert!(token.starts_with("236.v"), "got {token}");
     }
 
+    #[test]
+    fn syndication_tombstone_maps_to_not_found() {
+        // Deleted tweets answer HTTP 200 with a TweetTombstone (no `errors`,
+        // no `id_str`); it must not fall through to Sensitive, which would
+        // make the bot reply "No media found" for a deleted tweet.
+        let raw = serde_json::json!({
+            "__typename": "TweetTombstone",
+            "tombstone": {
+                "text": { "rtl": false, "text": "This Post was deleted by the Post author. Learn more" }
+            }
+        });
+        assert!(matches!(
+            parse_syndication_body(&raw.to_string()),
+            Err(FetchError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn syndication_errors_maps_to_not_found() {
+        // The classic gone shape: {"errors": [...]}.
+        let raw = serde_json::json!({ "errors": [{ "message": "Couldn't find Tweet" }] });
+        assert!(matches!(
+            parse_syndication_body(&raw.to_string()),
+            Err(FetchError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn syndication_empty_object_maps_to_sensitive() {
+        // NSFW / age-restricted withholding: an empty `{}`.
+        assert!(matches!(
+            parse_syndication_body("{}"),
+            Err(FetchError::Sensitive)
+        ));
+    }
+
+    #[test]
+    fn syndication_tweet_body_passes() {
+        let raw = fixture(serde_json::json!([]));
+        assert!(parse_syndication_body(&raw.to_string()).is_ok());
+    }
+
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
     async fn live_fetch_with_photos() {
@@ -591,6 +649,19 @@ mod tests {
     async fn live_fetch_deleted_tweet_is_not_found() {
         // Deleted tweet: the syndication endpoint answers with errors.
         let result = fetch("0").await;
+        assert!(
+            matches!(result, Err(FetchError::NotFound)),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
+    async fn live_fetch_tombstone_deleted_tweet_is_not_found() {
+        // Regression: a real deleted tweet answering with a TweetTombstone
+        // (HTTP 200, no errors/id_str) used to surface as Sensitive and
+        // degrade to an empty result ("No media found").
+        let result = fetch("2085948045967986859").await;
         assert!(
             matches!(result, Err(FetchError::NotFound)),
             "got {result:?}"
