@@ -1,6 +1,6 @@
 use super::model::{IllustrationModel, TypeModel};
 use crate::media::Media;
-use crate::site::{FetchError, Fetched, PixivError};
+use crate::site::{FetchError, Fetched, PixivError, Site, SiteFuture};
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -11,6 +11,53 @@ pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 
 pub fn enabled() -> bool {
     super::api::enabled()
+}
+
+/// Registry entry for the pixiv adapter (see [`crate::site::Site`]).
+pub struct PixivSite;
+
+impl Site for PixivSite {
+    fn id(&self) -> &'static str {
+        "pixiv"
+    }
+
+    fn pattern(&self) -> &'static Regex {
+        &PATTERN
+    }
+
+    fn enabled(&self) -> bool {
+        enabled()
+    }
+
+    fn cache_key(&self, url: &str) -> Option<String> {
+        cache_key(url)
+    }
+
+    fn fetch_from_url<'a>(&'a self, url: &'a str) -> SiteFuture<'a, Fetched> {
+        Box::pin(async move { fetch_from_url(url).await })
+    }
+
+    fn is_retryable(&self, err: &FetchError) -> bool {
+        is_retryable(err)
+    }
+
+    fn media_headers(&self, url: &str) -> Option<Vec<(&'static str, String)>> {
+        media_headers(url)
+    }
+
+    fn validate(&self) -> SiteFuture<'static, (), String> {
+        Box::pin(async {
+            match super::api::validate().await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Keep the old behavior: a failed login disables pixiv
+                    // for the rest of this process.
+                    super::api::disable();
+                    Err(format!("{e}"))
+                }
+            }
+        })
+    }
 }
 
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {

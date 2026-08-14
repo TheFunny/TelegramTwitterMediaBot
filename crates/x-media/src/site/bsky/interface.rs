@@ -1,9 +1,30 @@
 use super::model;
 use crate::media::Media;
-use crate::site::{FetchError, Fetched};
+use crate::site::{FetchError, Fetched, Site, SiteFuture};
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
+
+/// Registry entry for the bluesky adapter (see [`crate::site::Site`]).
+pub struct BskySite;
+
+impl Site for BskySite {
+    fn id(&self) -> &'static str {
+        "bsky"
+    }
+
+    fn pattern(&self) -> &'static Regex {
+        &PATTERN
+    }
+
+    fn cache_key(&self, url: &str) -> Option<String> {
+        cache_key(url)
+    }
+
+    fn fetch_from_url<'a>(&'a self, url: &'a str) -> SiteFuture<'a, Fetched> {
+        Box::pin(async move { fetch_from_url(url).await })
+    }
+}
 
 pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:https?://)?bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap()

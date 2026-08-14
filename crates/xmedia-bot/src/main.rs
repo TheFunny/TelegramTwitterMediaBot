@@ -69,19 +69,18 @@ async fn main() {
     handlers::start_url_workers().await;
     log::info!("url workers started");
 
-    // Pixiv login validation (user request): a failed login notifies the
-    // admin and disables pixiv for this process.
-    if site::pixiv::enabled() {
-        match site::pixiv::validate().await {
-            Ok(()) => log::info!("pixiv login validated"),
-            Err(e) => {
-                log::error!("pixiv login failed: {e}");
-                if let Some(admin) = CONFIG.admin_ids.first() {
-                    let _ = bot
-                        .send_message(ChatId(*admin), format!("Pixiv login failed: {e}"))
-                        .await;
-                }
-                site::pixiv::disable();
+    // Site login validation (user request): a failed login notifies the
+    // admin and the site disables itself for this process (pixiv).
+    let failures = site::validate_all().await;
+    if failures.is_empty() {
+        log::info!("site logins validated");
+    } else {
+        for (site_id, message) in &failures {
+            log::error!("{site_id} login failed: {message}");
+            if let Some(admin) = CONFIG.admin_ids.first() {
+                let _ = bot
+                    .send_message(ChatId(*admin), format!("{site_id} login failed: {message}"))
+                    .await;
             }
         }
     }

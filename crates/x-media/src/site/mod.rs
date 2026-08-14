@@ -5,9 +5,13 @@
 //! adding one guarded entry in [`fetch_once`].
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use regex::Regex;
 
 pub mod bsky;
 pub mod pixiv;
@@ -160,17 +164,10 @@ pub fn caption_from_fields(
 
 /// Stable per-post cache key derived from any supported URL, so variant
 /// domains (x.com / twitter.com / fxtwitter.com, mobile, `/photo/N`
-/// suffixes) map to the same post. Delegates to the per-site `cache_key`
-/// implementations (dispatch order twitter → bsky → pixiv).
+/// suffixes) map to the same post. Delegates to each registered site's
+/// `cache_key` (dispatch order twitter → bsky → pixiv).
 pub fn cache_key(url: &str) -> Option<String> {
-    [
-        twitter::cache_key(url),
-        bsky::cache_key(url),
-        pixiv::cache_key(url),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
+    SITES.iter().find_map(|site| site.cache_key(url))
 }
 
 /// The site id carried by a cache key (`"twitter:123"` → `"twitter"`).
@@ -178,18 +175,12 @@ pub fn cache_key(url: &str) -> Option<String> {
 /// link-cache hit path, where no [`Fetched`] is available — the same value
 /// a fresh fetch would read from [`Fetched::site_id`].
 pub fn site_id_from_key(key: &str) -> &'static str {
-    match key.split(':').next() {
-        Some("twitter") => "twitter",
-        Some("pixiv") => "pixiv",
-        Some("bsky") => "bsky",
-        _ => "unknown",
-    }
-}
-
-/// Every supported site id, in dispatch order. The bot's SetFormat whitelist
-/// and per-site caption-format lookup derive from this list.
-pub fn site_ids() -> Vec<&'static str> {
-    vec!["twitter", "bsky", "pixiv"]
+    let prefix = key.split(':').next().unwrap_or("");
+    SITES
+        .iter()
+        .map(|site| site.id())
+        .find(|id| *id == prefix)
+        .unwrap_or("unknown")
 }
 
 #[derive(Debug)]
@@ -311,21 +302,110 @@ pub(crate) fn log_once_ffmpeg_missing() {
     }
 }
 
+/// Site adapter: one impl per supported site (twitter / bsky / pixiv),
+/// registered in [`SITES`]. All site-specific knowledge — URL pattern,
+/// cache-key format, fetch, retry policy, media-host headers, startup
+/// validation — lives in the site module; the central dispatcher only
+/// iterates the registry.
+///
+/// Async methods return a boxed future (see [`SiteFuture`]): `async fn` /
+/// RPITIT in traits are not dyn-compatible (verified on rustc 1.95), and
+/// `+ Send` is required since URL/queue workers spawn these futures. The
+/// site structs are stateless unit structs, so the boxed futures never
+/// borrow from `self` beyond the call's scope.
+pub trait Site: Send + Sync {
+    /// Stable site id (`"twitter"` / `"bsky"` / `"pixiv"`): caption-format
+    /// lookup, cache-key prefixes and the SetFormat whitelist derive from it.
+    fn id(&self) -> &'static str;
+    /// URL pattern; the dispatcher's first match wins (dispatch order).
+    fn pattern(&self) -> &'static Regex;
+    /// Whether the site is usable (env token present, not disabled).
+    fn enabled(&self) -> bool {
+        true
+    }
+    /// Normalized cache key for a URL of this site (`None` when the URL does
+    /// not match this site).
+    fn cache_key(&self, url: &str) -> Option<String>;
+    /// Fetches and normalizes a post.
+    fn fetch_from_url<'a>(&'a self, url: &'a str) -> SiteFuture<'a, Fetched>;
+    /// Retry policy for fetch errors: transient classes only.
+    fn is_retryable(&self, err: &FetchError) -> bool {
+        matches!(err, FetchError::Http(_) | FetchError::Transient(_))
+    }
+    /// Extra headers for downloading this site's media (hotlink protection,
+    /// e.g. pixiv's Referer for pximg.net). Matched on the media URL, not
+    /// the site pattern.
+    fn media_headers(&self, _url: &str) -> Option<Vec<(&'static str, String)>> {
+        None
+    }
+    /// Startup validation (token check etc.); failures are surfaced by
+    /// [`validate_all`]. The default is a no-op.
+    fn validate(&self) -> SiteFuture<'static, (), String> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// A boxed, `Send` future produced by a [`Site`] async method. Boxed so the
+/// trait stays dyn-compatible; `Send` because URL/queue workers `tokio::spawn`
+/// these futures.
+type SiteFuture<'a, T, E = FetchError> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+
+/// The one registry of supported sites, in dispatch order (twitter → bsky →
+/// pixiv). Adding a site = new module + one `Box::new(...)` entry here; the
+/// bot crate never lists sites itself.
+static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| {
+    vec![
+        Box::new(twitter::TwitterSite),
+        Box::new(bsky::BskySite),
+        Box::new(pixiv::PixivSite),
+    ]
+});
+
+/// The first enabled site whose pattern matches `url`, in dispatch order.
+fn find_site(url: &str) -> Option<&'static dyn Site> {
+    SITES
+        .iter()
+        .find(|site| site.enabled() && site.pattern().is_match(url))
+        .map(|site| site.as_ref())
+}
+
+/// Every supported site id, in dispatch order. The bot's SetFormat whitelist
+/// derives from this list.
+pub fn site_ids() -> Vec<&'static str> {
+    SITES.iter().map(|site| site.id()).collect()
+}
+
+/// Runs every enabled site's startup validation and returns the failures
+/// (site id + message). The caller logs / notifies; failing sites disable
+/// themselves (pixiv disables on a bad token).
+pub async fn validate_all() -> Vec<(&'static str, String)> {
+    let mut failures = Vec::new();
+    for site in SITES.iter() {
+        if !site.enabled() {
+            continue;
+        }
+        if let Err(e) = site.validate().await {
+            failures.push((site.id(), e));
+        }
+    }
+    failures
+}
+
 /// Fetches a post from its URL. Returns `Ok(None)` when no site pattern
 /// matches (unsupported links are silently ignored by the bot).
 ///
 /// Transient failures are retried: 3 total attempts with 1s then 2s delays.
-/// What counts as transient is the matched site's own policy
-/// (`SiteKind::is_retryable` — e.g. pixiv retries only network errors and
-/// 429/5xx). Permanent classes (not-found, blocked, sensitive, parse
-/// failures, pixiv 4xx/auth errors) are returned immediately; retrying them
-/// only wastes attempts against the source site.
+/// What counts as transient is the matched site's own policy (`is_retryable`
+/// — e.g. pixiv retries only network errors and 429/5xx). Permanent classes
+/// (not-found, blocked, sensitive, parse failures, pixiv 4xx/auth errors)
+/// are returned immediately; retrying them only wastes attempts against the
+/// source site.
 pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
-    let Some(site) = match_site(url) else {
+    let Some(site) = find_site(url) else {
         return Ok(None);
     };
     for attempt in 0..3u32 {
-        match fetch_once(url, site).await {
+        match site.fetch_from_url(url).await {
             Ok(fetched) => {
                 // Per-request detail: debug only, keyed by the post id.
                 log::debug!(
@@ -348,63 +428,15 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
     unreachable!("retry loop always returns")
 }
 
-/// Which site owns a URL (dispatch order twitter → bsky → pixiv), honoring
-/// each site's `enabled()` gate. `None` for unsupported links.
-fn match_site(url: &str) -> Option<SiteKind> {
-    if twitter::enabled() && twitter::PATTERN.is_match(url) {
-        Some(SiteKind::Twitter)
-    } else if bsky::enabled() && bsky::PATTERN.is_match(url) {
-        Some(SiteKind::Bsky)
-    } else if pixiv::enabled() && pixiv::PATTERN.is_match(url) {
-        Some(SiteKind::Pixiv)
-    } else {
-        None
-    }
-}
-
-/// Statically-dispatched site handle: keeps per-site fetch + retry policy
-/// callable from the central dispatcher without a trait object (stage 2 of
-/// the site-registry refactor; stage 3 replaces this with `dyn Site`).
-#[derive(Clone, Copy)]
-enum SiteKind {
-    Twitter,
-    Bsky,
-    Pixiv,
-}
-
-impl SiteKind {
-    /// The matched site's own retry policy (see each site's `is_retryable`).
-    fn is_retryable(&self, err: &FetchError) -> bool {
-        match self {
-            SiteKind::Twitter => twitter::is_retryable(err),
-            SiteKind::Bsky => bsky::is_retryable(err),
-            SiteKind::Pixiv => pixiv::is_retryable(err),
-        }
-    }
-}
-
-async fn fetch_once(url: &str, site: SiteKind) -> Result<Fetched, FetchError> {
-    match site {
-        SiteKind::Twitter => twitter::fetch_from_url(url).await,
-        SiteKind::Bsky => bsky::fetch_from_url(url).await,
-        SiteKind::Pixiv => pixiv::fetch_from_url(url).await,
-    }
-}
-
 /// Applies every site's media-header rule to a download request (pixiv's
 /// `Referer` for pximg.net hotlink protection). Sites contribute via their
 /// `media_headers(url)` — the central download code carries no per-site logic.
 fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
-    for headers in [
-        twitter::media_headers(url),
-        bsky::media_headers(url),
-        pixiv::media_headers(url),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for (name, value) in headers {
-            request = request.header(name, value);
+    for site in SITES.iter() {
+        if let Some(headers) = site.media_headers(url) {
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
         }
     }
     request
@@ -523,6 +555,21 @@ mod tests {
         assert_eq!(site_id_from_key("bsky:handle.example/3lorem"), "bsky");
         assert_eq!(site_id_from_key("unknown:1"), "unknown");
         assert_eq!(site_id_from_key("no-colon"), "unknown");
+    }
+
+    #[test]
+    fn registry_lists_all_sites_in_dispatch_order() {
+        assert_eq!(site_ids(), vec!["twitter", "bsky", "pixiv"]);
+        // Enabled sites dispatch; unsupported URLs never match.
+        assert!(find_site("https://x.com/u/status/1").is_some());
+        assert!(find_site("https://bsky.app/profile/u/post/3x").is_some());
+        assert!(find_site("https://example.com/x").is_none());
+        // Cache keys are pattern-driven, independent of the enabled() gate
+        // (pixiv is disabled in tests without PIXIV_REFRESH_TOKEN).
+        assert_eq!(
+            cache_key("https://www.pixiv.net/artworks/1"),
+            Some("pixiv:1".into())
+        );
     }
 
     #[test]
