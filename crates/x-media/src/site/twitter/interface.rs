@@ -107,8 +107,9 @@ fn empty_fetched(url: &str) -> Fetched {
     }
 }
 
-/// Fetches a tweet from the syndication endpoint. Deleted/blocked/tombstoned
-/// tweets surface as `FetchError::NotFound`.
+/// Fetches a tweet from the syndication endpoint. Deleted/blocked tweets
+/// surface as `FetchError::NotFound`; withheld content (empty tombstone,
+/// age-restricted) as `FetchError::Sensitive`.
 pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     let id_num = id.parse::<u64>().map_err(|_| FetchError::NotFound)?;
     let response = crate::site::CLIENT
@@ -127,9 +128,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         };
     }
     let text = response.text().await?;
-    // Deleted/blocked tweets answer with an `errors` array or a
-    // TweetTombstone (HTTP 200, no `id_str`); NSFW withholding is an empty
-    // `{}`. Both classes are permanent — classify before parsing the tweet.
+    // Classify before parsing the tweet (see [`parse_syndication_body`]).
     parse_syndication_body(&text)?;
     Tweet::from_syndication_json(&text).map_err(FetchError::Json)
 }
@@ -137,17 +136,32 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
 /// Parses and classifies a syndication response body. `Ok` means the body is
 /// a real tweet payload; `Err` carries the permanent error class:
 /// - `NotFound`: an `errors` array (deleted/blocked) or a `TweetTombstone`
-///   (deleted by the author / suspended — HTTP 200, no `errors`, no `id_str`).
-/// - `Sensitive`: an empty `{}` (NSFW / age-restricted withholding).
+///   **with a reason** — "This Post was deleted by the Post author." /
+///   "This Post is from a suspended account." (the tweet is gone).
+/// - `Sensitive`: content withheld **without a deletion reason** — the empty
+///   `{}` shape or an *empty* `TweetTombstone` (`{"__typename":
+///   "TweetTombstone","tombstone":{}}`). Live tweets in restricted contexts
+///   surface this way; treating them as deleted is a regression (a normal
+///   tweet must not report "deleted"). Age-restricted tombstones route here
+///   too so the logged-in GraphQL fallback can fetch the real tweet.
 /// - `Json`: an unparseable body.
-///
-/// The tombstone shape must NOT fall through to `Sensitive`: the bot would
-/// otherwise answer "No media found" for a deleted tweet instead of failing.
 fn parse_syndication_body(text: &str) -> Result<serde_json::Value, FetchError> {
     let body: serde_json::Value = serde_json::from_str(text)?;
-    let tombstoned = body.get("tombstone").is_some()
-        || body.get("__typename").and_then(|t| t.as_str()) == Some("TweetTombstone");
-    if body.get("errors").is_some() || tombstoned {
+    if body.get("errors").is_some() {
+        return Err(FetchError::NotFound);
+    }
+    if let Some(tombstone) = body.get("tombstone") {
+        // Only a tombstone with an explicit reason means the tweet is gone;
+        // a missing reason (empty `tombstone: {}`) or an age-restricted
+        // reason means the tweet exists but is withheld.
+        let reason = tombstone
+            .get("text")
+            .and_then(|t| t.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if reason.is_empty() || reason.to_ascii_lowercase().contains("age-restricted") {
+            return Err(FetchError::Sensitive);
+        }
         return Err(FetchError::NotFound);
     }
     if body.get("id_str").is_none() {
@@ -656,9 +670,10 @@ mod tests {
 
     #[test]
     fn syndication_tombstone_maps_to_not_found() {
-        // Deleted tweets answer HTTP 200 with a TweetTombstone (no `errors`,
-        // no `id_str`); it must not fall through to Sensitive, which would
-        // make the bot reply "No media found" for a deleted tweet.
+        // Deleted tweets answer HTTP 200 with a TweetTombstone carrying a
+        // reason (no `errors`, no `id_str`); they must not fall through to
+        // Sensitive, which would make the bot reply "No media found" for a
+        // deleted tweet.
         let raw = serde_json::json!({
             "__typename": "TweetTombstone",
             "tombstone": {
@@ -668,6 +683,34 @@ mod tests {
         assert!(matches!(
             parse_syndication_body(&raw.to_string()),
             Err(FetchError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn syndication_empty_tombstone_maps_to_sensitive() {
+        // Regression: live tweets in restricted contexts answer with an
+        // EMPTY tombstone (`{"__typename":"TweetTombstone","tombstone":{}}`)
+        // — no deletion reason. They must not be reported as deleted.
+        let raw = serde_json::json!({ "__typename": "TweetTombstone", "tombstone": {} });
+        assert!(matches!(
+            parse_syndication_body(&raw.to_string()),
+            Err(FetchError::Sensitive)
+        ));
+    }
+
+    #[test]
+    fn syndication_age_restricted_tombstone_maps_to_sensitive() {
+        // An age-restricted tombstone withholds a live tweet; route it to
+        // the logged-in fallback instead of reporting it as gone.
+        let raw = serde_json::json!({
+            "__typename": "TweetTombstone",
+            "tombstone": {
+                "text": { "rtl": false, "text": "Age-restricted adult content" }
+            }
+        });
+        assert!(matches!(
+            parse_syndication_body(&raw.to_string()),
+            Err(FetchError::Sensitive)
         ));
     }
 
@@ -730,6 +773,19 @@ mod tests {
         let result = fetch("2085948045967986859").await;
         assert!(
             matches!(result, Err(FetchError::NotFound)),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to cdn.syndication.twimg.com"]
+    async fn live_fetch_empty_tombstone_is_sensitive() {
+        // Regression: a LIVE tweet (verified via a third-party API) answers
+        // syndication with an empty TweetTombstone; it must surface as
+        // Sensitive (withheld), never as NotFound (deleted).
+        let result = fetch("2087851366253555752").await;
+        assert!(
+            matches!(result, Err(FetchError::Sensitive)),
             "got {result:?}"
         );
     }
