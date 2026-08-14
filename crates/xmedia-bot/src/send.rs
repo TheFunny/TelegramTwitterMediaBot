@@ -1073,16 +1073,28 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                 "Telegram could not fetch animation URL, downloading and reuploading: [key={}]",
                 log_key(media_url)
             );
-            match download_to_temp(animation).await {
-                Ok((file, _bytes)) => {
-                    let path = file.path().to_path_buf();
+            // Single-item local preparation — the same pipeline the media
+            // group fallback uses (download with the upload-cap check,
+            // downscale/transcode photos, smaller-URL fallback). Animations
+            // have no smaller variant, so an oversized file surfaces as a
+            // permanent error here.
+            match prepare_upload_item(animation.clone(), 0, None).await {
+                Ok(prepared) => {
+                    let PreparedItem {
+                        media, keep_alive, ..
+                    } = prepared;
+                    let InputMedia::Animation(animation) = media else {
+                        unreachable!("an Animation payload prepares to InputMedia::Animation")
+                    };
+                    // Hold the temp file until the request completes.
+                    let _keep_alive = keep_alive;
                     match send_animation_inner(
                         bot,
                         chat_id,
                         reply_to,
                         caption,
                         has_spoiler,
-                        InputFile::file(path),
+                        animation.media,
                     )
                     .await
                     {
@@ -1094,40 +1106,6 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                         Err(e) => Err(classify_to_send_error(&e, task.clone())),
                     }
                 }
-                // Over the upload cap: fall back to the smaller URL.
-                Err(FallbackError::MediaTooLarge) => match animation.fallback_url() {
-                    Some(url) => match input_file_for(url) {
-                        Ok(file) => {
-                            match send_animation_inner(
-                                bot,
-                                chat_id,
-                                reply_to,
-                                caption,
-                                has_spoiler,
-                                file,
-                            )
-                            .await
-                            {
-                                Ok(message) => {
-                                    let id = message.id.0 as i64;
-                                    cache_animation_send(task, &message).await;
-                                    Ok(vec![id])
-                                }
-                                Err(e) => Err(classify_to_send_error(&e, task.clone())),
-                            }
-                        }
-                        Err(message) => Err(SendError::Permanent {
-                            message,
-                            task: task.clone(),
-                        }),
-                    },
-                    None => Err(SendError::Permanent {
-                        message: "media too large".into(),
-                        task: task.clone(),
-                    }),
-                },
-                // Everything else (download failure) attaches the task via
-                // the single task-free → SendError conversion.
                 Err(e) => Err(SendError::from_fallback(e, task.clone())),
             }
         }
