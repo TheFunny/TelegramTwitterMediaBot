@@ -158,16 +158,22 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
 
 - 实测（rustc 1.95.0，edition 2024）：trait 里写 `async fn` 报
   "method is `async`"（非 dyn 兼容）；写反糖 `-> impl Future<...> + Send + '_`
-  报 "references an `impl Trait` type in its return type"（同样非 dyn 兼容）。
-  即：**RPITIT/AFIT 目前无法用于 `Vec<Box<dyn Site>>` 注册表**，与早期设计的
-  判断相反。
+  报 "references an `impl Trait` type in its return type"（同样非 dyn 兼容）；
+  纯 RPITIT（无 `+ Send`）也一样。即：**RPITIT/AFIT 目前无法用于
+  `Vec<Box<dyn Site>>` 注册表**，与早期设计的判断相反。
+- **为什么**：dyn 分派要求调用方在编译期知道返回值大小以分配空间，而
+  `async fn`/RPITIT 返回不透明的 Future——这是"非定长返回值走 dyn"的普遍问题，
+  与 async 无关。Rust 1.75 稳定的 AFIT 只覆盖**静态分派**，dyn 路径被排除；
+  原生 dyn 支持（AFIDT）是 2026-2027 的已接受项目目标，尚未进入 stable。
+  参见 <https://rust-lang.github.io/rust-project-goals/2026/afidt-box.html>。
 - **采用 (a) 手写 `Pin<Box<dyn Future + Send + '_>>`**（`SiteFuture` 别名）：
   零新依赖、dyn 兼容、future 保证 Send。签名噪音靠别名缓解；生命周期坑因
   站点是无状态单元结构体 + `'a` 同时约束 `&self` 与 `url` 而完全可控
   （future 只借用调用域内的 url）。
 - **(b) `async-trait`** 仍是可行备选（语法更干净、同样 box），但新增依赖；
   本仓库采用 (a) 后无需引入。
-- 若未来 Rust 稳定版放开 RPITIT 的 dyn 兼容，可再评估换回原生 `async fn`。
+- 若未来 Rust 稳定版落地 AFIDT（调用点 `dyn_box!`），可平滑迁移回原生
+  `async fn`，实现体几乎不动。
 
 **风险**：中。动中央分派，但每站点行为不变；注册表迭代 + `find_site` 补单测
 （`fetch`/`cache_key` 对既有 URL 集合的结果与阶段 2 完全一致）。
