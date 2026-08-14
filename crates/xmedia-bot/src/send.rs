@@ -399,6 +399,23 @@ fn classify_to_send_error(e: &RequestError, task: Task) -> SendError {
     }
 }
 
+impl SendError {
+    /// Attaches the (updated) task to a task-free [`FallbackError`] from the
+    /// download/upload pipeline. [`FallbackError::MediaTooLarge`] never
+    /// escapes the pipeline (it is handled by falling back to the smaller
+    /// URL), so it is unreachable here.
+    fn from_fallback(f: FallbackError, task: Task) -> SendError {
+        match f {
+            FallbackError::Retryable { delay_seconds } => SendError::Retryable {
+                delay_seconds,
+                task,
+            },
+            FallbackError::Permanent { message } => SendError::Permanent { message, task },
+            FallbackError::MediaTooLarge => unreachable!("handled inside the upload fallback"),
+        }
+    }
+}
+
 fn parse_media_url(s: &str) -> Result<url::Url, String> {
     url::Url::parse(s).map_err(|e| format!("invalid media URL: {e}"))
 }
@@ -795,7 +812,8 @@ async fn send_batch_via_upload(
     reply_to: i64,
     batch: &[MediaItemPayload],
     caption: Option<&str>,
-) -> Result<Vec<Message>, FallbackError> {
+    task: Task,
+) -> Result<Vec<Message>, SendError> {
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
     let mut set = tokio::task::JoinSet::new();
     for (i, item) in batch.iter().enumerate() {
@@ -818,10 +836,11 @@ async fn send_batch_via_upload(
             Ok(Ok(item)) => item,
             // Dropping the JoinSet aborts the remaining prep tasks; their
             // temp files are cleaned up on drop (short-circuit like before).
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => return Err(SendError::from_fallback(e, task.clone())),
             Err(e) => {
-                return Err(FallbackError::Permanent {
+                return Err(SendError::Permanent {
                     message: format!("upload worker panicked: {e}"),
+                    task,
                 });
             }
         };
@@ -850,12 +869,14 @@ async fn send_batch_via_upload(
     match result {
         Ok(messages) => Ok(messages),
         Err(e) => Err(match classify_request_error(&e) {
-            Classification::Retryable { delay_seconds } => {
-                FallbackError::Retryable { delay_seconds }
-            }
-            Classification::Permanent { message } => FallbackError::Permanent { message },
-            Classification::MediaFetchFailure => FallbackError::Permanent {
+            Classification::Retryable { delay_seconds } => SendError::Retryable {
+                delay_seconds,
+                task: task.clone(),
+            },
+            Classification::Permanent { message } => SendError::Permanent { message, task },
+            Classification::MediaFetchFailure => SendError::Permanent {
                 message: "upload failed".into(),
+                task,
             },
         }),
     }
@@ -958,24 +979,21 @@ pub async fn send_media_sequence(bot: &Bot, task: &Task) -> Result<Vec<i64>, Sen
                         .map(log_key)
                         .unwrap_or_else(|| "?".into())
                 );
-                match send_batch_via_upload(bot, chat_id, reply_to, batch, caption).await {
+                match send_batch_via_upload(
+                    bot,
+                    chat_id,
+                    reply_to,
+                    batch,
+                    caption,
+                    updated_sequence_task(task, idx, sent.clone()),
+                )
+                .await
+                {
                     Ok(messages) => {
                         collect_file_ids(&messages, batch, &mut cached_media);
                         sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
                     }
-                    Err(FallbackError::Retryable { delay_seconds }) => {
-                        return Err(SendError::Retryable {
-                            delay_seconds,
-                            task: updated_sequence_task(task, idx, sent),
-                        });
-                    }
-                    Err(FallbackError::Permanent { message }) => {
-                        return Err(SendError::Permanent {
-                            message,
-                            task: updated_sequence_task(task, idx, sent),
-                        });
-                    }
-                    Err(FallbackError::MediaTooLarge) => unreachable!("handled inside upload"),
+                    Err(e) => return Err(e),
                 }
             }
             Err(e) => {
@@ -1108,14 +1126,9 @@ pub async fn send_animation(bot: &Bot, task: &Task) -> Result<Vec<i64>, SendErro
                         task: task.clone(),
                     }),
                 },
-                Err(FallbackError::Retryable { delay_seconds }) => Err(SendError::Retryable {
-                    delay_seconds,
-                    task: task.clone(),
-                }),
-                Err(FallbackError::Permanent { message }) => Err(SendError::Permanent {
-                    message,
-                    task: task.clone(),
-                }),
+                // Everything else (download failure) attaches the task via
+                // the single task-free → SendError conversion.
+                Err(e) => Err(SendError::from_fallback(e, task.clone())),
             }
         }
         Err(e) => Err(classify_to_send_error(&e, task.clone())),
