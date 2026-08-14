@@ -125,11 +125,13 @@ pub trait Site: Send + Sync {
     fn pattern(&self) -> &'static Regex;
     fn enabled(&self) -> bool;
     fn cache_key(&self, url: &str) -> Option<String>;   // 默认: id + 捕获组1
-    fn fetch_from_url(&self, url: &str)
-        -> Pin<Box<dyn Future<Output = Result<Fetched, FetchError>> + Send>>;
+    // 原生 AFIT（async fn in trait，Rust 1.75+）。dyn 调用需 Send future：
+    // 见下方 "async 形态" 选项 (c)，必要时反糖为
+    // `fn fetch_from_url(&self, url: &str) -> impl Future<Output = ...> + Send + '_`
+    async fn fetch_from_url(&self, url: &str) -> Result<Fetched, FetchError>;
     fn is_retryable(&self, err: &FetchError) -> bool;   // 默认: Http|Transient
     fn media_headers(&self, url: &str) -> Option<Vec<(&'static str, String)>>; // 默认: None
-    fn validate(&self) -> Option<BoxFuture<'static, Result<(), String>>>;      // 默认: None
+    async fn validate(&self) -> Result<(), String>;     // 默认: Ok(())
 }
 
 static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
@@ -146,11 +148,26 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
 - 保留各站点的 `PATTERN`/`enabled()`/`fetch_from_url()` 顶层导出（兼容现有
   `fetch_once` 及测试），trait 只是包一层薄壳。
 
-**async 形态**：仓库没有 `async-trait` 依赖。两个选择：
-(a) 手写 `Pin<Box<dyn Future>>` 返回类型（零新依赖，契合仓库手写风格，签名略丑）；
-(b) 引入 `async-trait`（可读性好，新增一个依赖）。
-建议先 (a)，理由：仓库显式偏好手写错误/状态机，且 `BoxFuture` 已有先例
-（`queue.rs:38` 的 `BoxFuture`）。
+**async 形态**：三个选择，**优先 (c)**。
+
+- **(c) 原生 AFIT（async fn in trait，首选）**：Rust 1.75 起稳定且支持 dyn 分派，
+  仓库是 recent stable + edition 2024、无 MSRV pin，完全可用。零新依赖，trait/impl
+  都是原生 `async fn` 语法。两点注意：
+  - **静态分派调用点不产生 box**（`SITES` 之外若还有直接调 `TwitterSite::fetch_from_url`
+    的路径，零分配）；dyn 调用时编译器按需 box，这是 dyn 分派的固有成本。
+  - **dyn 上要 Send future 必须反糖**：直接 `async fn` 在 `dyn Site` 上不保证
+    future 是 Send（URL/队列工人 `tokio::spawn` 需要），要写成
+    `fn fetch_from_url(&self, url: &str) -> impl Future<Output = Result<Fetched, FetchError>> + Send + '_`。
+    反糖后方法仍可 `site.fetch_from_url(url).await` 调用，语义不变。
+- **(b) `async-trait`**：语法与 (c) 相同，但新增一个依赖（唯一新包；
+  proc-macro2/quote/syn 树里已有），且**无论静态还是 dyn 调用都 box**（生成
+  `BoxFuture`）。适用场景是 MSRV < 1.75 或需要 `?Send` 的 trait，本仓库都不占。
+- **(a) 手写 `Pin<Box<dyn Future>>`**：零新依赖、静态分派也 box；签名噪音大，
+  且"借 `&self`/参数却写成 `'static`"这类生命周期错误要自己防（async-trait/AFIT
+  自动处理）。
+
+结论：先按 (c) 设计，trait 里直接写 `async fn`；若将来工具链约束出现（MSRV 下调）
+再降级到 (b)，实现方签名几乎不用改（async fn ↔ `#[async_trait] async fn`）。
 
 **风险**：中。动中央分派，但每站点行为不变；注册表迭代 + `find_site` 补单测
 （`fetch`/`cache_key` 对既有 URL 集合的结果与阶段 2 完全一致）。
@@ -198,8 +215,10 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| vec![
   模式是仓库惯例，与站点扩展无关）。
 - **不做**：schema 迁移——新站点只产生新的 cache key 前缀与 `message_format` JSON
   key，`link_cache`/`chat_state` 表结构均无需变化。
-- **代价**：阶段 3 引入 `dyn Site` 与（选择 (a) 时）手写 `BoxFuture` 签名；若站点
-  数量长期 ≤5 且无新增迹象，阶段 2 的折中方案已够用，阶段 3/4 可无限期推迟。
+- **代价**：阶段 3 引入 `dyn Site` 与 trait 方法（async 形态选 (c) 原生 AFIT，零新依赖、
+  静态分派零 box，见 §3）；`Send` 约束前移到 trait 边界，站点 impl 的 future 必须
+  Send（现仅在各 `tokio::spawn` 点检查，重构后在 impl 处即报错，提前暴露问题）。
+  若站点数量长期 ≤5 且无新增迹象，阶段 2 的折中方案已够用，阶段 3/4 可无限期推迟。
 
 ## 6. 建议的提交序列
 
