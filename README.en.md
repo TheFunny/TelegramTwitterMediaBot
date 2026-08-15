@@ -113,6 +113,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{tags}` |
 | `/clear_cache [link]` | Clear the link cache (admin only); with a link only that entry, otherwise everything |
 | `/bot_dict` | Show the current chat state (debugging) |
+| `/test <link>` | Debug: parse a link and report the parse result only (site, title, author, tags, media list) — no media is sent |
 
 Link processing works only in private chats; commands work in any chat.
 

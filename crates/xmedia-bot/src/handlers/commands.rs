@@ -1,11 +1,11 @@
 //! Bot command parsing, the `/`-command executor and `setMyCommands`
 //! registration. URL/inline/callback flows live in their own modules.
 
-use super::{CHAT_STORE, CONFIG, LINK_CACHE, reply};
+use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply};
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, Message, Recipient};
-use teloxide::utils::command::BotCommands;
+use teloxide::utils::command::{BotCommands, ParseError};
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -40,6 +40,19 @@ pub(crate) enum Command {
         parse_with = "split"
     )]
     ClearCache(String),
+    #[command(
+        description = "Test link parsing (debug; no media sent)",
+        parse_with = parse_test_arg
+    )]
+    Test(String),
+}
+
+/// `/test` argument parser: the whole remainder after the command name,
+/// trimmed. The built-in `split` parser takes exactly one space-separated
+/// token and rejects the rest, so a URL followed by a trailing space (or
+/// pasted text) would silently fall through to the URL flow instead.
+fn parse_test_arg(s: String) -> Result<(String,), ParseError> {
+    Ok((s.trim().to_string(),))
 }
 
 enum SetForwardChannelError {
@@ -302,6 +315,56 @@ pub(crate) async fn execute_command(
                 .await?;
             }
         }
+        Command::Test(arg) => {
+            let url = arg.trim();
+            if url.is_empty() {
+                reply(
+                    bot,
+                    message.chat.id.0,
+                    message.id,
+                    "Usage: /test <post url>",
+                )
+                .await?;
+                return Ok(());
+            }
+            // Debug tool: report the parse result only — nothing is sent,
+            // cached or forwarded. Info level echoes the normalized key
+            // (never the raw URL) per the logging convention.
+            log::info!("test: parsing [key={}]", log_key(url));
+            match x_media::site::fetch(url).await {
+                Ok(None) => {
+                    reply(
+                        bot,
+                        message.chat.id.0,
+                        message.id,
+                        "No enabled site matches this link (twitter/x, pixiv or bsky).",
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    reply(
+                        bot,
+                        message.chat.id.0,
+                        message.id,
+                        format!("Fetch failed: {e}"),
+                    )
+                    .await?;
+                }
+                Ok(Some(fetched)) => {
+                    let report = test_parse_report(
+                        url,
+                        fetched.site_name(),
+                        &fetched.source_url,
+                        &fetched.title,
+                        fetched.render_fields(),
+                        fetched.sensitive,
+                        &fetched.caption,
+                        &fetched.media,
+                    );
+                    reply(bot, message.chat.id.0, message.id, report).await?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -318,4 +381,138 @@ pub async fn register_commands(bot: &Bot) -> Result<(), RequestError> {
     bot.set_my_commands(commands.clone()).await?;
     log::info!("registered {} commands", commands.len());
     Ok(())
+}
+
+/// Telegram's plain-text message limit is 4096 chars; the report stays under
+/// it even for very large threads (many media lines + a long caption).
+const MAX_TEST_REPORT_CHARS: usize = 4000;
+
+/// Builds the plain-text report for the `/test` command: what the parser
+/// produced for a link (site, canonical URL, title/author/tags, caption and
+/// the media list) — no media is sent and nothing is cached or forwarded.
+/// Fields are passed individually so the formatter stays a pure function
+/// testable without constructing a `Fetched` (its render fields are
+/// `pub(crate)` to the x-media crate).
+#[allow(clippy::too_many_arguments)]
+fn test_parse_report(
+    url: &str,
+    site_id: &str,
+    source_url: &str,
+    title: &str,
+    render: Option<(&str, &str, &str, &str)>,
+    sensitive: bool,
+    caption: &str,
+    media: &[x_media::media::Media],
+) -> String {
+    let mut lines = vec![
+        format!("Parse result for {url}"),
+        format!("site: {site_id}"),
+        format!(
+            "key: {}",
+            x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
+        ),
+    ];
+    lines.push(format!("source_url: {source_url}"));
+    lines.push(format!("title: {title}"));
+    if let Some((author, author_url, _title, tags)) = render {
+        lines.push(format!("author: {author}"));
+        lines.push(format!("author_url: {author_url}"));
+        lines.push(format!("tags: {tags}"));
+    }
+    lines.push(format!("sensitive: {sensitive}"));
+    lines.push(format!(
+        "caption: {}",
+        x_media::site::truncate_caption(caption)
+    ));
+    lines.push(format!("media ({}):", media.len()));
+    for (i, item) in media.iter().enumerate() {
+        let kind = match item {
+            x_media::media::Media::Illustration { .. } => "image",
+            x_media::media::Media::Video { .. } => "video",
+            x_media::media::Media::Animated { .. } => "gif",
+        };
+        lines.push(format!("  {}. {kind}: {}", i + 1, item.url()));
+    }
+    let mut out = lines.join(
+        "
+",
+    );
+    if out.chars().count() > MAX_TEST_REPORT_CHARS {
+        let end = out.floor_char_boundary(MAX_TEST_REPORT_CHARS - 1);
+        out = format!("{}…", &out[..end]);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_TEST_REPORT_CHARS, test_parse_report};
+    use x_media::media::Media;
+
+    #[test]
+    fn test_parse_report_renders_fields_and_media() {
+        let media = vec![
+            Media::Illustration {
+                title: None,
+                url: "https://cdn.example/1.jpg".into(),
+                thumbnail_url: None,
+                fallback_url: None,
+            },
+            Media::Video {
+                title: None,
+                url: "https://cdn.example/2.mp4".into(),
+                thumbnail_url: "https://cdn.example/2.jpg".into(),
+            },
+        ];
+        let report = test_parse_report(
+            "https://x.com/u/status/1",
+            "twitter",
+            "https://x.com/u/status/1",
+            "My title",
+            Some(("Author", "https://x.com/u", "My title", "tag1 tag2")),
+            false,
+            "<a href=\"https://x.com/u\">Author</a> · My title",
+            &media,
+        );
+        assert!(report.contains("site: twitter"), "{report}");
+        assert!(report.contains("key: twitter:1"), "{report}");
+        assert!(report.contains("title: My title"), "{report}");
+        assert!(report.contains("author: Author"), "{report}");
+        assert!(report.contains("author_url: https://x.com/u"), "{report}");
+        assert!(report.contains("tags: tag1 tag2"), "{report}");
+        assert!(report.contains("sensitive: false"), "{report}");
+        assert!(report.contains("media (2):"), "{report}");
+        assert!(
+            report.contains("1. image: https://cdn.example/1.jpg"),
+            "{report}"
+        );
+        assert!(
+            report.contains("2. video: https://cdn.example/2.mp4"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn test_parse_report_without_render_data_and_no_media() {
+        let report = test_parse_report("u", "pixiv", "s", "t", None, true, "c", &[]);
+        assert!(!report.contains("author:"), "{report}");
+        assert!(report.contains("sensitive: true"), "{report}");
+        assert!(report.contains("media (0):"), "{report}");
+    }
+
+    #[test]
+    fn test_parse_report_is_capped() {
+        // 200 media lines ≈ 8 KB, comfortably over the cap.
+        let media: Vec<Media> = (0..200)
+            .map(|i| Media::Illustration {
+                title: None,
+                url: format!("https://cdn.example/{i}.jpg"),
+                thumbnail_url: None,
+                fallback_url: None,
+            })
+            .collect();
+        let report = test_parse_report("u", "twitter", "s", "t", None, false, "c", &media);
+        assert!(report.chars().count() <= MAX_TEST_REPORT_CHARS, "{report}");
+        assert!(report.ends_with('…'), "{report}");
+    }
 }
