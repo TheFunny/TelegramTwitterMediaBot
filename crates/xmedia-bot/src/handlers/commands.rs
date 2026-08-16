@@ -1,7 +1,7 @@
 //! Bot command parsing, the `/`-command executor and `setMyCommands`
 //! registration. URL/inline/callback flows live in their own modules.
 
-use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply};
+use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply, reply_html};
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, Message, Recipient};
@@ -361,7 +361,9 @@ pub(crate) async fn execute_command(
                         &fetched.caption,
                         &fetched.media,
                     );
-                    reply(bot, message.chat.id.0, message.id, report).await?;
+                    // HTML report: the caption renders inside a <blockquote>
+                    // exactly as it will appear in the sent media message.
+                    reply_html(bot, message.chat.id.0, message.id, report).await?;
                 }
             }
         }
@@ -387,12 +389,15 @@ pub async fn register_commands(bot: &Bot) -> Result<(), RequestError> {
 /// it even for very large threads (many media lines + a long caption).
 const MAX_TEST_REPORT_CHARS: usize = 4000;
 
-/// Builds the plain-text report for the `/test` command: what the parser
-/// produced for a link (site, canonical URL, title/author/tags, caption and
-/// the media list) — no media is sent and nothing is cached or forwarded.
-/// Fields are passed individually so the formatter stays a pure function
-/// testable without constructing a `Fetched` (its render fields are
-/// `pub(crate)` to the x-media crate).
+/// Builds the HTML report for the `/test` command: what the parser produced
+/// for a link (site, canonical URL, title/author/tags, caption and the media
+/// list) — no media is sent and nothing is cached or forwarded. Sent with
+/// HTML parse mode: raw fields are escaped, the pre-escaped render fields are
+/// embedded as-is, and the caption is wrapped in a `<blockquote>` so it shows
+/// exactly as it will render in the sent media message. Fields are passed
+/// individually so the formatter stays a pure function testable without
+/// constructing a `Fetched` (its render fields are `pub(crate)` to the
+/// x-media crate).
 #[allow(clippy::too_many_arguments)]
 fn test_parse_report(
     url: &str,
@@ -405,32 +410,38 @@ fn test_parse_report(
     media: &[x_media::media::Media],
 ) -> String {
     let mut lines = vec![
-        format!("Parse result for {url}"),
+        format!("Parse result for {}", html_escape::encode_text(url)),
         format!("site: {site_id}"),
         format!(
             "key: {}",
-            x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
+            html_escape::encode_text(
+                &x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
+            )
         ),
     ];
-    lines.push(format!("source_url: {source_url}"));
-    lines.push(format!("title: {title}"));
+    lines.push(format!(
+        "source_url: {}",
+        html_escape::encode_text(source_url)
+    ));
+    lines.push(format!("title: {}", html_escape::encode_text(title)));
     if let Some((author, author_url, _title, tags)) = render {
-        // The render fields are pre-escaped for HTML captions; decode them
-        // so the plain-text report shows the text as it will be rendered
-        // (no visible &amp; / &lt; / &gt;).
+        // The render fields are already pre-escaped for HTML captions; embed
+        // them as-is so the report renders them exactly like the final
+        // caption. `author_url` is raw and gets escaped here.
+        lines.push(format!("author: {author}"));
         lines.push(format!(
-            "author: {}",
-            html_escape::decode_html_entities(author)
+            "author_url: {}",
+            html_escape::encode_text(author_url)
         ));
-        lines.push(format!("author_url: {author_url}"));
-        lines.push(format!("tags: {}", html_escape::decode_html_entities(tags)));
+        lines.push(format!("tags: {tags}"));
     }
     lines.push(format!("sensitive: {sensitive}"));
+    // The caption is wrapped in a <blockquote> so the report (an HTML
+    // message) shows it exactly as it will render in the sent media caption
+    // — escaped text and links included.
     lines.push(format!(
-        "caption: {}",
-        x_media::site::truncate_caption(&html_escape::decode_html_entities(&strip_html_tags(
-            caption
-        )))
+        "caption: <blockquote>{}</blockquote>",
+        x_media::site::truncate_caption(caption)
     ));
     lines.push(format!("media ({}):", media.len()));
     for (i, item) in media.iter().enumerate() {
@@ -439,7 +450,11 @@ fn test_parse_report(
             x_media::media::Media::Video { .. } => "video",
             x_media::media::Media::Animated { .. } => "gif",
         };
-        lines.push(format!("  {}. {kind}: {}", i + 1, item.url()));
+        lines.push(format!(
+            "  {}. {kind}: {}",
+            i + 1,
+            html_escape::encode_text(item.url())
+        ));
     }
     let mut out = lines.join(
         "
@@ -452,31 +467,9 @@ fn test_parse_report(
     out
 }
 
-/// Drops HTML tags from a caption for the plain-text `/test` report, keeping
-/// the visible text (the links are reported separately via `source_url` /
-/// `author_url`). Runs on the *escaped* caption: entity-encoded content
-/// (`&lt;` `&amp;`) is not a tag and survives, then
-/// [`html_escape::decode_html_entities`] renders the remaining text — so a
-/// tweet text like `>^ω^<` stays intact instead of being eaten as markup.
-/// Built-in captions are the only source of tags (custom formats are fully
-/// escaped and contain none).
-fn strip_html_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for ch in s.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TEST_REPORT_CHARS, strip_html_tags, test_parse_report};
+    use super::{MAX_TEST_REPORT_CHARS, test_parse_report};
     use x_media::media::Media;
 
     #[test]
@@ -531,10 +524,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_renders_caption_as_plain_text() {
-        // The report is a plain-text message: pre-escaped caption fields and
-        // the HTML caption must be shown as rendered — tags stripped, entities
-        // decoded — never with visible `<a href>` markup or &amp; / &lt; / &gt;.
+    fn test_parse_report_wraps_caption_in_blockquote() {
+        // The report is an HTML message: raw fields are escaped, pre-escaped
+        // render fields are embedded as-is, and the caption is wrapped in a
+        // <blockquote> so it shows exactly as it will render in the sent
+        // media caption (escaped text and links included).
         let report = test_parse_report(
             "https://x.com/u/status/1",
             "twitter",
@@ -550,27 +544,22 @@ mod tests {
             "<a href=\"https://x.com/u\">A &amp; B</a>: C &lt;D&gt; &amp; E",
             &[],
         );
-        assert!(report.contains("title: A & B <C>"), "{report}");
-        assert!(report.contains("author: A & B"), "{report}");
-        assert!(report.contains("tags: #a & #b"), "{report}");
-        // Anchor markup gone, entity-encoded text preserved through the strip
-        // and then decoded.
-        assert!(report.contains("caption: A & B: C <D> & E"), "{report}");
-        for entity in ["&amp;", "&lt;", "&gt;"] {
-            assert!(!report.contains(entity), "unexpected {entity} in: {report}");
-        }
-        assert!(!report.contains("<a href"), "raw markup in: {report}");
-    }
-
-    #[test]
-    fn strip_html_tags_keeps_entity_encoded_text() {
-        // The strip runs on the escaped caption: `&lt;` is an entity, not a
-        // tag, and must survive so the subsequent decode renders it as `<`.
-        assert_eq!(
-            strip_html_tags("<a href=\"https://x.com/u\">A &amp; B</a>: &gt;^ω^&lt;"),
-            "A &amp; B: &gt;^ω^&lt;"
+        // Raw fields escaped (they render back to the original text in HTML).
+        assert!(report.contains("title: A &amp; B &lt;C&gt;"), "{report}");
+        assert!(
+            report.contains("source_url: https://x.com/u/status/1"),
+            "{report}"
         );
-        assert_eq!(strip_html_tags("plain text"), "plain text");
+        // Pre-escaped render fields embedded as-is.
+        assert!(report.contains("author: A &amp; B"), "{report}");
+        assert!(report.contains("tags: #a &amp; #b"), "{report}");
+        // Caption wrapped in a blockquote with its HTML preserved.
+        assert!(
+            report.contains(
+                "caption: <blockquote><a href=\"https://x.com/u\">A &amp; B</a>: C &lt;D&gt; &amp; E</blockquote>"
+            ),
+            "{report}"
+        );
     }
 
     #[test]
