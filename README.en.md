@@ -30,7 +30,7 @@ docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 ```
 
-Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional).
+Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `TELOXIDE_PROXY`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional).
 
 NSFW tweets: the public syndication endpoint does not return sensitive content. Setting `TWITTER_AUTH_TOKEN` (the `auth_token` cookie value of a logged-in x.com session) lets the bot fetch NSFW media in the logged-in state only when it hits a withheld tweet; without it, the bot reports no media.
 
