@@ -428,7 +428,9 @@ fn test_parse_report(
     lines.push(format!("sensitive: {sensitive}"));
     lines.push(format!(
         "caption: {}",
-        x_media::site::truncate_caption(&html_escape::decode_html_entities(caption))
+        x_media::site::truncate_caption(&html_escape::decode_html_entities(&strip_html_tags(
+            caption
+        )))
     ));
     lines.push(format!("media ({}):", media.len()));
     for (i, item) in media.iter().enumerate() {
@@ -450,9 +452,31 @@ fn test_parse_report(
     out
 }
 
+/// Drops HTML tags from a caption for the plain-text `/test` report, keeping
+/// the visible text (the links are reported separately via `source_url` /
+/// `author_url`). Runs on the *escaped* caption: entity-encoded content
+/// (`&lt;` `&amp;`) is not a tag and survives, then
+/// [`html_escape::decode_html_entities`] renders the remaining text — so a
+/// tweet text like `>^ω^<` stays intact instead of being eaten as markup.
+/// Built-in captions are the only source of tags (custom formats are fully
+/// escaped and contain none).
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TEST_REPORT_CHARS, test_parse_report};
+    use super::{MAX_TEST_REPORT_CHARS, strip_html_tags, test_parse_report};
     use x_media::media::Media;
 
     #[test]
@@ -507,10 +531,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_report_decodes_html_entities_for_display() {
+    fn test_parse_report_renders_caption_as_plain_text() {
         // The report is a plain-text message: pre-escaped caption fields and
-        // the HTML caption must be shown decoded (as rendered), never with
-        // visible &amp; / &lt; / &gt;.
+        // the HTML caption must be shown as rendered — tags stripped, entities
+        // decoded — never with visible `<a href>` markup or &amp; / &lt; / &gt;.
         let report = test_parse_report(
             "https://x.com/u/status/1",
             "twitter",
@@ -529,13 +553,24 @@ mod tests {
         assert!(report.contains("title: A & B <C>"), "{report}");
         assert!(report.contains("author: A & B"), "{report}");
         assert!(report.contains("tags: #a & #b"), "{report}");
-        assert!(
-            report.contains("caption: <a href=\"https://x.com/u\">A & B</a>: C <D> & E"),
-            "{report}"
-        );
+        // Anchor markup gone, entity-encoded text preserved through the strip
+        // and then decoded.
+        assert!(report.contains("caption: A & B: C <D> & E"), "{report}");
         for entity in ["&amp;", "&lt;", "&gt;"] {
             assert!(!report.contains(entity), "unexpected {entity} in: {report}");
         }
+        assert!(!report.contains("<a href"), "raw markup in: {report}");
+    }
+
+    #[test]
+    fn strip_html_tags_keeps_entity_encoded_text() {
+        // The strip runs on the escaped caption: `&lt;` is an entity, not a
+        // tag, and must survive so the subsequent decode renders it as `<`.
+        assert_eq!(
+            strip_html_tags("<a href=\"https://x.com/u\">A &amp; B</a>: &gt;^ω^&lt;"),
+            "A &amp; B: &gt;^ω^&lt;"
+        );
+        assert_eq!(strip_html_tags("plain text"), "plain text");
     }
 
     #[test]
