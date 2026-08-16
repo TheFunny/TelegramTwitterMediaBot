@@ -84,6 +84,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
+| `DATA_DIR` | 数据目录（SQLite 数据库 `task_queue.db` 所在目录），默认 `data`（相对工作目录，会自动创建） |
 | `RUST_LOG` | 日志级别 |
 | `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需 |
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |

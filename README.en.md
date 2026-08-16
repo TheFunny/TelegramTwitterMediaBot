@@ -84,6 +84,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `BOT_ADMIN` | Admin chat IDs, comma-separated; receives start/stop notifications |
 | `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400 |
 | `LINK_CACHE_TTL_SECONDS` | Link-result cache expiry in seconds, default 604800 (7 days) |
+| `DATA_DIR` | Data directory (where the SQLite `task_queue.db` lives), default `data` (relative to the working directory, created automatically) |
 | `RUST_LOG` | Log level |
 | `TELOXIDE_PROXY` | HTTP proxy (e.g. `http://127.0.0.1:10808`); applies to both the Telegram Bot API and site fetches — required on restricted networks (e.g. behind the GFW) |
 | `LOCAL_USER_ID` | UID the container runs as, default 9001 |

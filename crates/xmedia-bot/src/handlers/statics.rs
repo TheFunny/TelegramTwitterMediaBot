@@ -12,8 +12,24 @@ use std::sync::{Arc, LazyLock};
 /// cache): a single pool bounds concurrent DB work on `data/task_queue.db`
 /// instead of three independent pools competing for the same file. The schema
 /// for all three tables is initialized once, here.
-static DB: LazyLock<Arc<db::DbPool>> =
-    LazyLock::new(|| db::open_store("data/task_queue.db").expect("failed to open database"));
+static DB: LazyLock<Arc<db::DbPool>> = LazyLock::new(|| {
+    let path = db_path();
+    db::open_store(&path.to_string_lossy()).expect("failed to open database")
+});
+
+/// DB file location: `$DATA_DIR/task_queue.db` (default `data`, relative to
+/// the working directory — keeps the docker-compose `./data` mount and local
+/// runs unchanged). The directory is created if missing: SQLite does not
+/// create parent dirs, so the old hardcoded `data/task_queue.db` failed with
+/// a confusing error when started from a directory without `data/`, and a
+/// CWD-relative path is a footgun for systemd / cron deployments — `DATA_DIR`
+/// lets them pin the state anywhere.
+fn db_path() -> std::path::PathBuf {
+    let dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    let dir_path = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir_path).expect("failed to create data directory");
+    dir_path.join("task_queue.db")
+}
 
 pub static CHAT_STORE: LazyLock<ChatStore> = LazyLock::new(|| ChatStore::new(Arc::clone(&DB)));
 pub static TASK_QUEUE: LazyLock<PersistentTaskQueue> =
