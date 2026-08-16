@@ -4,8 +4,9 @@ name: CI
 # job that exercises the real source sites and the token-gated pixiv tests.
 #
 # Layering:
-#   test  — fmt + clippy + the full offline unit suite. Runs on every push
-#           and PR, including forks (it needs no secrets).
+#   test  — fmt + clippy + the full offline unit suite + cargo-audit
+#           dependency gate. Runs on every push and PR, including forks
+#           (it needs no secrets).
 #   live  — the #[ignore]d live-network tests plus the pixiv tests that are
 #           gated on PIXIV_REFRESH_TOKEN. Runs on schedule / manual dispatch
 #           / tag pushes only, because pull requests from forks cannot read
@@ -42,6 +43,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run offline tests
         run: cargo test --workspace
+      # Dependency vulnerability gate: fails the build when a crate in
+      # Cargo.lock has an unfixed security advisory. Unmaintained/unsound
+      # *warnings* (dotenv, proc-macro-error2, anyhow transitive) do not fail
+      # the build by default; the advisory DB is cached across runs.
+      - name: Audit dependencies
+        uses: actions-rust-lang/audit@v1
 
   live:
     needs: test
