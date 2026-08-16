@@ -307,6 +307,11 @@ impl QueueWorker {
         }
     }
 
+    /// Processes one leased row, keeping the lease alive while the handler
+    /// runs. Without the heartbeat a task longer than [`LOCK_TTL_SECONDS`]
+    /// (slow download, ugoira encode, rate-limited batch forward) would have
+    /// its lease expire mid-run; the expiry sweep would flip the row back to
+    /// `pending` and another worker would process it again — duplicate sends.
     async fn process(&self, row: LeasedRow) {
         let payload: Value = match serde_json::from_str(&row.payload) {
             Ok(value) => value,
@@ -318,7 +323,8 @@ impl QueueWorker {
             }
         };
         log::debug!("processing {} (attempt {})", row.id, row.attempts + 1);
-        match (self.handler)(payload).await {
+        let outcome = self.run_with_lease(&row.id, payload).await;
+        match outcome {
             Ok(()) => {
                 log::debug!("task {} completed", row.id);
                 self.delete_row(&row.id).await;
@@ -347,6 +353,42 @@ impl QueueWorker {
                 log::error!("dead-lettering {}: {message}", row.id);
                 self.delete_row(&row.id).await;
                 (self.dead_letter)(payload, message).await;
+            }
+        }
+    }
+
+    /// Drives the handler to completion, refreshing the row's `locked_until`
+    /// every 30 s so the expiry sweep never re-leases a still-running task.
+    /// The heartbeat is part of this future, not a separate spawned task: if
+    /// the worker task dies (panic) the heartbeat dies with it and the sweep
+    /// recovers the row exactly as before.
+    async fn run_with_lease(&self, id: &str, payload: Value) -> Result<(), QueueError> {
+        let fut = (self.handler)(payload);
+        tokio::pin!(fut);
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        // The first interval tick fires immediately; skip it (the lease was
+        // just set by lease_next).
+        interval.tick().await;
+        let id_owned = id.to_string();
+        loop {
+            tokio::select! {
+                result = &mut fut => return result,
+                _ = interval.tick() => {
+                    let now = now_f64();
+                    let id = id_owned.clone();
+                    let result = self
+                        .pool
+                        .with_conn(move |conn| {
+                            conn.execute(
+                                "UPDATE tasks SET locked_until=?1 WHERE id=?2 AND status='in_progress'",
+                                params![now + LOCK_TTL_SECONDS, id],
+                            )
+                        })
+                        .await;
+                    if let Err(e) = result {
+                        log::error!("queue lease heartbeat failed: {e}");
+                    }
+                }
             }
         }
     }
