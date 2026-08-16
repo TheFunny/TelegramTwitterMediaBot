@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, and Bluesky into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README and user-facing strings are in Chinese. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
+Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, and Bluesky into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README is in Chinese; user-facing bot strings are in English. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
 
 Two-crate Cargo workspace (both v1.3.0, edition 2024, resolver 3):
 
@@ -92,7 +92,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 - Config is **environment-variable driven** (dotenv loads `.env`, gitignored; no `.env.example` exists). Key vars: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `TWITTER_AUTH_TOKEN` (optional; x.com `auth_token` cookie — enables the logged-in GraphQL fallback that fetches NSFW tweets syndication withholds), `BOT_ADMIN` (comma-separated ids), `EDIT_MESSAGE_TTL_SECONDS` (default 86400), `LINK_CACHE_TTL_SECONDS` (default 604800), `WEBHOOK`/`WEBHOOK_URL`/`WEBHOOK_LISTEN`/`WEBHOOK_PORT`/`WEBHOOK_CERT`/`WEBHOOK_SECRET_TOKEN` (webhook mode requires URL/listen/port, `.expect`ed; `WEBHOOK_CERT` is Telegram-facing self-signed validation only — TLS must be terminated by a reverse proxy), `RUST_LOG`, `TELOXIDE_PROXY`, `LOCAL_USER_ID` (entrypoint only).
 - SQLite via `rusqlite` with `bundled` feature (no system libsqlite needed). DB file `data/task_queue.db` is CWD-relative — run from the workspace root, or `/app` in Docker. Mount `./data` and `./cert` volumes.
 - `.gitattributes` enforces LF for `*.sh` (CRLF breaks shebangs in containers). `.gitignore`: `.env`, `data/`, `cert/`, `docker-compose.yml`, `/target`, `.idea/`.
-- Docs are in Chinese; user-facing bot strings too. Keep that convention when editing captions/templates/docs.
+- Docs are in Chinese (README, AGENTS.md); user-facing bot strings are in English. Keep that split when editing user-facing strings and docs.
 
 ## Testing & QA
 
