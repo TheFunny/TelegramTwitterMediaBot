@@ -1,7 +1,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, Site, SiteFuture};
-use html_escape::{encode_double_quoted_attribute, encode_text};
+use html_escape::{decode_html_entities, encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -239,9 +239,17 @@ impl Tweet {
         // strip the appended media short link, mirroring FxEmbed's linkFixer
         // (no display_text_range arithmetic — see expand_links).
         let text = expand_links(&json.text, &json.entities.urls);
+        // Twitter APIs (syndication AND GraphQL full_text) return the text
+        // pre-escaped for HTML (`&gt;` `&lt;` `&amp;` `&#39;` …): decode it so
+        // the stored text is raw. The caption's own escaping then produces
+        // the rendered form exactly once — without this, `&gt;^ω^&lt;` would
+        // be double-escaped to `&amp;gt;^ω^&amp;lt;` and the sent message
+        // would show literal `&gt;^ω^&lt;`.
+        let text = decode_html_entities(&text).into_owned();
         // `name` is the display name, `screen_name` the handle (Python's
         // vxtwitter mapping: author = display name, author_id = handle).
-        let author = json.user.name;
+        // Display names can carry the same pre-escaped entities.
+        let author = decode_html_entities(&json.user.name).into_owned();
         let author_id = json.user.screen_name;
         let mut media = vec![];
         for item in json.media_details {
@@ -407,6 +415,41 @@ mod tests {
         ] {
             assert!(!PATTERN.is_match(url), "{url}");
         }
+    }
+
+    #[test]
+    fn syndication_text_is_unescaped_before_storing() {
+        // Real API shape: the text arrives pre-escaped for HTML — e.g. the
+        // tweet `>^ω^<` comes back as `&gt;^ω^&lt;` (fxtwitter's raw_text for
+        // 2060196388252827954) and apostrophes as `&#39;`. Storing it raw and
+        // escaping once at caption build avoids the double-escape that would
+        // show literal `&gt;`/`&lt;`/`&amp;` in the sent message.
+        let raw = serde_json::json!({
+            "__typename": "Tweet",
+            "id_str": "1",
+            "text": "&gt;^ω^&lt; &amp; more &#39;quoted&#39; https://t.co/abc123",
+            "user": { "name": "O&#39;Brien", "screen_name": "h" },
+            "entities": { "urls": [] },
+            "mediaDetails": []
+        });
+        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        // The appended media short link is stripped, then entities decoded.
+        assert_eq!(tweet.text, ">^ω^< & more 'quoted'");
+        assert_eq!(tweet.author, "O'Brien");
+        let fetched: Fetched = tweet.into();
+        assert_eq!(fetched.title, ">^ω^< & more 'quoted'");
+        // The caption escapes the raw text exactly once (encode_text covers
+        // & < >; apostrophes stay literal — they are harmless in text).
+        assert!(
+            fetched.caption.contains("&gt;^ω^&lt; &amp; more 'quoted'"),
+            "caption: {}",
+            fetched.caption
+        );
+        assert!(
+            !fetched.caption.contains("&amp;gt;"),
+            "double-escaped text: {}",
+            fetched.caption
+        );
     }
 
     #[test]

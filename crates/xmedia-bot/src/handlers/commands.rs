@@ -415,14 +415,20 @@ fn test_parse_report(
     lines.push(format!("source_url: {source_url}"));
     lines.push(format!("title: {title}"));
     if let Some((author, author_url, _title, tags)) = render {
-        lines.push(format!("author: {author}"));
+        // The render fields are pre-escaped for HTML captions; decode them
+        // so the plain-text report shows the text as it will be rendered
+        // (no visible &amp; / &lt; / &gt;).
+        lines.push(format!(
+            "author: {}",
+            html_escape::decode_html_entities(author)
+        ));
         lines.push(format!("author_url: {author_url}"));
-        lines.push(format!("tags: {tags}"));
+        lines.push(format!("tags: {}", html_escape::decode_html_entities(tags)));
     }
     lines.push(format!("sensitive: {sensitive}"));
     lines.push(format!(
         "caption: {}",
-        x_media::site::truncate_caption(caption)
+        x_media::site::truncate_caption(&html_escape::decode_html_entities(caption))
     ));
     lines.push(format!("media ({}):", media.len()));
     for (i, item) in media.iter().enumerate() {
@@ -498,6 +504,38 @@ mod tests {
         assert!(!report.contains("author:"), "{report}");
         assert!(report.contains("sensitive: true"), "{report}");
         assert!(report.contains("media (0):"), "{report}");
+    }
+
+    #[test]
+    fn test_parse_report_decodes_html_entities_for_display() {
+        // The report is a plain-text message: pre-escaped caption fields and
+        // the HTML caption must be shown decoded (as rendered), never with
+        // visible &amp; / &lt; / &gt;.
+        let report = test_parse_report(
+            "https://x.com/u/status/1",
+            "twitter",
+            "https://x.com/u/status/1",
+            "A & B <C>",
+            Some((
+                "A &amp; B",
+                "https://x.com/u",
+                "A &amp; B &lt;C&gt;",
+                "#a &amp; #b",
+            )),
+            false,
+            "<a href=\"https://x.com/u\">A &amp; B</a>: C &lt;D&gt; &amp; E",
+            &[],
+        );
+        assert!(report.contains("title: A & B <C>"), "{report}");
+        assert!(report.contains("author: A & B"), "{report}");
+        assert!(report.contains("tags: #a & #b"), "{report}");
+        assert!(
+            report.contains("caption: <a href=\"https://x.com/u\">A & B</a>: C <D> & E"),
+            "{report}"
+        );
+        for entity in ["&amp;", "&lt;", "&gt;"] {
+            assert!(!report.contains(entity), "unexpected {entity} in: {report}");
+        }
     }
 
     #[test]
