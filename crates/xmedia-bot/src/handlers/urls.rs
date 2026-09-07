@@ -135,7 +135,12 @@ pub fn extract_urls(message: &Message) -> Vec<String> {
 fn thumbnail_for(media: &Media) -> Option<String> {
     let url = media.url();
     if url.starts_with("http://") || url.starts_with("https://") {
-        media.thumbnail_url().map(str::to_string)
+        // An empty thumbnail string (misskey video/gif files without a
+        // thumbnailUrl) must not reach Telegram; let it generate its own.
+        media
+            .thumbnail_url()
+            .map(str::to_string)
+            .filter(|t| !t.is_empty())
     } else {
         None
     }

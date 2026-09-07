@@ -1,8 +1,8 @@
 //! Site fetching dispatcher and unified result types.
 //!
-//! Dispatch order: twitter → bsky → pixiv. Each site module exports a
-//! `PATTERN`, `enabled()` and `fetch_from_url()`; a future site plugs in by
-//! adding one guarded entry in [`fetch_once`].
+//! Dispatch order: twitter → bsky → misskey → pixiv. Each site module
+//! exports a `PATTERN`, `enabled()` and `fetch_from_url()`; a future site
+//! plugs in by adding one guarded entry in [`fetch_once`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,6 +14,7 @@ use regex::Regex;
 use thiserror::Error;
 
 pub mod bsky;
+pub mod misskey;
 pub mod pixiv;
 pub mod twitter;
 
@@ -329,6 +330,7 @@ static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| {
     vec![
         Box::new(twitter::TwitterSite),
         Box::new(bsky::BskySite),
+        Box::new(misskey::MisskeySite),
         Box::new(pixiv::PixivSite),
     ]
 });
@@ -531,10 +533,10 @@ mod tests {
 
     #[test]
     fn registry_lists_all_sites_in_dispatch_order() {
-        assert_eq!(site_ids(), vec!["twitter", "bsky", "pixiv"]);
+        assert_eq!(site_ids(), vec!["twitter", "bsky", "misskey", "pixiv"]);
         // Enabled sites dispatch; unsupported URLs never match.
         assert!(find_site("https://x.com/u/status/1").is_some());
-        assert!(find_site("https://bsky.app/profile/u/post/3x").is_some());
+        assert!(find_site("https://misskey.io/notes/abc").is_some());
         assert!(find_site("https://example.com/x").is_none());
         // Cache keys are pattern-driven, independent of the enabled() gate
         // (pixiv is disabled in tests without PIXIV_REFRESH_TOKEN).
