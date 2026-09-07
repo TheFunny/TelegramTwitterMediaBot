@@ -122,7 +122,7 @@ fn output_channels(color: png::ColorType) -> usize {
 /// white; 16-bit per channel was already stripped to 8-bit at decode.
 fn flatten_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let a = px[3] as u32;
         for v in &px[..3] {
             // Over white: C = C*a/255 + 255*(1 - a/255).
@@ -178,7 +178,9 @@ fn encode_jpeg(pix: &PixBuf, w: u32, h: u32) -> Result<Vec<u8>, String> {
         PixBuf::GrayAlpha(v) => {
             // JPEG has no alpha: composite onto white, output as gray.
             let gray: Vec<u8> = v
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|px| {
                     let (g, a) = (px[0] as u32, px[1] as u32);
                     ((g * a + 255 * (255 - a)) / 255).min(255) as u8

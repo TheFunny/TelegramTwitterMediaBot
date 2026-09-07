@@ -211,7 +211,7 @@ async fn dispatch_send(
                 "send for [key={}] failed, queued for retry in {delay_seconds:.1}s",
                 log_key(url)
             );
-            enqueue_retry(ctx.task_queue, task, delay_seconds).await;
+            enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
             let _ = reply(
                 ctx.sender,
                 chat_id,

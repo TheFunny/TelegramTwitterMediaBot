@@ -386,22 +386,26 @@ pub fn classify_request_error(e: &RequestError) -> Classification {
     }
 }
 
+/// Task boxed to keep the error size within `result_large_err` limits.
 #[derive(Debug)]
 pub enum SendError {
-    Retryable { delay_seconds: f64, task: Task },
-    Permanent { message: String, task: Task },
+    Retryable { delay_seconds: f64, task: Box<Task> },
+    Permanent { message: String, task: Box<Task> },
 }
 
 fn classify_to_send_error(e: &RequestError, task: Task) -> SendError {
     match classify_request_error(e) {
         Classification::Retryable { delay_seconds } => SendError::Retryable {
             delay_seconds,
-            task,
+            task: Box::new(task),
         },
-        Classification::Permanent { message } => SendError::Permanent { message, task },
+        Classification::Permanent { message } => SendError::Permanent {
+            message,
+            task: Box::new(task),
+        },
         Classification::MediaFetchFailure => SendError::Permanent {
             message: "media fetch failed".into(),
-            task,
+            task: Box::new(task),
         },
     }
 }
@@ -415,9 +419,12 @@ impl SendError {
         match f {
             FallbackError::Retryable { delay_seconds } => SendError::Retryable {
                 delay_seconds,
-                task,
+                task: Box::new(task),
             },
-            FallbackError::Permanent { message } => SendError::Permanent { message, task },
+            FallbackError::Permanent { message } => SendError::Permanent {
+                message,
+                task: Box::new(task),
+            },
             FallbackError::MediaTooLarge => unreachable!("handled inside the upload fallback"),
         }
     }
@@ -847,7 +854,7 @@ async fn send_batch_via_upload(
             Err(e) => {
                 return Err(SendError::Permanent {
                     message: format!("upload worker panicked: {e}"),
-                    task,
+                    task: Box::new(task),
                 });
             }
         };
@@ -875,12 +882,15 @@ async fn send_batch_via_upload(
         Err(e) => Err(match classify_request_error(&e) {
             Classification::Retryable { delay_seconds } => SendError::Retryable {
                 delay_seconds,
-                task: task.clone(),
+                task: Box::new(task.clone()),
             },
-            Classification::Permanent { message } => SendError::Permanent { message, task },
+            Classification::Permanent { message } => SendError::Permanent {
+                message,
+                task: Box::new(task),
+            },
             Classification::MediaFetchFailure => SendError::Permanent {
                 message: "upload failed".into(),
-                task,
+                task: Box::new(task),
             },
         }),
     }
@@ -957,7 +967,7 @@ pub async fn send_media_sequence(
             Err(message) => {
                 return Err(SendError::Permanent {
                     message,
-                    task: updated_sequence_task(task, idx, sent),
+                    task: Box::new(updated_sequence_task(task, idx, sent)),
                 });
             }
         };
@@ -1060,7 +1070,7 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
         Err(message) => {
             return Err(SendError::Permanent {
                 message,
-                task: task.clone(),
+                task: Box::new(task.clone()),
             });
         }
     };
