@@ -160,3 +160,9 @@ pub fn now_f64() -> f64 {
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
+
+/// Unix timestamp in whole seconds. Same clock as [`now_f64`], for fields
+/// that store integer seconds (chat-state expiry, edit prompts).
+pub fn unix_now() -> i64 {
+    now_f64() as i64
+}

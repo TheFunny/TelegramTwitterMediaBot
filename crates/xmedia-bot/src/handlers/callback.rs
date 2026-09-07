@@ -3,8 +3,8 @@
 
 use super::urls::enqueue_retry;
 use super::{CHAT_STORE, CONFIG, TASK_QUEUE};
+use crate::db::unix_now;
 use crate::send::{self, Task};
-use crate::state::unix_now;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, ChatId, MessageId, ParseMode};

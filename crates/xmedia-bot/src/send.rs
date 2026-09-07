@@ -3,12 +3,13 @@
 //! URL is blocked by hotlink protection; the bot downloads the file itself
 //! and uploads it via multipart).
 
+use crate::db::unix_now;
 use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE, log_key};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost, LinkCache};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
 use crate::queue::QueueError;
-use crate::state::{EditMessage, unix_now};
+use crate::state::EditMessage;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -392,8 +393,7 @@ pub enum SendError {
     Retryable { delay_seconds: f64, task: Box<Task> },
     Permanent { message: String, task: Box<Task> },
 }
-
-fn classify_to_send_error(e: &RequestError, task: Task) -> SendError {
+fn classify_to_send_error(e: &RequestError, task: Task, fetch_failure_label: &str) -> SendError {
     match classify_request_error(e) {
         Classification::Retryable { delay_seconds } => SendError::Retryable {
             delay_seconds,
@@ -404,7 +404,7 @@ fn classify_to_send_error(e: &RequestError, task: Task) -> SendError {
             task: Box::new(task),
         },
         Classification::MediaFetchFailure => SendError::Permanent {
-            message: "media fetch failed".into(),
+            message: fetch_failure_label.into(),
             task: Box::new(task),
         },
     }
@@ -879,54 +879,24 @@ async fn send_batch_via_upload(
     drop(keep_alive);
     match result {
         Ok(messages) => Ok(messages),
-        Err(e) => Err(match classify_request_error(&e) {
-            Classification::Retryable { delay_seconds } => SendError::Retryable {
-                delay_seconds,
-                task: Box::new(task.clone()),
-            },
-            Classification::Permanent { message } => SendError::Permanent {
-                message,
-                task: Box::new(task),
-            },
-            Classification::MediaFetchFailure => SendError::Permanent {
-                message: "upload failed".into(),
-                task: Box::new(task),
-            },
-        }),
+        Err(e) => Err(classify_to_send_error(&e, task, "upload failed")),
     }
 }
 
 fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<i64>) -> Task {
-    match task {
+    let mut updated = task.clone();
+    match &mut updated {
         Task::SendMediaSequence {
-            chat_id,
-            reply_to_message_id,
-            caption,
-            media_batches,
-            batch_index: _,
-            sent_message_ids: _,
-            source_url,
-            edit_before_forward,
-            forward_channel_id,
-            notify_chat_id,
-            notify_message_id,
-            cache_data,
-        } => Task::SendMediaSequence {
-            chat_id: *chat_id,
-            reply_to_message_id: *reply_to_message_id,
-            caption: caption.clone(),
-            media_batches: media_batches.clone(),
-            batch_index,
-            sent_message_ids,
-            source_url: source_url.clone(),
-            edit_before_forward: *edit_before_forward,
-            forward_channel_id: *forward_channel_id,
-            notify_chat_id: *notify_chat_id,
-            notify_message_id: *notify_message_id,
-            cache_data: cache_data.clone(),
-        },
+            batch_index: index,
+            sent_message_ids: ids,
+            ..
+        } => {
+            *index = batch_index;
+            *ids = sent_message_ids;
+        }
         _ => unreachable!("updated_sequence_task requires a SendMediaSequence task"),
     }
+    updated
 }
 
 /// Sends the media batches starting at `task.batch_index`, extending
@@ -1014,6 +984,7 @@ pub async fn send_media_sequence(
                 return Err(classify_to_send_error(
                     &e,
                     updated_sequence_task(task, idx, sent),
+                    "media fetch failed",
                 ));
             }
         }
@@ -1115,13 +1086,21 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
                             cache_animation_send(task, &message).await;
                             Ok(vec![id])
                         }
-                        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+                        Err(e) => Err(classify_to_send_error(
+                            &e,
+                            task.clone(),
+                            "media fetch failed",
+                        )),
                     }
                 }
                 Err(e) => Err(SendError::from_fallback(e, task.clone())),
             }
         }
-        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+        Err(e) => Err(classify_to_send_error(
+            &e,
+            task.clone(),
+            "media fetch failed",
+        )),
     }
 }
 
@@ -1158,7 +1137,11 @@ pub async fn forward_messages(sender: &dyn MediaSender, task: &Task) -> Result<(
             );
             Ok(())
         }
-        Err(e) => Err(classify_to_send_error(&e, task.clone())),
+        Err(e) => Err(classify_to_send_error(
+            &e,
+            task.clone(),
+            "media fetch failed",
+        )),
     }
 }
 

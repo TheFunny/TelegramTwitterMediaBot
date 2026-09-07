@@ -1,12 +1,13 @@
 //! Per-chat state with SQLite persistence (table `chat_state` in
 //! `data/task_queue.db`, shared with the task queue).
 
+use crate::db::unix_now;
 use parking_lot::Mutex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ChatData {
@@ -38,13 +39,6 @@ pub struct ChatStore {
     /// tasks (batch-forwards, callbacks) cannot clobber each other's writes.
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     pool: Arc<crate::db::DbPool>,
-}
-
-pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 impl ChatStore {
