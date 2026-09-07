@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, and Bluesky into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README is in Chinese; user-facing bot strings are in English. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
+Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, Bluesky, and Misskey (misskey.io) into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README is in Chinese; user-facing bot strings are in English. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
 
-Two-crate Cargo workspace (both v1.4.0, edition 2024, resolver 3):
+Two-crate Cargo workspace (both v1.5.0, edition 2024, resolver 3):
 
-- **`crates/x-media`** — library that fetches and normalizes media from the three sites. Pure, no Telegram knowledge.
+- **`crates/x-media`** — library that fetches and normalizes media from the four sites. Pure, no Telegram knowledge.
 - **`crates/xmedia-bot`** — the bot binary: teloxide dispatcher, SQLite-backed chat state, persistent task queue.
 
 ## Architecture & Data Flow
@@ -22,14 +22,14 @@ Message flow: `message_handler` extracts URLs (from `url`/`text_link` entities, 
 
 Debug command: `/test <url>` runs the same `x_media::site::fetch` and replies with `test_parse_report` (`handlers/commands.rs`) — site id, normalized cache key, source URL, title/author/tags, sensitive flag, caption and the media list — nothing is sent, cached or forwarded; the report is capped at 4000 chars and sent with HTML parse mode: raw fields are escaped, and the caption is wrapped in a `<blockquote>` so it renders exactly like the sent media caption (escaped text and links included). It uses a custom `parse_test_arg` parser (whole remainder, trimmed) because teloxide's built-in `split` parser takes exactly one space-separated token.
 
-The `x-media` library: `site::fetch(url)` dispatches through the `SITES` registry (per-site `impl Site`, in order twitter → bsky → pixiv) and returns `Ok(None)` for unmatched URLs. `Fetched { source_url, caption, title, media: Vec<Media>, sensitive, site_id, … }`; `caption_with(format)` substitutes `{url} {author} {author_url} {title} {tags}`.
+The `x-media` library: `site::fetch(url)` dispatches through the `SITES` registry (per-site `impl Site`, in order twitter → bsky → misskey → pixiv) and returns `Ok(None)` for unmatched URLs. `Fetched { source_url, caption, title, media: Vec<Media>, sensitive, site_id, … }`; `caption_with(format)` substitutes `{url} {author} {author_url} {title} {tags}`.
 
 ## Key Directories
 
 | Path | Purpose |
 |---|---|
 | `crates/x-media/src/` | Fetch library. `site/mod.rs` = dispatcher + `Fetched`/`FetchError`/`download_media`/`media_size`; `media.rs` = `Media` enum; `examples/fetch.rs` = end-to-end usage sample |
-| `crates/x-media/src/site/<twitter\|pixiv\|bsky>/` | One directory per site: `mod.rs` (re-exports), `interface.rs` (PATTERN, `enabled()`, `fetch_from_url()`, `cache_key`/`is_retryable`/`media_headers`, unit struct `<Name>Site` implementing `site::Site`, `From<SiteStruct> for Fetched`), `model.rs` (serde DTOs). Pixiv adds `api.rs` (auth + transport); twitter adds `auth.rs` (logged-in GraphQL `TweetDetail` fallback for NSFW tweets, gated on `TWITTER_AUTH_TOKEN`). Twitter's `from_syndication_json` HTML-decodes the API text — syndication and GraphQL `full_text` both arrive pre-escaped (`&gt;` `&lt;` `&amp;` `&#39;`) — so the stored text is raw and the caption escapes exactly once |
+| `crates/x-media/src/site/<twitter\|pixiv\|bsky\|misskey>/` | One directory per site: `mod.rs` (re-exports), `interface.rs` (PATTERN, `enabled()`, `fetch_from_url()`, `cache_key`/`is_retryable`/`media_headers`, unit struct `<Name>Site` implementing `site::Site`, `From<SiteStruct> for Fetched`), `model.rs` (serde DTOs). Pixiv adds `api.rs` (auth + transport); twitter adds `auth.rs` (logged-in GraphQL `TweetDetail` fallback for NSFW tweets, gated on `TWITTER_AUTH_TOKEN`). Misskey targets misskey.io only (`POST /api/notes/show`, 400+`NO_SUCH_NOTE` → NotFound). Twitter's `from_syndication_json` HTML-decodes the API text — syndication and GraphQL `full_text` both arrive pre-escaped (`&gt;` `&lt;` `&amp;` `&#39;`) — so the stored text is raw and the caption escapes exactly once |
 | `crates/xmedia-bot/src/main.rs` | Entry point: env/log init, command registration (`register_commands`), shared `send::BOT` force-init, queue worker start, site login validation (`site::validate_all`), 300 s edit-expiry sweep, dptree handler tree, webhook vs polling dispatch |
 | `crates/xmedia-bot/src/config.rs` | Manual env parsing into `Config` |
 | `crates/xmedia-bot/src/db.rs` | `DbPool`: per-store SQLite connection pool (`POOL_SIZE = 4`, WAL, busy_timeout) over `$DATA_DIR/task_queue.db` (default `data/`); `open_store` creates file + schema, `with_conn` runs all rusqlite I/O in `spawn_blocking` |
@@ -96,9 +96,9 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 
 ## Testing & QA
 
-- **~115 tests, all inline `#[cfg(test)] mod tests`** — no `tests/` integration directories. Framework: built-in Rust test + `#[tokio::test]` (dev-deps only in `x-media`: tokio macros/rt-multi-thread, dotenv).
+- **~125 tests, all inline `#[cfg(test)] mod tests`** — no `tests/` integration directories. Framework: built-in Rust test + `#[tokio::test]` (dev-deps only in `x-media`: tokio macros/rt-multi-thread, dotenv).
 - No mocking framework anywhere (no mockito/wiremock/mockall). Conventions: pure-function units (regex parsing, serde round-trips, chunking, retry math) tested synchronously; async tests use real dependencies — file-backed SQLite via `tempfile` (`queue.rs::new_queue()` helper), live network fetches.
-- Live-network tests exist in `site/twitter/interface.rs` (5), `site/bsky/interface.rs` (2), `site/pixiv/api.rs` (1); `photo.rs` adds one `#[ignore = "heavy: …"]` test. Test gating convention (enforced by `.github/workflows/ci.yml`): pure unit tests always run; live-network tests carry `#[ignore = "live network: ..."]` (run via `cargo test --workspace -- --ignored live`); token-gated pixiv tests early-return when `PIXIV_REFRESH_TOKEN` is absent **or empty** (an unset GitHub secret arrives as `""` — `is_err()` alone would run them tokenless and fail). Run the full offline suite with `cargo test --workspace`.
+- Live-network tests exist in `site/twitter/interface.rs` (5), `site/bsky/interface.rs` (2), `site/misskey/interface.rs` (1), `site/pixiv/api.rs` (1); `photo.rs` adds one `#[ignore = "heavy: …"]` test. Test gating convention (enforced by `.github/workflows/ci.yml`): pure unit tests always run; live-network tests carry `#[ignore = "live network: ..."]` (run via `cargo test --workspace -- --ignored live`); token-gated pixiv tests early-return when `PIXIV_REFRESH_TOKEN` is absent **or empty** (an unset GitHub secret arrives as `""` — `is_err()` alone would run them tokenless and fail). Run the full offline suite with `cargo test --workspace`.
 - Fixtures are inline `serde_json::json!` builder fns (`fixture()`, `thread_json()`, `illust_json()`), not files. The shared `CLIENT` sets `pool_max_idle_per_host(0)` under `#[cfg(test)]` to avoid cross-runtime `DispatchGone`.
 - **CI** — `.github/workflows/ci.yml` runs `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace` + a `actions-rust-lang/audit` dependency-vulnerability gate (offline, no secrets, on every push/PR) and a `live` job (schedule/manual/tag only, `PIXIV_REFRESH_TOKEN`/`TWITTER_AUTH_TOKEN` from secrets, `continue-on-error`) for the `#[ignore]`d live + token tests. `.github/workflows/docker.yml` builds/pushes the image only.
 - Untested and hard to test without a mock seam: `handlers.rs` (depends directly on teloxide `Bot`); `main.rs`, `config.rs`, `state.rs`; `media.rs`, `lib.rs`, all `model.rs`.

@@ -1,6 +1,6 @@
 # TelegramXMediaBot
 
-Telegram 机器人，将 X / Twitter、Pixiv、Bluesky 的帖子链接转换为媒体消息发送，附带帖子标题、作者与标签。
+Telegram 机器人，将 X / Twitter、Pixiv、Bluesky、Misskey (misskey.io) 的帖子链接转换为媒体消息发送，附带帖子标题、作者与标签。
 
 ## 功能
 
@@ -111,7 +111,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `/remove_forward_channel` | 取消转发频道 |
 | `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
 | `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
-| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
 | `/clear_cache [链接]` | 清空链接缓存（仅管理员）；带链接只清该条，否则清空全部 |
 | `/bot_dict` | 查看当前聊天状态（调试用） |
 | `/test <链接>` | 调试：只解析链接并返回解析结果（站点、标题、作者、标签、媒体列表），不发送任何媒体 |
