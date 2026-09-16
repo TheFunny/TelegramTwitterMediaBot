@@ -3,8 +3,9 @@
 //! URL is blocked by hotlink protection; the bot downloads the file itself
 //! and uploads it via multipart).
 
+use crate::ctx::AppContext;
 use crate::db::{now_f64, unix_now};
-use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE, log_key};
+use crate::handlers::log_key;
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost, LinkCache};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
@@ -223,7 +224,7 @@ fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut 
 
 /// Persists a successful send under the post's cache key. Only runs for a
 /// fresh (non-resumed) task that carried raw cache data with no file ids yet.
-async fn cache_sent_task(task: &Task, media: Vec<CachedMedia>) {
+async fn cache_sent_task(ctx: &AppContext<'_>, task: &Task, media: Vec<CachedMedia>) {
     let Some(cache_data) = task.cache_data() else {
         return;
     };
@@ -233,15 +234,16 @@ async fn cache_sent_task(task: &Task, media: Vec<CachedMedia>) {
     let mut post = cache_data.clone();
     post.media = media;
     if let Some(key) = x_media::site::cache_key(&post.url) {
-        LINK_CACHE.put(&key, &post).await;
+        ctx.link_cache.put(&key, &post).await;
         log::debug!("cached send for [key={}]", log_key(&post.url));
     }
 }
 
 /// Persists a lone animation send under the post's cache key.
-async fn cache_animation_send(task: &Task, message: &Message) {
+async fn cache_animation_send(ctx: &AppContext<'_>, task: &Task, message: &Message) {
     if let Some(file_id) = message.animation().map(|a| a.file.id.to_string()) {
         cache_sent_task(
+            ctx,
             task,
             vec![CachedMedia {
                 kind: CachedMediaKind::Animation,
@@ -252,14 +254,28 @@ async fn cache_animation_send(task: &Task, message: &Message) {
     }
 }
 
-/// A cached Telegram file id failed permanently (stale/expired); drop the
-/// cache entry so the next request re-fetches instead of repeating it.
-pub async fn invalidate_cache(task: &Task) {
-    invalidate_cache_with(&LINK_CACHE, task).await;
+/// How a task ended. The two states differ only in whether a link-cache entry
+/// may still be holding the (now unusable) media.
+pub enum Settled {
+    Sent,
+    Failed,
 }
 
-/// [`invalidate_cache`] against an injected cache (tests pass a tempdir one).
-pub async fn invalidate_cache_with(cache: &LinkCache, task: &Task) {
+/// Every path that ends a task's life — sent, permanently failed, or
+/// dead-lettered after the last retry — funnels through here, so the cleanup a
+/// settled task owes cannot be forgotten by a new path: release the keep-alive
+/// temp media (retryable tasks keep it, they will be resent) and drop the
+/// link-cache entry that a failed send's stale file ids would keep poisoning.
+pub async fn settle_task(ctx: &AppContext<'_>, task: &Task, outcome: Settled) {
+    if matches!(outcome, Settled::Failed) {
+        invalidate_cache(ctx.link_cache, task).await;
+    }
+    release_keep_alive(task);
+}
+
+/// A cached Telegram file id failed permanently (stale/expired); drop the
+/// cache entry so the next request re-fetches instead of repeating it.
+async fn invalidate_cache(cache: &LinkCache, task: &Task) {
     if task.is_cached_send()
         && let Some(url) = task.source_url()
         && let Some(key) = x_media::site::cache_key(url)
@@ -909,10 +925,7 @@ fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<
 /// Sends the media batches starting at `task.batch_index`, extending
 /// `sent_message_ids`. Returns all sent message ids on full success; on
 /// failure returns a [`SendError`] whose task carries the resumed state.
-pub async fn send_media_sequence(
-    sender: &dyn MediaSender,
-    task: &Task,
-) -> Result<Vec<i64>, SendError> {
+pub async fn send_media_sequence(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64>, SendError> {
     let Task::SendMediaSequence {
         chat_id,
         reply_to_message_id,
@@ -948,7 +961,8 @@ pub async fn send_media_sequence(
                 });
             }
         };
-        match sender
+        match ctx
+            .sender
             .send_media_group(ChatId(chat_id), MessageId(reply_to as i32), items)
             .await
         {
@@ -971,7 +985,7 @@ pub async fn send_media_sequence(
                         .unwrap_or_else(|| "?".into())
                 );
                 match send_batch_via_upload(
-                    sender,
+                    ctx.sender,
                     chat_id,
                     reply_to,
                     batch,
@@ -997,7 +1011,7 @@ pub async fn send_media_sequence(
         }
     }
     if fresh_send {
-        cache_sent_task(task, cached_media).await;
+        cache_sent_task(ctx, task, cached_media).await;
     }
     Ok(sent)
 }
@@ -1022,7 +1036,7 @@ async fn send_animation_inner(
 }
 
 /// Sends a lone animation (gif), URL first with the download fallback.
-pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec<i64>, SendError> {
+pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64>, SendError> {
     let Task::SendAnimation {
         chat_id,
         reply_to_message_id,
@@ -1052,10 +1066,19 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
             });
         }
     };
-    match send_animation_inner(sender, chat_id, reply_to, caption, has_spoiler, url_file).await {
+    match send_animation_inner(
+        ctx.sender,
+        chat_id,
+        reply_to,
+        caption,
+        has_spoiler,
+        url_file,
+    )
+    .await
+    {
         Ok(message) => {
             let id = message.id.0 as i64;
-            cache_animation_send(task, &message).await;
+            cache_animation_send(ctx, task, &message).await;
             Ok(vec![id])
         }
         Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
@@ -1079,7 +1102,7 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
                     // Hold the temp file until the request completes.
                     let _keep_alive = keep_alive;
                     match send_animation_inner(
-                        sender,
+                        ctx.sender,
                         chat_id,
                         reply_to,
                         caption,
@@ -1090,7 +1113,7 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
                     {
                         Ok(message) => {
                             let id = message.id.0 as i64;
-                            cache_animation_send(task, &message).await;
+                            cache_animation_send(ctx, task, &message).await;
                             Ok(vec![id])
                         }
                         Err(e) => Err(classify_to_send_error(
@@ -1113,7 +1136,7 @@ pub async fn send_animation(sender: &dyn MediaSender, task: &Task) -> Result<Vec
 
 /// Copies already-sent messages to the forward channel. No download fallback:
 /// the files are already on Telegram's servers.
-pub async fn forward_messages(sender: &dyn MediaSender, task: &Task) -> Result<(), SendError> {
+pub async fn forward_messages(ctx: &AppContext<'_>, task: &Task) -> Result<(), SendError> {
     let Task::ForwardMessages {
         from_chat_id,
         to_chat_id,
@@ -1127,7 +1150,8 @@ pub async fn forward_messages(sender: &dyn MediaSender, task: &Task) -> Result<(
         .iter()
         .map(|id| MessageId(*id as i32))
         .collect::<Vec<_>>();
-    match sender
+    match ctx
+        .sender
         .copy_messages(
             ChatId(*to_chat_id),
             ChatId(*from_chat_id),
@@ -1192,7 +1216,7 @@ pub async fn notify_failure(
 
 /// After a successful send: either open the edit-before-forward prompt or
 /// forward to the configured channel (with retry/queue handling).
-pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_ids: Vec<i64>) {
+pub async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message_ids: Vec<i64>) {
     let (
         chat_id,
         reply_to,
@@ -1234,8 +1258,9 @@ pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_id
     };
 
     if edit_before_forward {
-        let keyboard = build_edit_markup(&CHAT_STORE.get(chat_id).await.template);
-        let prompt = sender
+        let keyboard = build_edit_markup(&ctx.chat_store.get(chat_id).await.template);
+        let prompt = ctx
+            .sender
             .send_message(
                 ChatId(chat_id),
                 "Reply to edit message.".to_string(),
@@ -1252,7 +1277,7 @@ pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_id
                 );
                 let prompt_id = prompt.id.0 as i64;
                 let source_url = source_url.clone();
-                CHAT_STORE
+                ctx.chat_store
                     .update(chat_id, move |data| {
                         data.edit_message.insert(
                             prompt_id,
@@ -1284,17 +1309,17 @@ pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_id
             notify_chat_id,
             notify_message_id,
         };
-        match forward_messages(sender, &forward_task).await {
+        match forward_messages(ctx, &forward_task).await {
             Ok(()) => {}
             Err(SendError::Retryable {
                 delay_seconds,
                 task,
             }) => {
-                enqueue_retry(&TASK_QUEUE, *task, delay_seconds).await;
+                enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
             }
             Err(SendError::Permanent { message, .. }) => {
                 notify_failure(
-                    sender,
+                    ctx.sender,
                     notify_chat_id,
                     notify_message_id,
                     &format!("Task failed after retries: {message}"),
@@ -1318,7 +1343,10 @@ pub async fn enqueue_retry(queue: &PersistentTaskQueue, task: Task, delay_second
 }
 
 /// Queue entry point: parses the stored task and dispatches.
-pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
+pub async fn handle_task(
+    ctx: &AppContext<'_>,
+    payload: serde_json::Value,
+) -> Result<(), QueueError> {
     let task: Task = match serde_json::from_value(payload.clone()) {
         Ok(task) => task,
         Err(e) => {
@@ -1328,10 +1356,9 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
             });
         }
     };
-    let bot = BOT.clone();
     match task {
         Task::SendMediaSequence { .. } | Task::SendAnimation { .. } => {
-            let message_ids = match send_media_or_animation(&bot, &task).await {
+            let message_ids = match send_media_or_animation(ctx, &task).await {
                 Ok(ids) => ids,
                 Err(SendError::Retryable {
                     delay_seconds,
@@ -1343,9 +1370,7 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                     });
                 }
                 Err(SendError::Permanent { message, task }) => {
-                    invalidate_cache(&task).await;
-                    // The task settles here: drop any keep-alive temp media.
-                    release_keep_alive(&task);
+                    settle_task(ctx, &task, Settled::Failed).await;
                     return Err(QueueError::Permanent {
                         message,
                         payload: serde_json::to_value(task).expect("task serializes"),
@@ -1359,11 +1384,11 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
             // whole sequence (every batch) completed, so the channel forward
             // and the edit-before-forward prompt must not be lost just
             // because the send needed a retry.
-            post_send_actions(&bot, &task, message_ids).await;
-            release_keep_alive(&task);
+            post_send_actions(ctx, &task, message_ids).await;
+            settle_task(ctx, &task, Settled::Sent).await;
             Ok(())
         }
-        Task::ForwardMessages { .. } => match forward_messages(&bot, &task).await {
+        Task::ForwardMessages { .. } => match forward_messages(ctx, &task).await {
             Ok(()) => Ok(()),
             Err(SendError::Retryable {
                 delay_seconds,
@@ -1373,7 +1398,7 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
                 payload: serde_json::to_value(task).expect("task serializes"),
             }),
             Err(SendError::Permanent { message, task }) => {
-                release_keep_alive(&task);
+                settle_task(ctx, &task, Settled::Failed).await;
                 Err(QueueError::Permanent {
                     message,
                     payload: serde_json::to_value(task).expect("task serializes"),
@@ -1383,43 +1408,39 @@ pub async fn handle_task(payload: serde_json::Value) -> Result<(), QueueError> {
     }
 }
 
-async fn send_media_or_animation(
-    sender: &dyn MediaSender,
-    task: &Task,
-) -> Result<Vec<i64>, SendError> {
+async fn send_media_or_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64>, SendError> {
     match task {
-        Task::SendMediaSequence { .. } => send_media_sequence(sender, task).await,
-        Task::SendAnimation { .. } => send_animation(sender, task).await,
+        Task::SendMediaSequence { .. } => send_media_sequence(ctx, task).await,
+        Task::SendAnimation { .. } => send_animation(ctx, task).await,
         Task::ForwardMessages { .. } => unreachable!(),
     }
 }
 
-/// Dead-letter callback wired to the queue in main: notifies the task's chat.
-pub async fn dead_letter_notify(payload: serde_json::Value, message: String) {
-    // A dead-lettered task never runs again. The queue dead-letters retry
-    // exhaustion itself (the handler is not called again), so this is the
-    // only place that sees the final payload — release the keep-alive temp
-    // media the fetch pipeline handed over, or it lives until process exit.
+/// Dead-letter callback wired to the queue in main: settles the task and
+/// notifies its chat.
+pub async fn dead_letter_notify(ctx: &AppContext<'_>, payload: serde_json::Value, message: String) {
+    // A dead-lettered task never runs again, and the queue dead-letters retry
+    // exhaustion itself (the handler is not called again), so this is the only
+    // place that sees the final payload.
     if let Ok(task) = serde_json::from_value::<Task>(payload.clone()) {
-        release_keep_alive(&task);
+        settle_task(ctx, &task, Settled::Failed).await;
     }
     let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
     let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
-    if notify_chat_id.is_some() {
-        let bot = BOT.clone();
-        notify_failure(
-            &bot,
-            notify_chat_id,
-            notify_message_id,
-            &format!("Task failed after retries: {message}"),
-        )
-        .await;
-    }
+    notify_failure(
+        ctx.sender,
+        notify_chat_id,
+        notify_message_id,
+        &format!("Task failed after retries: {message}"),
+    )
+    .await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctx::test_support::TestStores;
+    use std::time::Duration;
 
     #[test]
     fn oversized_photo_boundary() {
@@ -1734,8 +1755,10 @@ mod tests {
             vec![Outcome::GroupErr, Outcome::GroupErr],
             media_fetch_error,
         );
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
         let task = sequence_task(file.to_str().unwrap());
-        let result = send_media_sequence(&sender, &task).await;
+        let result = send_media_sequence(&ctx, &task).await;
         assert!(
             matches!(result, Err(SendError::Permanent { .. })),
             "got {result:?}"
@@ -1755,8 +1778,10 @@ mod tests {
         let sender = MockSender::scripted(vec![Outcome::GroupErr], || {
             RequestError::RetryAfter(Seconds::from_seconds(7))
         });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
         let task = sequence_task(file.to_str().unwrap());
-        let result = send_media_sequence(&sender, &task).await;
+        let result = send_media_sequence(&ctx, &task).await;
         match result {
             Err(SendError::Retryable { delay_seconds, .. }) => {
                 assert_eq!(delay_seconds, 7.0)
@@ -1791,7 +1816,9 @@ mod tests {
             notify_message_id: Some(2),
             cache_data: None,
         };
-        let result = send_animation(&sender, &task).await;
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let result = send_animation(&ctx, &task).await;
         assert!(
             matches!(result, Err(SendError::Permanent { .. })),
             "got {result:?}"
@@ -1807,11 +1834,14 @@ mod tests {
         let file = dir.path().join("media.jpg");
         std::fs::write(&file, b"not-a-real-jpeg").unwrap();
         let sender = MockSender::scripted(vec![Outcome::GroupOk], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
         let task = sequence_task(file.to_str().unwrap());
-        let result = send_media_sequence(&sender, &task).await;
+        let result = send_media_sequence(&ctx, &task).await;
         assert!(result.is_ok(), "got {result:?}");
 
         let sender = MockSender::scripted(vec![Outcome::CopyOk], media_fetch_error);
+        let ctx = stores.ctx(&sender);
         let task = Task::ForwardMessages {
             from_chat_id: 1,
             to_chat_id: 2,
@@ -1819,7 +1849,7 @@ mod tests {
             notify_chat_id: None,
             notify_message_id: None,
         };
-        assert!(forward_messages(&sender, &task).await.is_ok());
+        assert!(forward_messages(&ctx, &task).await.is_ok());
     }
 
     #[tokio::test]
@@ -1836,7 +1866,9 @@ mod tests {
         let sender = MockSender::scripted(vec![Outcome::CopyErr], || {
             RequestError::RetryAfter(Seconds::from_seconds(7))
         });
-        match forward_messages(&sender, &task).await {
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        match forward_messages(&ctx, &task).await {
             Err(SendError::Retryable { delay_seconds, .. }) => {
                 assert_eq!(delay_seconds, 7.0)
             }
@@ -1848,8 +1880,9 @@ mod tests {
                 "Bad Request: message is not modified".into(),
             ))
         });
+        let ctx = stores.ctx(&sender);
         assert!(matches!(
-            forward_messages(&sender, &task).await,
+            forward_messages(&ctx, &task).await,
             Err(SendError::Permanent { .. })
         ));
     }
@@ -1876,12 +1909,184 @@ mod tests {
         let dir_path = dir.path().to_path_buf();
         KEEP_ALIVE.lock().push(dir);
 
+        // No chat to notify → the notify path sends nothing (its mock would
+        // have no scripted outcome left).
+        let sender = MockSender::scripted(vec![Outcome::MessageErr], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
         let payload = serde_json::to_value(&task).unwrap();
-        dead_letter_notify(payload, "task failed after 2 retries".into()).await;
+        dead_letter_notify(&ctx, payload, "task failed after 2 retries".into()).await;
 
         assert!(
             !KEEP_ALIVE.lock().iter().any(|dir| dir.path() == dir_path),
             "dead-lettered task kept its temp media alive"
         );
+    }
+
+    #[tokio::test]
+    async fn post_send_forwards_immediately_when_configured() {
+        let sender = MockSender::scripted(vec![Outcome::CopyOk], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = sent_task(Some(2), false);
+
+        post_send_actions(&ctx, &task, vec![10, 11]).await;
+
+        assert_eq!(sender.calls(), vec!["copy_messages"]);
+        assert_eq!(stores.queued_tasks().await, 0);
+    }
+
+    #[tokio::test]
+    async fn post_send_queues_a_retryable_forward() {
+        use teloxide::types::Seconds;
+        let sender = MockSender::scripted(vec![Outcome::CopyErr], || {
+            RequestError::RetryAfter(Seconds::from_seconds(7))
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = sent_task(Some(2), false);
+
+        post_send_actions(&ctx, &task, vec![10, 11]).await;
+
+        assert_eq!(sender.calls(), vec!["copy_messages"]);
+        assert_eq!(stores.queued_tasks().await, 1, "forward retry not queued");
+        let payload = stores.queued_payload().await;
+        assert_eq!(payload["type"], "forward_messages");
+        assert_eq!(payload["to_chat_id"], 2);
+        assert_eq!(payload["message_ids"], serde_json::json!([10, 11]));
+    }
+
+    #[tokio::test]
+    async fn post_send_notifies_a_permanent_forward_failure() {
+        let sender = MockSender::scripted(vec![Outcome::CopyErr, Outcome::MessageErr], || {
+            RequestError::Api(ApiError::Unknown("Bad Request: chat not found".into()))
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = sent_task(Some(2), true);
+
+        post_send_actions(&ctx, &task, vec![10, 11]).await;
+
+        // The copy failed permanently → the chat is told, nothing is queued.
+        assert_eq!(sender.calls(), vec!["copy_messages", "send_message"]);
+        assert_eq!(stores.queued_tasks().await, 0);
+    }
+
+    // ── Settlement: the invariant every terminal path owes ──────────────
+
+    /// An already-sent sequence task with the post-send knobs set: the state
+    /// `post_send_actions` branches on.
+    fn sent_task(forward_channel_id: Option<i64>, notify: bool) -> Task {
+        Task::SendMediaSequence {
+            chat_id: 1,
+            reply_to_message_id: 2,
+            caption: "cap".into(),
+            media_batches: vec![vec![MediaItemPayload::Photo {
+                media: "https://p/1.jpg".into(),
+                has_spoiler: false,
+                fallback_url: None,
+                file_id: false,
+            }]],
+            batch_index: 0,
+            sent_message_ids: vec![],
+            source_url: "https://x.com/u/status/1".into(),
+            edit_before_forward: false,
+            forward_channel_id,
+            notify_chat_id: notify.then_some(1),
+            notify_message_id: notify.then_some(2),
+            cache_data: None,
+        }
+    }
+
+    /// A task whose media are cached Telegram file ids (the only kind that can
+    /// hold a link-cache entry).
+    fn cached_sequence_task() -> Task {
+        Task::SendMediaSequence {
+            chat_id: 1,
+            reply_to_message_id: 2,
+            caption: "cap".into(),
+            media_batches: vec![vec![MediaItemPayload::Photo {
+                media: "AgAC-file-id".into(),
+                has_spoiler: false,
+                fallback_url: None,
+                file_id: true,
+            }]],
+            batch_index: 0,
+            sent_message_ids: vec![],
+            source_url: "https://x.com/u/status/1".into(),
+            edit_before_forward: false,
+            forward_channel_id: None,
+            notify_chat_id: None,
+            notify_message_id: None,
+            cache_data: Some(CachedPost {
+                url: "https://x.com/u/status/1".into(),
+                caption: "cap".into(),
+                title: "t".into(),
+                author: "a".into(),
+                author_url: "au".into(),
+                tags: String::new(),
+                sensitive: false,
+                media: vec![CachedMedia {
+                    kind: CachedMediaKind::Photo,
+                    file_id: "AgAC-file-id".into(),
+                }],
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn settled_sent_keeps_the_cache_entry() {
+        let sender = MockSender::scripted(vec![], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = cached_sequence_task();
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_sequence_cache_data())
+            .await;
+
+        settle_task(&ctx, &task, Settled::Sent).await;
+
+        assert!(
+            stores
+                .link_cache()
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_some(),
+            "a successful send must not drop its own cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_failed_drops_the_cache_entry() {
+        let sender = MockSender::scripted(vec![], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = cached_sequence_task();
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_sequence_cache_data())
+            .await;
+
+        settle_task(&ctx, &task, Settled::Failed).await;
+
+        assert!(
+            stores
+                .link_cache()
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none(),
+            "a permanently failed cached send must drop the entry"
+        );
+    }
+
+    fn cached_sequence_cache_data() -> CachedPost {
+        match cached_sequence_task() {
+            Task::SendMediaSequence {
+                cache_data: Some(post),
+                ..
+            } => post,
+            other => panic!("expected a cached sequence task, got {other:?}"),
+        }
     }
 }

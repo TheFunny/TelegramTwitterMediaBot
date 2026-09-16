@@ -1,13 +1,11 @@
 //! URL extraction and the per-URL media pipeline: bounded job channel +
 //! worker pool, link-cache fast path, fetch, task build and send dispatch.
 
-use super::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE, log_key, reply};
-use crate::config::Config;
-use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
-use crate::media_sender::MediaSender;
-use crate::queue::PersistentTaskQueue;
+use super::{log_key, reply};
+use crate::ctx::{AppContext, CONTEXT};
+use crate::link_cache::{CachedMediaKind, CachedPost};
 use crate::send::{self, MediaItemPayload, Task};
-use crate::state::{ChatData, ChatStore};
+use crate::state::ChatData;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use teloxide::types::{ChatAction, ChatId, Message, MessageEntityKind, MessageId};
@@ -34,27 +32,6 @@ static URL_WORKER_HANDLES: LazyLock<parking_lot::Mutex<Option<Vec<tokio::task::J
 /// while bounding how many jobs can be queued at all.
 const URL_WORKERS: usize = 8;
 
-/// Dependencies of the per-URL pipeline, injected so tests can substitute a
-/// mock sender and tempdir-backed stores.
-pub(crate) struct AppContext<'a> {
-    pub sender: &'a dyn MediaSender,
-    pub chat_store: &'a ChatStore,
-    pub task_queue: &'a PersistentTaskQueue,
-    pub link_cache: &'a LinkCache,
-    pub config: &'a Config,
-}
-
-/// Assembles the production context from the process-wide statics.
-fn app_context() -> AppContext<'static> {
-    AppContext {
-        sender: &*crate::send::BOT,
-        chat_store: &CHAT_STORE,
-        task_queue: &TASK_QUEUE,
-        link_cache: &LINK_CACHE,
-        config: &CONFIG,
-    }
-}
-
 /// Starts the URL job workers (called once from main after the queue starts).
 /// teloxide dispatches updates to a per-chat worker that handles them
 /// sequentially, so a batch-forward of many messages would otherwise be
@@ -69,12 +46,11 @@ pub async fn start_url_workers() {
     for _ in 0..URL_WORKERS {
         let rx = std::sync::Arc::clone(&rx);
         handles.push(tokio::spawn(async move {
-            let ctx = app_context();
             while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
                 let job = rx.lock().await.recv().await;
                 match job {
                     Some((message, url)) => {
-                        url_media(&ctx, message.chat.id.0, message.id.0 as i64, &url).await
+                        url_media(&CONTEXT, message.chat.id.0, message.id.0 as i64, &url).await
                     }
                     None => break,
                 }
@@ -184,8 +160,8 @@ async fn dispatch_send(
     url: &str,
 ) {
     let result = match task {
-        Task::SendAnimation { .. } => send::send_animation(ctx.sender, task).await,
-        Task::SendMediaSequence { .. } => send::send_media_sequence(ctx.sender, task).await,
+        Task::SendAnimation { .. } => send::send_animation(ctx, task).await,
+        Task::SendMediaSequence { .. } => send::send_media_sequence(ctx, task).await,
         Task::ForwardMessages { .. } => unreachable!(),
     };
     match result {
@@ -195,9 +171,8 @@ async fn dispatch_send(
                 message_ids.len(),
                 log_key(url)
             );
-            send::post_send_actions(ctx.sender, task, message_ids).await;
-            // The task settled: drop any keep-alive temp media.
-            send::release_keep_alive(task);
+            send::post_send_actions(ctx, task, message_ids).await;
+            send::settle_task(ctx, task, send::Settled::Sent).await;
         }
         Err(send::SendError::Retryable {
             delay_seconds,
@@ -220,8 +195,7 @@ async fn dispatch_send(
             message: err_message,
             task,
         }) => {
-            send::invalidate_cache_with(ctx.link_cache, &task).await;
-            send::release_keep_alive(&task);
+            send::settle_task(ctx, &task, send::Settled::Failed).await;
             log::error!("send for {url} failed permanently: {err_message}");
             let _ = reply(
                 ctx.sender,
@@ -434,10 +408,9 @@ async fn url_media(ctx: &AppContext<'_>, chat_id: i64, reply_to_message_id: i64,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
+    use crate::ctx::test_support::TestStores;
     use crate::link_cache::CachedMedia;
     use crate::media_sender::test_support::{MockSender, Outcome};
-    use std::sync::Arc;
     use std::time::Duration;
     use teloxide::{ApiError, RequestError};
 
@@ -465,24 +438,16 @@ mod tests {
 
     #[tokio::test]
     async fn cache_hit_sends_file_ids_and_invalidates_on_permanent_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
-        let chat_store = ChatStore::new(Arc::clone(&pool));
-        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
-        let link_cache = LinkCache::new(Arc::clone(&pool));
-        let config = Config::load();
+        let stores = TestStores::new();
         let sender = MockSender::scripted(
             vec![Outcome::GroupErr, Outcome::MessageErr],
             permanent_error,
         );
-        let ctx = AppContext {
-            sender: &sender,
-            chat_store: &chat_store,
-            task_queue: &task_queue,
-            link_cache: &link_cache,
-            config: &config,
-        };
-        link_cache.put("twitter:1", &cached_photo_entry()).await;
+        let ctx = stores.ctx(&sender);
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_photo_entry())
+            .await;
 
         url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
 
@@ -494,7 +459,8 @@ mod tests {
         );
         // The stale cache entry was invalidated so the next request re-fetches.
         assert!(
-            link_cache
+            stores
+                .link_cache()
                 .get("twitter:1", Duration::from_secs(3600))
                 .await
                 .is_none()
@@ -503,28 +469,21 @@ mod tests {
 
     #[tokio::test]
     async fn cache_hit_success_keeps_the_cache_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
-        let chat_store = ChatStore::new(Arc::clone(&pool));
-        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
-        let link_cache = LinkCache::new(Arc::clone(&pool));
-        let config = Config::load();
+        let stores = TestStores::new();
         let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
-        let ctx = AppContext {
-            sender: &sender,
-            chat_store: &chat_store,
-            task_queue: &task_queue,
-            link_cache: &link_cache,
-            config: &config,
-        };
-        link_cache.put("twitter:1", &cached_photo_entry()).await;
+        let ctx = stores.ctx(&sender);
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_photo_entry())
+            .await;
 
         url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
 
         assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
         // Success must not evict the entry.
         assert!(
-            link_cache
+            stores
+                .link_cache()
                 .get("twitter:1", Duration::from_secs(3600))
                 .await
                 .is_some()
@@ -533,20 +492,9 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_url_is_ignored_silently() {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = db::open_store(dir.path().join("t.db").to_str().unwrap()).unwrap();
-        let chat_store = ChatStore::new(Arc::clone(&pool));
-        let task_queue = PersistentTaskQueue::new(Arc::clone(&pool));
-        let link_cache = LinkCache::new(Arc::clone(&pool));
-        let config = Config::load();
+        let stores = TestStores::new();
         let sender = MockSender::scripted(vec![], permanent_error);
-        let ctx = AppContext {
-            sender: &sender,
-            chat_store: &chat_store,
-            task_queue: &task_queue,
-            link_cache: &link_cache,
-            config: &config,
-        };
+        let ctx = stores.ctx(&sender);
 
         // No cache key → the fetch dispatcher returns Ok(None) without any
         // network; nothing is sent or replied.

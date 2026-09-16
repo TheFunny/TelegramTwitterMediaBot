@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use x_media::site;
 
 mod config;
+mod ctx;
 mod db;
 mod handlers;
 mod link_cache;
@@ -18,6 +19,7 @@ mod rate_limit;
 mod send;
 mod state;
 
+use ctx::CONTEXT;
 use handlers::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
 
 /// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc
@@ -61,9 +63,13 @@ async fn main() {
     );
 
     // Queue worker: handles typed tasks, dead-letters failed sends to the
-    // task's chat.
+    // task's chat. Both closures use the shared context (the queue requires
+    // 'static handlers, and the statics are process-wide anyway).
     TASK_QUEUE
-        .start(send::handle_task, send::dead_letter_notify)
+        .start(
+            |payload| send::handle_task(&CONTEXT, payload),
+            |payload, message| send::dead_letter_notify(&CONTEXT, payload, message),
+        )
         .await;
     log::info!("task queue worker started");
 

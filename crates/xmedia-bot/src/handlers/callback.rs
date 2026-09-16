@@ -50,6 +50,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
         chat_id
     );
     if data == "forward" {
+        let ctx = crate::ctx::AppContext::from_statics(&bot);
         match chat_data.forward_channel_id {
             Some(channel_id) => {
                 let forward_task = Task::ForwardMessages {
@@ -59,7 +60,7 @@ pub async fn callback_query_handler(bot: Bot, query: CallbackQuery) -> Result<()
                     notify_chat_id: Some(chat_id),
                     notify_message_id: Some(prompt_message_id),
                 };
-                match send::forward_messages(&bot, &forward_task).await {
+                match send::forward_messages(&ctx, &forward_task).await {
                     Ok(()) => {
                         log::info!(
                             "forwarded {} message(s) to channel {channel_id}",
