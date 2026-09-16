@@ -2,7 +2,7 @@
 //!
 //! Dispatch order: twitter → bsky → misskey → pixiv. Each site module
 //! exports a `PATTERN`, `enabled()` and `fetch_from_url()`; a future site
-//! plugs in by adding one guarded entry in [`fetch_once`].
+//! plugs in by adding one guarded entry in `SITES`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -24,9 +24,9 @@ pub use pixiv::PixivError;
 /// media list and spoiler flag. Produced by [`fetch`].
 #[derive(Debug)]
 pub struct Fetched {
-    /// Canonical URL: x.com/{author}/status/{id} |
-    /// https://www.pixiv.net/artworks/{id} |
-    /// https://bsky.app/profile/{handle}/post/{rkey}
+    /// Canonical URL: `x.com/{author}/status/{id}` |
+    /// `https://www.pixiv.net/artworks/{id}` |
+    /// `https://bsky.app/profile/{handle}/post/{rkey}`
     pub source_url: String,
     /// The exact HTML produced by the site's caption().
     pub caption: String,
@@ -46,8 +46,15 @@ pub struct Fetched {
     pub(crate) _keep_alive: Option<tempfile::TempDir>,
 }
 
-/// Pre-escaped values for `{url} {author} {author_url} {title} {tags}`
-/// placeholders in user-supplied caption formats.
+/// Values for the `{url} {author} {author_url} {title} {tags}` placeholders in
+/// user-supplied caption formats, substituted by [`caption_from_fields`] as
+/// HTML text (never as an attribute value).
+///
+/// `author`, `title` and `tags` come from the site API (post text, display
+/// names) and are HTML-escaped at construction. `url` and `author_url` stay
+/// raw: they are canonical URLs the adapter builds from numeric ids and
+/// API-constrained handles/DIDs, so they carry no escapable character — the
+/// bot's `/test` report relies on that when it embeds them.
 #[derive(Debug)]
 pub(crate) struct RenderData {
     pub url: String,
@@ -166,7 +173,7 @@ pub fn caption_from_fields(
 /// Stable per-post cache key derived from any supported URL, so variant
 /// domains (x.com / twitter.com / fxtwitter.com, mobile, `/photo/N`
 /// suffixes) map to the same post. Delegates to each registered site's
-/// `cache_key` (dispatch order twitter → bsky → pixiv).
+/// `cache_key` (in registry order).
 pub fn cache_key(url: &str) -> Option<String> {
     SITES.iter().find_map(|site| site.cache_key(url))
 }
@@ -275,20 +282,21 @@ pub(crate) fn log_once_ffmpeg_missing() {
     }
 }
 
-/// Site adapter: one impl per supported site (twitter / bsky / pixiv),
-/// registered in [`SITES`]. All site-specific knowledge — URL pattern,
+/// Site adapter: one impl per supported site (twitter / bsky / misskey /
+/// pixiv), registered in `SITES`. All site-specific knowledge — URL pattern,
 /// cache-key format, fetch, retry policy, media-host headers, startup
 /// validation — lives in the site module; the central dispatcher only
 /// iterates the registry.
 ///
-/// Async methods return a boxed future (see [`SiteFuture`]): `async fn` /
+/// Async methods return a boxed future (see `SiteFuture`): `async fn` /
 /// RPITIT in traits are not dyn-compatible (verified on rustc 1.95), and
 /// `+ Send` is required since URL/queue workers spawn these futures. The
 /// site structs are stateless unit structs, so the boxed futures never
 /// borrow from `self` beyond the call's scope.
 pub trait Site: Send + Sync {
-    /// Stable site id (`"twitter"` / `"bsky"` / `"pixiv"`): caption-format
-    /// lookup, cache-key prefixes and the SetFormat whitelist derive from it.
+    /// Stable site id (`"twitter"` / `"bsky"` / `"misskey"` / `"pixiv"`):
+    /// caption-format lookup, cache-key prefixes and the SetFormat whitelist
+    /// derive from it.
     fn id(&self) -> &'static str;
     /// URL pattern; the dispatcher's first match wins (dispatch order).
     fn pattern(&self) -> &'static Regex;
@@ -324,8 +332,8 @@ pub trait Site: Send + Sync {
 type SiteFuture<'a, T, E = FetchError> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
 /// The one registry of supported sites, in dispatch order (twitter → bsky →
-/// pixiv). Adding a site = new module + one `Box::new(...)` entry here; the
-/// bot crate never lists sites itself.
+/// misskey → pixiv). Adding a site = new module + one `Box::new(...)` entry
+/// here; the bot crate never lists sites itself.
 static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| {
     vec![
         Box::new(twitter::TwitterSite),

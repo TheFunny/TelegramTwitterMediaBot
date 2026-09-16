@@ -1,5 +1,5 @@
-//! Callback query handling: the edit-before-forward prompt's "forward" and
-//! "template|<name>" buttons.
+//! Callback query handling: the edit-before-forward prompt's `"forward"` and
+//! `"template|<name>"` buttons.
 
 use super::{CHAT_STORE, CONFIG, TASK_QUEUE};
 use crate::db::unix_now;

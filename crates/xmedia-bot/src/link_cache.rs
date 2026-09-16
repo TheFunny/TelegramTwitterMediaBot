@@ -5,7 +5,7 @@
 //! key]. A repeated link is then answered entirely from local state — no
 //! re-fetch of the source site, no re-upload — and no media file is stored
 //! on disk (the file ids point at Telegram's servers). Entries expire after
-//! [`Config::link_cache_ttl`]; a stale entry is dropped lazily on read and
+//! `Config::link_cache_ttl`; a stale entry is dropped lazily on read and
 //! by the periodic prune in `main`.
 
 use crate::db::now_f64;

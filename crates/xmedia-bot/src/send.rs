@@ -271,10 +271,11 @@ pub async fn invalidate_cache_with(cache: &LinkCache, task: &Task) {
 
 /// Locally produced media files (ugoira MP4, bsky remux MP4) whose temp dirs
 /// must stay alive while their task may be retried by the queue. The fetch
-/// pipeline hands ownership here via [`x_media::site::Fetched::take_keep_alive`]
-/// before the [`Fetched`] is dropped; a queued retry runs after that drop, so
-/// without this the local file would be gone by the time the retry sends it.
-/// Entries are removed when the task settles (see [`release_keep_alive`]).
+/// pipeline hands ownership here via
+/// [`x_media::site::Fetched::take_keep_alive`] before that
+/// [`x_media::site::Fetched`] is dropped; a queued retry runs after that drop,
+/// so without this the local file would be gone by the time the retry sends
+/// it. Entries are removed when the task settles (see [`release_keep_alive`]).
 pub static KEEP_ALIVE: LazyLock<parking_lot::Mutex<Vec<tempfile::TempDir>>> =
     LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
