@@ -11,6 +11,8 @@ ARG APP_NAME=telegram-twitter-media-bot
 # runners. `/redirect/latest/` floats to the newest release build; each build
 # also ships a .sha256. Swap `amd64` for `arm64` when building arm64 images.
 ARG FFMPEG_URL=https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip
+# Arm64 images need this URL swapped for the `linux/arm64` build (currently
+# hardcoded amd64; the workflow builds amd64 only — see docker.yml).
 # Optional sha256 of ffmpeg.zip (pinned releases only): set to verify the
 # download. The mirror publishes .sha256 sidecars next to pinned builds, e.g.
 # https://ffmpeg.martin-riedl.de/download/linux/amd64/<id>_9.0/ffmpeg.zip.sha256
@@ -28,7 +30,7 @@ COPY crates/xmedia-bot/Cargo.toml crates/xmedia-bot/Cargo.toml
 RUN mkdir -p crates/x-media/src crates/xmedia-bot/src \
     && printf 'fn main() {}\n' > crates/xmedia-bot/src/main.rs \
     && : > crates/x-media/src/lib.rs \
-    && cargo build --release -p xmedia-bot
+    && cargo build --release --locked -p xmedia-bot
 
 # 2. Static ffmpeg next (cached unless FFMPEG_URL changes), so source edits
 #    never re-download it. The zip contains a single `ffmpeg` binary at the
@@ -51,7 +53,7 @@ RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
 #    removes 0 files and the stub binary silently ships.)
 COPY crates/ ./crates/
 RUN find crates -type f -name '*.rs' -exec touch {} + \
-    && cargo build --release -p xmedia-bot
+    && cargo build --release --locked -p xmedia-bot
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim

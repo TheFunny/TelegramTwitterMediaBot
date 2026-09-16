@@ -1,15 +1,40 @@
 name: Build Docker Image
 
+# Release builds (master / v* tags) plus a build-only check on pull requests
+# that touch anything the image depends on — the Dockerfile's stub-source
+# machinery, the ffmpeg download and the entrypoint are exactly the parts that
+# would otherwise break only at release time.
+#
+# Actions are pinned to commit SHAs (Dependabot keeps the pins current).
+
 on:
   push:
     tags:
       - v*
     branches:
       - master
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/docker.yml
+      - 'crates/**/Cargo.toml'
 
 env:
   APP_NAME: telegram-twitter-media-bot
   DOCKERHUB_REPO: yoursfunny/telegram-twitter-media-bot
+
+permissions:
+  contents: read
+
+# Serialize runs per ref. Never cancel in progress: a killed run would drop a
+# half-finished image push.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # A tag push and a branch push to the same commit fire two workflow runs;
@@ -17,12 +42,34 @@ jobs:
   # pushed commit is not already tagged (the tag run covers it).
   should-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      # A release tag is the version claim: the manifests are bumped by hand,
+      # so `v1.5.1` with `Cargo.toml` still at 1.5.0 would publish an image
+      # whose tag lies about what is inside it (the binary carries no version).
+      - name: Verify the tag matches both crate versions
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          status=0
+          for manifest in crates/x-media/Cargo.toml crates/xmedia-bot/Cargo.toml; do
+            # tr -d '\r': a CRLF checkout (core.autocrlf on Windows) would
+            # otherwise yield "1.5.0\r" and false-fail every tag.
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1 | tr -d '\r')"
+            if [ "$version" != "$tag" ]; then
+              echo "::error file=$manifest::$manifest is at $version but the tag is v$tag"
+              status=1
+            else
+              echo "$manifest: $version matches v$tag"
+            fi
+          done
+          exit "$status"
       - id: check
         shell: bash
         run: |
@@ -37,10 +84,11 @@ jobs:
     needs: should-build
     if: needs.should-build.outputs.build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.DOCKERHUB_REPO }}
           tags: |
@@ -50,14 +98,14 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
       -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-      -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      # Pull requests build the image to prove the Dockerfile still works, but
+      # must not read registry credentials (fork PRs have none).
       -
         name: Login to Docker Hub
-        uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -66,15 +114,26 @@ jobs:
       # stage's layers so the cargo-deps and ffmpeg layers are restored
       # instead of re-downloaded/recompiled. The scope must be pinned to a
       # fixed string: the gha backend defaults to the current git ref, which
-      # would give every new tag a cold cache on release builds.
+      # would give every new tag a cold cache on release builds. PR runs only
+      # read it (cache-to is empty) so they cannot evict the release cache.
+      #
+      # FFMPEG_URL/FFMPEG_SHA256 come from repository variables when set, so a
+      # release can pin an exact ffmpeg build (the Dockerfile default follows
+      # the project's `/redirect/latest/` URL, which has no sha256 sidecar).
+      #
+      # Single-arch (amd64) on purpose: adding arm64 means re-adding
+      # `docker/setup-qemu-action`, `platforms: linux/amd64,linux/arm64`, and
+      # parameterizing FFMPEG_URL by $TARGETARCH in the Dockerfile.
       -
         name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             APP_NAME=${{ env.APP_NAME }}
+            FFMPEG_URL=${{ vars.FFMPEG_URL || 'https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip' }}
+            FFMPEG_SHA256=${{ vars.FFMPEG_SHA256 }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=tgxmb-build
-          cache-to: type=gha,mode=max,scope=tgxmb-build
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=tgxmb-build' || '' }}

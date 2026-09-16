@@ -4,14 +4,18 @@ name: CI
 # job that exercises the real source sites and the token-gated pixiv tests.
 #
 # Layering:
-#   test  — fmt + clippy + the full offline unit suite + cargo-audit
-#           dependency gate. Runs on every push and PR, including forks
-#           (it needs no secrets).
+#   test  — fmt + clippy + the full offline unit suite + a release-profile
+#           build + cargo-audit dependency gate. Runs on every push and PR,
+#           including forks (it needs no secrets).
 #   live  — the #[ignore]d live-network tests plus the pixiv tests that are
 #           gated on PIXIV_REFRESH_TOKEN. Runs on schedule / manual dispatch
 #           / tag pushes only, because pull requests from forks cannot read
 #           repository secrets. continue-on-error keeps a flaky external site
 #           from blocking, while the run still records the outcome.
+#
+# Every action is pinned to a commit SHA (Dependabot keeps the pins current);
+# `dtolnay/rust-toolchain` deliberately stays on its channel ref, because the
+# ref itself is what selects the toolchain (`@stable` = install stable).
 #
 # Test gating convention (keep in sync with AGENTS.md "Testing & QA"):
 #   - pure unit tests: plain #[test] / #[tokio::test], always run.
@@ -28,44 +32,75 @@ on:
     - cron: '0 3 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run; without this every
+# intermediate commit of a PR branch keeps a runner busy to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Panicking tests print their backtrace; free when nothing fails.
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Generous on purpose: the release-profile build below is cold on the very
+    # first run (thin LTO + codegen-units = 1 across every dependency), and a
+    # timeout there would kill the job *before* rust-cache saves its cache —
+    # leaving every later run cold again.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `--locked` on every cargo invocation: the version bump edits
+      # Cargo.lock by hand (AGENTS.md), so a stale lock must fail here instead
+      # of being silently re-resolved — otherwise CI tests a different
+      # dependency set than the one committed, and than the one the released
+      # image is built from.
       - name: Check formatting
         run: cargo fmt --check
       - name: Lint (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run offline tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+      # The release profile (lto/strip/codegen-units=1, overflow checks off)
+      # was otherwise only exercised by the Docker build on master/tag. Same
+      # package the Dockerfile builds; the cache keeps it cheap after the
+      # first run.
+      - name: Build release profile
+        run: cargo build --release --locked -p xmedia-bot
       # Dependency vulnerability gate: fails the build when a crate in
       # Cargo.lock has an unfixed security advisory. Unmaintained/unsound
       # *warnings* (dotenv, proc-macro-error2, anyhow transitive) do not fail
       # the build by default; the advisory DB is cached across runs.
       - name: Audit dependencies
-        uses: actions-rust-lang/audit@v1
+        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24 # v1
 
   live:
     needs: test
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     env:
       PIXIV_REFRESH_TOKEN: ${{ secrets.PIXIV_REFRESH_TOKEN }}
       TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Full suite: with the secret present, the pixiv token-gated tests run;
-      # without it they skip themselves. Live tests stay #[ignore]d here.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # Everything network- or secret-gated lives in x-media, and the bot
+      # crate's suite (MockSender + tempdir stores, no network) already ran in
+      # the `test` job — rebuilding it here bought nothing.
       - name: Run token-gated tests
-        run: cargo test --workspace
+        run: cargo test -p x-media --locked
       # The live-network tests, by the "live" name filter (all #[ignore]d).
       - name: Run live-network tests
-        run: cargo test --workspace -- --ignored live
+        run: cargo test -p x-media --locked -- --ignored live

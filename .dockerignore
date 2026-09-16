@@ -26,6 +26,10 @@
 *.db
 LICENSE
 README.md
+# Documentation and scratch files: the build only ever reads the manifests,
+# `crates/` and the entrypoint script.
+docs/
+*.md
 data/
 cert/
 nginx-certs/
