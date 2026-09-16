@@ -18,6 +18,7 @@ pub use inline::inline_query_handler;
 pub use statics::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
 pub use urls::{start_url_workers, stop_url_workers};
 
+use crate::ctx::AppContext;
 use crate::media_sender::MediaSender;
 use commands::{Command, execute_command};
 use teloxide::RequestError;
@@ -27,16 +28,13 @@ use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
 /// Reply to a message by id, keeping the reply decoration even if the
-/// original was already deleted.
-pub(crate) async fn reply<T>(
+/// original was already deleted. Returns the reply's message id.
+pub(crate) async fn reply(
     sender: &dyn MediaSender,
     chat_id: i64,
     reply_to: MessageId,
-    text: T,
-) -> Result<Message, RequestError>
-where
-    T: Into<String>,
-{
+    text: impl Into<String>,
+) -> Result<i64, RequestError> {
     sender
         .send_message(ChatId(chat_id), text.into(), Some(reply_to), None)
         .await
@@ -50,13 +48,14 @@ pub(crate) async fn reply_html(
     chat_id: i64,
     reply_to: MessageId,
     text: String,
-) -> Result<Message, RequestError> {
+) -> Result<i64, RequestError> {
     // `<Bot as Requester>::` disambiguates from the MediaSender trait's
     // same-named method (see media_sender.rs).
     <Bot as Requester>::send_message(bot, ChatId(chat_id), text)
         .parse_mode(ParseMode::Html)
         .reply_parameters(ReplyParameters::new(reply_to).allow_sending_without_reply())
         .await
+        .map(|message| message.id.0 as i64)
 }
 
 /// Log prefix tying the whole lifecycle of one link (fetch → send → cache →
@@ -69,16 +68,16 @@ pub fn log_key(url: &str) -> String {
 
 /// Edit-before-forward: a reply to the prompt swaps the caption of the first
 /// forwarded message. Returns true when the message was consumed as an edit.
-async fn edit_message_handler(bot: &Bot, message: &Message) -> bool {
-    let Some(reply) = message.reply_to_message() else {
-        return false;
-    };
-    let chat_id = message.chat.id.0;
-    let Some(text) = message.text() else {
-        return false;
-    };
-    let chat_data = CHAT_STORE.get(chat_id).await;
-    let Some(edit) = chat_data.edit_message.get(&(reply.id.0 as i64)) else {
+/// Body of [`message_handler`]'s edit branch, without teloxide update types so
+/// it can be driven by tests.
+async fn edit_message_handler(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to_message_id: i64,
+    text: &str,
+) -> bool {
+    let chat_data = ctx.chat_store.get(chat_id).await;
+    let Some(edit) = chat_data.edit_message.get(&reply_to_message_id) else {
         return false;
     };
     let Some(first_forward_id) = edit.forward_message_ids.first() else {
@@ -98,15 +97,17 @@ async fn edit_message_handler(bot: &Bot, message: &Message) -> bool {
             .map(|template| template.replace("[]", &link))
             .unwrap_or(link)
     };
-    let result = bot
-        .edit_message_caption(ChatId(chat_id), MessageId(*first_forward_id as i32))
-        .caption(new_text)
-        .parse_mode(ParseMode::Html)
-        .await;
-    match result {
-        Ok(_) => log::info!(
-            "edit-before-forward: caption swapped on message {first_forward_id} for prompt {}",
-            reply.id.0
+    match ctx
+        .sender
+        .edit_message_caption(
+            ChatId(chat_id),
+            MessageId(*first_forward_id as i32),
+            new_text,
+        )
+        .await
+    {
+        Ok(()) => log::info!(
+            "edit-before-forward: caption swapped on message {first_forward_id} for prompt {reply_to_message_id}"
         ),
         Err(e) => log::error!("edit_message_caption failed: {e}"),
     }
@@ -133,7 +134,17 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
         message.chat.id
     );
     // URL/edit flows only run in private chats; commands run in any chat.
-    if is_private && edit_message_handler(&bot, &message).await {
+    if is_private
+        && let Some(reply) = message.reply_to_message()
+        && let Some(text) = message.text()
+        && edit_message_handler(
+            &AppContext::from_statics(&bot),
+            message.chat.id.0,
+            reply.id.0 as i64,
+            text,
+        )
+        .await
+    {
         return respond(());
     }
     if let Some(text) = message.text()
@@ -166,4 +177,98 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
         }
     }
     respond(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctx::test_support::TestStores;
+    use crate::media_sender::test_support::{MockSender, Outcome};
+    use crate::state::EditMessage;
+    use teloxide::ApiError;
+
+    const PROMPT_ID: i64 = 7;
+    const FORWARDED_ID: i64 = 9;
+
+    fn api_error() -> RequestError {
+        RequestError::Api(ApiError::Unknown("Bad Request: message not found".into()))
+    }
+
+    /// Seeds a prompt record; `template` names the chat template used for it
+    /// (empty = none, the caption gets the bare link).
+    async fn seed_prompt(ctx: &AppContext<'_>, template: &str) {
+        ctx.chat_store
+            .update(1, |data| {
+                data.template
+                    .insert("tpl".to_string(), "<b>[]</b>".to_string());
+                data.edit_message.insert(
+                    PROMPT_ID,
+                    EditMessage {
+                        url: "https://x.com/u/status/1".into(),
+                        chat_id: 1,
+                        forward_message_ids: vec![FORWARDED_ID],
+                        template: template.to_string(),
+                        created_at: crate::db::unix_now(),
+                    },
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reply_to_a_prompt_swaps_the_caption_through_its_template() {
+        let sender = MockSender::scripted(vec![Outcome::EditOk], api_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "tpl").await;
+
+        let consumed = edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await;
+
+        assert!(consumed, "a reply to the prompt must be consumed");
+        assert_eq!(
+            sender.captions(),
+            vec!["<b><a href=\"https://x.com/u/status/1\">new caption</a></b>"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_text_and_url_are_escaped_into_the_caption() {
+        let sender = MockSender::scripted(vec![Outcome::EditOk], api_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "").await;
+
+        edit_message_handler(&ctx, 1, PROMPT_ID, "<script>alert(1)</script>").await;
+
+        // No raw markup from user text may reach the HTML caption.
+        assert_eq!(
+            sender.captions(),
+            vec!["<a href=\"https://x.com/u/status/1\">&lt;script&gt;alert(1)&lt;/script&gt;</a>"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_caption_swap_still_consumes_the_reply() {
+        let sender = MockSender::scripted(vec![Outcome::EditErr], api_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "tpl").await;
+
+        // The edit failed (message deleted etc.); the reply must still be
+        // swallowed instead of being treated as a link to fetch.
+        assert!(edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await);
+        assert_eq!(sender.calls(), vec!["edit_message_caption"]);
+    }
+
+    #[tokio::test]
+    async fn reply_to_an_unrelated_message_is_not_consumed() {
+        let sender = MockSender::scripted(vec![], api_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+
+        // No prompt record for that message id → the reply runs the normal
+        // (URL/command) path instead.
+        assert!(!edit_message_handler(&ctx, 1, PROMPT_ID, "hello").await);
+        assert!(sender.calls().is_empty());
+    }
 }

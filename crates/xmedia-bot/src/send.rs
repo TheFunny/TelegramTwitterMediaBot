@@ -1269,13 +1269,11 @@ pub async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message_ids: V
             )
             .await;
         match prompt {
-            Ok(prompt) => {
+            Ok(prompt_id) => {
                 log::info!(
-                    "edit-before-forward prompt {} opened for {} message(s)",
-                    prompt.id.0,
+                    "edit-before-forward prompt {prompt_id} opened for {} message(s)",
                     message_ids.len()
                 );
-                let prompt_id = prompt.id.0 as i64;
                 let source_url = source_url.clone();
                 ctx.chat_store
                     .update(chat_id, move |data| {
@@ -1921,6 +1919,34 @@ mod tests {
             !KEEP_ALIVE.lock().iter().any(|dir| dir.path() == dir_path),
             "dead-lettered task kept its temp media alive"
         );
+    }
+
+    #[tokio::test]
+    async fn post_send_opens_and_records_the_edit_prompt() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let mut task = sent_task(None, false);
+        if let Task::SendMediaSequence {
+            edit_before_forward,
+            ..
+        } = &mut task
+        {
+            *edit_before_forward = true;
+        }
+
+        post_send_actions(&ctx, &task, vec![10, 11]).await;
+
+        assert_eq!(sender.calls(), vec!["send_message"]);
+        assert_eq!(sender.messages(), vec!["Reply to edit message."]);
+        // The prompt's own message id keys the record the reply will edit.
+        let data = stores.chat_store().get(1).await;
+        let record = data
+            .edit_message
+            .get(&MockSender::SENT_ID)
+            .expect("the prompt record must be stored");
+        assert_eq!(record.url, "https://x.com/u/status/1");
+        assert_eq!(record.forward_message_ids, vec![10, 11]);
     }
 
     #[tokio::test]

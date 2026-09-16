@@ -8,8 +8,8 @@ use teloxide::RequestError;
 use teloxide::prelude::Requester;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, Message, MessageId, ParseMode,
-    ReplyParameters,
+    CallbackQueryId, ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, Message,
+    MessageId, ParseMode, ReplyParameters,
 };
 
 /// Boxed, `Send` future returned by a [`MediaSender`] method (`async fn` in
@@ -48,14 +48,42 @@ pub trait MediaSender: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<MessageId>, RequestError>>;
 
     /// Sends a plain text message, optionally replying to `reply_to` and
-    /// attaching `reply_markup`.
+    /// attaching `reply_markup`. Returns the sent message's id: the bot only
+    /// ever needs that (the edit-before-forward prompt's record is keyed by
+    /// it), and returning the whole `Message` would force every test mock to
+    /// construct one.
     fn send_message(
         &self,
         chat_id: ChatId,
         text: String,
         reply_to: Option<MessageId>,
         reply_markup: Option<InlineKeyboardMarkup>,
-    ) -> BoxFuture<'_, Result<Message, RequestError>>;
+    ) -> BoxFuture<'_, Result<i64, RequestError>>;
+
+    /// Answers a callback query, optionally with a toast `text` shown to the
+    /// user who pressed the button.
+    fn answer_callback_query(
+        &self,
+        id: CallbackQueryId,
+        text: Option<String>,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
+
+    /// Rewrites a message's caption, always with HTML parse mode (every caller
+    /// in this bot renders escaped HTML: templates and edit-before-forward
+    /// links).
+    fn edit_message_caption(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        caption: String,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
+
+    /// Deletes a message (the edit-before-forward prompt after a forward).
+    fn delete_message(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
 
     /// Sets the chat's "typing / uploading …" indicator (cosmetic).
     fn send_chat_action(
@@ -129,7 +157,7 @@ impl MediaSender for Bot {
         text: String,
         reply_to: Option<MessageId>,
         reply_markup: Option<InlineKeyboardMarkup>,
-    ) -> BoxFuture<'_, Result<Message, RequestError>> {
+    ) -> BoxFuture<'_, Result<i64, RequestError>> {
         Box::pin(async move {
             let mut request = <Bot as Requester>::send_message(self, chat_id, text);
             if let Some(reply_to) = reply_to {
@@ -139,7 +167,48 @@ impl MediaSender for Bot {
             if let Some(markup) = reply_markup {
                 request = request.reply_markup(markup);
             }
-            request.await
+            request.await.map(|message| message.id.0 as i64)
+        })
+    }
+
+    fn answer_callback_query(
+        &self,
+        id: CallbackQueryId,
+        text: Option<String>,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            let mut request = <Bot as Requester>::answer_callback_query(self, id);
+            if let Some(text) = text {
+                request = request.text(text);
+            }
+            request.await.map(|_| ())
+        })
+    }
+
+    fn edit_message_caption(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        caption: String,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            <Bot as Requester>::edit_message_caption(self, chat_id, message_id)
+                .caption(caption)
+                .parse_mode(ParseMode::Html)
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn delete_message(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            <Bot as Requester>::delete_message(self, chat_id, message_id)
+                .await
+                .map(|_| ())
         })
     }
 
@@ -162,7 +231,7 @@ impl MediaSender for Bot {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     /// One scripted outcome, consumed front-to-back; the last entry repeats
     /// for further calls of the same method kind.
@@ -176,19 +245,30 @@ pub(crate) mod test_support {
         /// An error from `send_message` (replies are fire-and-forget, so an
         /// error is fine for tests).
         MessageErr,
+        /// A successful `send_message`, returning message id [`MockSender::SENT_ID`].
+        MessageOk,
+        EditOk,
+        EditErr,
     }
 
-    /// Replays a script and records the method names that were called.
+    /// Replays a script and records what was sent, so tests can assert the
+    /// user-visible text a path produced.
     pub(crate) struct MockSender {
         script: Mutex<Vec<Outcome>>,
         cursor: Mutex<usize>,
         calls: Mutex<Vec<&'static str>>,
+        messages: Mutex<Vec<String>>,
+        captions: Mutex<Vec<String>>,
+        answers: Mutex<Vec<Option<String>>>,
         /// Builds the error every `*Err` outcome returns (RequestError is not
         /// cloneable, so the factory recreates it per call).
         error: Box<dyn Fn() -> RequestError + Send + Sync>,
     }
 
     impl MockSender {
+        /// The message id a successful `send_message` reports.
+        pub(crate) const SENT_ID: i64 = 1;
+
         pub(crate) fn scripted(
             script: Vec<Outcome>,
             error: impl Fn() -> RequestError + Send + Sync + 'static,
@@ -197,6 +277,9 @@ pub(crate) mod test_support {
                 script: Mutex::new(script),
                 cursor: Mutex::new(0),
                 calls: Mutex::new(Vec::new()),
+                messages: Mutex::new(Vec::new()),
+                captions: Mutex::new(Vec::new()),
+                answers: Mutex::new(Vec::new()),
                 error: Box::new(error),
             }
         }
@@ -204,13 +287,28 @@ pub(crate) mod test_support {
         /// Method names in call order (e.g. `["send_media_group",
         /// "send_media_group"]` proves the fallback re-sent).
         pub(crate) fn calls(&self) -> Vec<&'static str> {
-            self.calls.lock().unwrap().clone()
+            self.calls.lock().clone()
+        }
+
+        /// Texts of the plain messages sent, in order.
+        pub(crate) fn messages(&self) -> Vec<String> {
+            self.messages.lock().clone()
+        }
+
+        /// Captions passed to `edit_message_caption`, in order.
+        pub(crate) fn captions(&self) -> Vec<String> {
+            self.captions.lock().clone()
+        }
+
+        /// Toast texts of the answered callback queries, in order.
+        pub(crate) fn answers(&self) -> Vec<Option<String>> {
+            self.answers.lock().clone()
         }
 
         fn next(&self, kind: &'static str) -> Outcome {
-            self.calls.lock().unwrap().push(kind);
-            let script = self.script.lock().unwrap();
-            let mut cursor = self.cursor.lock().unwrap();
+            self.calls.lock().push(kind);
+            let script = self.script.lock();
+            let mut cursor = self.cursor.lock();
             if script.is_empty() {
                 panic!("mock script exhausted: {kind}");
             }
@@ -274,15 +372,59 @@ pub(crate) mod test_support {
         fn send_message(
             &self,
             _chat_id: ChatId,
-            _text: String,
+            text: String,
             _reply_to: Option<MessageId>,
             _reply_markup: Option<InlineKeyboardMarkup>,
-        ) -> BoxFuture<'_, Result<Message, RequestError>> {
+        ) -> BoxFuture<'_, Result<i64, RequestError>> {
             Box::pin(async move {
+                self.messages.lock().push(text);
                 match self.next("send_message") {
+                    Outcome::MessageOk => Ok(MockSender::SENT_ID),
                     Outcome::MessageErr => Err(self.error()),
                     other => panic!("unexpected outcome {other:?} for send_message"),
                 }
+            })
+        }
+
+        fn answer_callback_query(
+            &self,
+            _id: CallbackQueryId,
+            text: Option<String>,
+        ) -> BoxFuture<'_, Result<(), RequestError>> {
+            // Always succeeds: the toast is cosmetic, so the script stays
+            // focused on the outcomes a test cares about.
+            Box::pin(async move {
+                self.calls.lock().push("answer_callback_query");
+                self.answers.lock().push(text);
+                Ok(())
+            })
+        }
+
+        fn edit_message_caption(
+            &self,
+            _chat_id: ChatId,
+            _message_id: MessageId,
+            caption: String,
+        ) -> BoxFuture<'_, Result<(), RequestError>> {
+            Box::pin(async move {
+                self.captions.lock().push(caption);
+                match self.next("edit_message_caption") {
+                    Outcome::EditOk => Ok(()),
+                    Outcome::EditErr => Err(self.error()),
+                    other => panic!("unexpected outcome {other:?} for edit_message_caption"),
+                }
+            })
+        }
+
+        fn delete_message(
+            &self,
+            _chat_id: ChatId,
+            _message_id: MessageId,
+        ) -> BoxFuture<'_, Result<(), RequestError>> {
+            // Deletion is fire-and-forget in every caller; always succeeds.
+            Box::pin(async move {
+                self.calls.lock().push("delete_message");
+                Ok(())
             })
         }
 
@@ -292,7 +434,7 @@ pub(crate) mod test_support {
             _action: ChatAction,
         ) -> BoxFuture<'_, Result<(), RequestError>> {
             Box::pin(async move {
-                self.calls.lock().unwrap().push("send_chat_action");
+                self.calls.lock().push("send_chat_action");
                 Ok(())
             })
         }

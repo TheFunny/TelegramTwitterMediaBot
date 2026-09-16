@@ -84,6 +84,10 @@ pub(crate) mod test_support {
             }
         }
 
+        pub(crate) fn chat_store(&self) -> &ChatStore {
+            &self.chat_store
+        }
+
         pub(crate) fn link_cache(&self) -> &LinkCache {
             &self.link_cache
         }
