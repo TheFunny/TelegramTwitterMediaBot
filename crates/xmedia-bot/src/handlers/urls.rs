@@ -50,7 +50,14 @@ pub async fn start_url_workers() {
                 let job = rx.lock().await.recv().await;
                 match job {
                     Some((message, url)) => {
-                        url_media(&CONTEXT, message.chat.id.0, message.id.0 as i64, &url).await
+                        url_media(
+                            &CONTEXT,
+                            message.chat.id.0,
+                            message.id.0 as i64,
+                            &url,
+                            PostSend::FromChat,
+                        )
+                        .await
                     }
                     None => break,
                 }
@@ -208,8 +215,20 @@ async fn dispatch_send(
     }
 }
 
+/// Whether a send also runs the chat's post-send actions. `/test` sends with
+/// them suppressed so a test can never forward to the channel or open the
+/// edit-before-forward prompt; a normal link uses whatever the chat is
+/// configured with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PostSend {
+    /// Apply the chat's `forward_channel_id` / `edit_before_forward`.
+    FromChat,
+    /// Send only: no channel forward, no edit prompt.
+    Suppressed,
+}
+
 /// Builds the send task from ready-made items, sharing the payload shape
-/// between the fresh-fetch and link-cache paths.
+/// between the fresh-fetch, link-cache and `/test` paths.
 #[allow(clippy::too_many_arguments)]
 fn build_send_task(
     chat_data: &ChatData,
@@ -219,7 +238,14 @@ fn build_send_task(
     caption: String,
     items: Vec<MediaItemPayload>,
     cache_data: Option<CachedPost>,
+    post_send: PostSend,
 ) -> Task {
+    // Notification ids stay set in both modes: a queued retry that
+    // dead-letters should still tell the chat.
+    let (edit_before_forward, forward_channel_id) = match post_send {
+        PostSend::FromChat => (chat_data.edit_before_forward, chat_data.forward_channel_id),
+        PostSend::Suppressed => (false, None),
+    };
     if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
         Task::SendAnimation {
             chat_id,
@@ -227,8 +253,8 @@ fn build_send_task(
             caption,
             animation: items.into_iter().next().unwrap(),
             source_url,
-            edit_before_forward: chat_data.edit_before_forward,
-            forward_channel_id: chat_data.forward_channel_id,
+            edit_before_forward,
+            forward_channel_id,
             notify_chat_id: Some(chat_id),
             notify_message_id: Some(reply_to_message_id),
             cache_data,
@@ -244,8 +270,8 @@ fn build_send_task(
             batch_index: 0,
             sent_message_ids: vec![],
             source_url,
-            edit_before_forward: chat_data.edit_before_forward,
-            forward_channel_id: chat_data.forward_channel_id,
+            edit_before_forward,
+            forward_channel_id,
             notify_chat_id: Some(chat_id),
             notify_message_id: Some(reply_to_message_id),
             cache_data,
@@ -253,7 +279,19 @@ fn build_send_task(
     }
 }
 
-async fn url_media(ctx: &AppContext<'_>, chat_id: i64, reply_to_message_id: i64, url: &str) {
+/// The per-URL pipeline: link cache → fetch → build → send → post-send.
+///
+/// `post_send` selects whether the chat's forward/edit settings apply: the URL
+/// workers pass [`PostSend::FromChat`], the `/test` command
+/// [`PostSend::Suppressed`]. Everything else (cache write, retry enqueue,
+/// dead-letter notification) is identical.
+pub(crate) async fn url_media(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to_message_id: i64,
+    url: &str,
+    post_send: PostSend,
+) {
     let reply_to = MessageId(reply_to_message_id as i32);
     if let Err(e) = ctx
         .sender
@@ -324,6 +362,7 @@ async fn url_media(ctx: &AppContext<'_>, chat_id: i64, reply_to_message_id: i64,
             caption,
             items,
             Some(cached),
+            post_send,
         );
         dispatch_send(ctx, chat_id, reply_to, &task, url).await;
         return;
@@ -392,6 +431,7 @@ async fn url_media(ctx: &AppContext<'_>, chat_id: i64, reply_to_message_id: i64,
                 caption,
                 items,
                 cache_data,
+                post_send,
             );
             // Hand the keep-alive temp dir (ugoira / bsky remux MP4) to the
             // retry registry: a queued retry runs after this function returns
@@ -449,7 +489,7 @@ mod tests {
             .put("twitter:1", &cached_photo_entry())
             .await;
 
-        url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
 
         // The cached file id went out as a group send; the permanent failure
         // then triggered the fire-and-forget reply (its mock error is fine).
@@ -477,7 +517,7 @@ mod tests {
             .put("twitter:1", &cached_photo_entry())
             .await;
 
-        url_media(&ctx, 1, 2, "https://x.com/u/status/1").await;
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
 
         assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
         // Success must not evict the entry.
@@ -498,7 +538,128 @@ mod tests {
 
         // No cache key → the fetch dispatcher returns Ok(None) without any
         // network; nothing is sent or replied.
-        url_media(&ctx, 1, 2, "https://example.com/not-a-post").await;
+        url_media(
+            &ctx,
+            1,
+            2,
+            "https://example.com/not-a-post",
+            PostSend::FromChat,
+        )
+        .await;
         assert_eq!(sender.calls(), vec!["send_chat_action"]);
+    }
+
+    // ── Send modes: the URL flow vs `/test` ─────────────────────────────
+
+    /// A chat that has both post-send actions configured.
+    async fn seed_post_send_settings(ctx: &AppContext<'_>) {
+        ctx.chat_store
+            .update(1, |data| {
+                data.forward_channel_id = Some(2);
+                data.edit_before_forward = true;
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn chat_settings_apply_to_the_normal_link_flow() {
+        let stores = TestStores::new();
+        let sender =
+            MockSender::scripted(vec![Outcome::GroupOk, Outcome::MessageOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_photo_entry())
+            .await;
+        seed_post_send_settings(&ctx).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
+
+        // Media group, then the edit prompt (edit-before-forward wins over the
+        // channel forward, which only runs once the prompt is confirmed).
+        assert_eq!(
+            sender.calls(),
+            vec!["send_chat_action", "send_media_group", "send_message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mode_sends_the_media_without_forwarding_or_editing() {
+        let stores = TestStores::new();
+        // Only the group send is scripted: any forward (copy_messages) or edit
+        // prompt (send_message) would panic with "unexpected outcome".
+        let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+        stores
+            .link_cache()
+            .put("twitter:1", &cached_photo_entry())
+            .await;
+        seed_post_send_settings(&ctx).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::Suppressed).await;
+
+        assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
+        // The send is otherwise ordinary: the post stays cached.
+        assert!(
+            stores
+                .link_cache()
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn send_mode_decides_whether_chat_actions_ride_along() {
+        let chat = ChatData {
+            forward_channel_id: Some(2),
+            edit_before_forward: true,
+            ..ChatData::default()
+        };
+
+        let with_chat = build_send_task(
+            &chat,
+            1,
+            2,
+            "https://x.com/u/status/1".into(),
+            "cap".into(),
+            vec![],
+            None,
+            PostSend::FromChat,
+        );
+        let Task::SendMediaSequence {
+            edit_before_forward,
+            forward_channel_id,
+            ..
+        } = with_chat
+        else {
+            panic!("expected a media sequence task");
+        };
+        assert!(edit_before_forward);
+        assert_eq!(forward_channel_id, Some(2));
+
+        let suppressed = build_send_task(
+            &chat,
+            1,
+            2,
+            "https://x.com/u/status/1".into(),
+            "cap".into(),
+            vec![],
+            None,
+            PostSend::Suppressed,
+        );
+        let Task::SendMediaSequence {
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            ..
+        } = suppressed
+        else {
+            panic!("expected a media sequence task");
+        };
+        assert!(!edit_before_forward, "`/test` must not open an edit prompt");
+        assert_eq!(forward_channel_id, None, "`/test` must not forward");
+        // Dead-letter notification still reaches the chat that asked.
+        assert_eq!(notify_chat_id, Some(1));
     }
 }
