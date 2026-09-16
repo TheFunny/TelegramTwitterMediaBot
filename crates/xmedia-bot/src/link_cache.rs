@@ -78,9 +78,15 @@ impl LinkCache {
                     conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
                     return Ok(None);
                 }
-                Ok(Some(serde_json::from_str::<CachedPost>(&payload).map_err(
-                    |e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )?))
+                match serde_json::from_str::<CachedPost>(&payload) {
+                    Ok(post) => Ok(Some(post)),
+                    Err(e) => {
+                        // Unreadable payload (e.g. an older schema): drop it
+                        // instead of re-failing the parse on every later hit.
+                        conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
+                        Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+                    }
+                }
             })
             .await;
         match result {
@@ -226,6 +232,32 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_entry_is_dropped_on_read() {
+        // A payload from an older schema must not be re-parsed on every hit:
+        // the row is removed and the read reports a miss.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("c.db");
+        let cache = LinkCache::new(crate::db::open_store(db_path.to_str().unwrap()).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
+                params!["twitter:1", "{not json", now_f64()],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            cache
+                .get("twitter:1", Duration::from_secs(3600))
+                .await
+                .is_none()
+        );
+        // Dropped, not left behind for the next hit.
+        assert_eq!(cache.clear(None).await, 0, "corrupted row still present");
     }
 
     #[tokio::test]

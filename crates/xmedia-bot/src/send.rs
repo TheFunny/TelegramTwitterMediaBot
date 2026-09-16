@@ -1146,9 +1146,13 @@ pub async fn forward_messages(sender: &dyn MediaSender, task: &Task) -> Result<(
 }
 
 /// One button per template name (column layout), then the confirm button.
+/// Sorted by name: the templates live in a `HashMap`, so an unsorted walk
+/// would reshuffle the buttons between prompts.
 pub fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardMarkup {
-    let mut rows = Vec::new();
-    for name in templates.keys() {
+    let mut names: Vec<&String> = templates.keys().collect();
+    names.sort();
+    let mut rows = Vec::with_capacity(names.len() + 1);
+    for name in names {
         rows.push(vec![InlineKeyboardButton::callback(
             name.clone(),
             format!("template|{name}"),
@@ -1486,6 +1490,23 @@ mod tests {
             assert!(delay >= 1.0, "attempts={attempts}: {delay}");
             assert!(delay <= 30.0, "attempts={attempts}: {delay}");
         }
+    }
+
+    #[test]
+    fn edit_markup_lists_templates_sorted_then_confirm() {
+        // Six names: a HashMap walk would land on this order by chance only
+        // 1 time in 720.
+        let templates: HashMap<String, String> = ["z", "a", "m", "q", "b", "y"]
+            .into_iter()
+            .map(|name| (name.to_string(), "[]".to_string()))
+            .collect();
+        let labels: Vec<String> = build_edit_markup(&templates)
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .map(|button| button.text.clone())
+            .collect();
+        assert_eq!(labels, ["a", "b", "m", "q", "y", "z", "↩️ Confirm"]);
     }
 
     #[test]

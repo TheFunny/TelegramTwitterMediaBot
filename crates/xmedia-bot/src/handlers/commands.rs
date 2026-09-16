@@ -31,7 +31,7 @@ pub(crate) enum Command {
         parse_with = "split"
     )]
     SetTemplate(String),
-    #[command(description = "Show chat state (debug)")]
+    #[command(description = "Show chat state (debug; admin only)")]
     BotDict,
     #[command(description = "Set site caption format", parse_with = "split")]
     SetFormat(String),
@@ -226,9 +226,28 @@ pub(crate) async fn execute_command(
             reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::BotDict => {
+            // Debug dump of the chat's persisted state: admin only (it echoes
+            // forward-channel ids and templates to whoever asks).
+            let sender_id = message
+                .from
+                .as_ref()
+                .map(|user| user.id.0 as i64)
+                .unwrap_or(-1);
+            if !CONFIG.admin_ids.contains(&sender_id) {
+                reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
+                return Ok(());
+            }
             let chat_data = CHAT_STORE.get(message.chat.id.0).await;
-            let debug = format!("{chat_data:?}");
-            let text = html_escape::encode_text(&debug).into_owned();
+            let debug = html_escape::encode_text(&format!("{chat_data:?}")).into_owned();
+            // A chat with many templates/edit records exceeds Telegram's 4096
+            // char message limit; the dump is plain text (no parse mode), so a
+            // plain byte-boundary cut is safe.
+            let end = debug.floor_char_boundary(MAX_DEBUG_DUMP_CHARS.min(debug.len()));
+            let text = if end < debug.len() {
+                format!("{}…", &debug[..end])
+            } else {
+                debug
+            };
             reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::SetFormat(arg) => {
@@ -388,6 +407,10 @@ pub async fn register_commands(bot: &Bot) -> Result<(), RequestError> {
 /// Telegram's plain-text message limit is 4096 chars; the report stays under
 /// it even for very large threads (many media lines + a long caption).
 const MAX_TEST_REPORT_CHARS: usize = 4000;
+
+/// Cap for the `/bot_dict` debug dump: the state is echoed as one plain-text
+/// message, so it must stay under Telegram's 4096-char limit.
+const MAX_DEBUG_DUMP_CHARS: usize = 3500;
 
 /// Builds the HTML report for the `/test` command: what the parser produced
 /// for a link (site, canonical URL, title/author/tags, caption and the media

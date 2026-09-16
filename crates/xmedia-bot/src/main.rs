@@ -108,6 +108,10 @@ async fn main() {
                 if pruned > 0 {
                     log::info!("link cache: pruned {pruned} expired entr(ies)");
                 }
+                let idle_limiters = crate::rate_limit::prune_idle();
+                if idle_limiters > 0 {
+                    log::debug!("rate limiter: dropped {idle_limiters} idle bucket(s)");
+                }
                 for (chat_id, prompt_message_id) in removed {
                     // If the prompt was already deleted, this fails with a
                     // 400 "message to edit not found" — log and ignore.

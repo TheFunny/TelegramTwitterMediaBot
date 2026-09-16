@@ -48,6 +48,19 @@ impl TokenBucket {
         }
     }
 
+    /// Applies the elapsed refill to `state`. Shared by [`Self::acquire`] and
+    /// the idle check so the two cannot drift apart.
+    fn refill(&self, state: &mut State) {
+        let now = tokio::time::Instant::now();
+        let elapsed = now
+            .saturating_duration_since(state.last_refill)
+            .as_secs_f64();
+        // Refill up to the capacity; a debt (negative balance) is repaid
+        // before any surplus accumulates.
+        state.tokens = (state.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        state.last_refill = now;
+    }
+
     /// Waits until `n` tokens are available, consuming them. The wait is
     /// bounded: the deficit is committed as debt and repaid over time, so a
     /// large acquire returns once its share of the refill budget has passed.
@@ -57,14 +70,7 @@ impl TokenBucket {
         // would make the future !Send).
         let wait = {
             let mut state = self.state.lock();
-            let now = tokio::time::Instant::now();
-            let elapsed = now
-                .saturating_duration_since(state.last_refill)
-                .as_secs_f64();
-            // Refill up to the capacity; a debt (negative balance) is repaid
-            // before any surplus accumulates.
-            state.tokens = (state.tokens + elapsed * self.refill_per_sec).min(self.capacity);
-            state.last_refill = now;
+            self.refill(&mut state);
             if state.tokens >= n {
                 state.tokens -= n;
                 return;
@@ -76,6 +82,14 @@ impl TokenBucket {
             debt / self.refill_per_sec
         };
         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+    }
+
+    /// True when the bucket has refilled to capacity: no debt outstanding, so
+    /// the chat has not sent anything recently.
+    fn is_idle(&self) -> bool {
+        let mut state = self.state.lock();
+        self.refill(&mut state);
+        state.tokens >= self.capacity
     }
 }
 
@@ -91,6 +105,18 @@ pub fn limiter_for(chat_id: i64) -> Arc<TokenBucket> {
         .entry(chat_id)
         .or_insert_with(|| Arc::new(TokenBucket::new(CAPACITY, REFILL_PER_SEC)))
         .clone()
+}
+
+/// Drops limiters that are idle (refilled to capacity, so the chat has not
+/// sent recently) and are not still held by an in-flight sender. The map
+/// would otherwise keep one bucket per chat that ever sent media, forever.
+/// Called from the periodic sweep; returns how many were dropped.
+pub fn prune_idle() -> usize {
+    let mut limiters = LIMITERS.lock();
+    let before = limiters.len();
+    // Lock order map → bucket, the only order taken anywhere.
+    limiters.retain(|_, bucket| Arc::strong_count(bucket) > 1 || !bucket.is_idle());
+    before - limiters.len()
 }
 
 #[cfg(test)]
@@ -132,5 +158,27 @@ mod tests {
             "elapsed {:?}",
             start.elapsed()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prune_idle_drops_full_unheld_buckets_only() {
+        // Held by this task: kept even at full capacity, a sender has it.
+        let held = limiter_for(9_001);
+        assert!(held.is_idle(), "a fresh bucket is full");
+        // Only the map holds this one and it is full → dropped.
+        limiter_for(9_002);
+        // Mid-debt (an acquire larger than the capacity): kept.
+        {
+            let bucket = Arc::new(TokenBucket::new(CAPACITY, REFILL_PER_SEC));
+            bucket.state.lock().tokens = -1.0;
+            LIMITERS.lock().insert(9_003, bucket);
+        }
+
+        assert!(prune_idle() >= 1);
+
+        let limiters = LIMITERS.lock();
+        assert!(limiters.contains_key(&9_001), "held bucket pruned");
+        assert!(!limiters.contains_key(&9_002), "idle unheld bucket kept");
+        assert!(limiters.contains_key(&9_003), "indebted bucket pruned");
     }
 }

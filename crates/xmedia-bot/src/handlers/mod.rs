@@ -157,7 +157,12 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
                 log::warn!("url workers not started; dropping link");
                 break;
             };
-            let _ = tx.send((message.clone(), url)).await;
+            // A closed channel means the workers are stopping (shutdown):
+            // report the dropped link instead of losing it silently.
+            if tx.send((message.clone(), url)).await.is_err() {
+                log::warn!("url workers stopped; dropping link");
+                break;
+            }
         }
     }
     respond(())
