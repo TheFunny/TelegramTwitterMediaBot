@@ -295,12 +295,18 @@ pub fn release_keep_alive(task: &Task) {
 
 pub const MAX_MEDIA_GROUP: usize = 9;
 
-/// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items.
-pub fn chunk_media_items<T: Clone>(items: Vec<T>) -> Vec<Vec<T>> {
-    items
-        .chunks(MAX_MEDIA_GROUP)
-        .map(|chunk| chunk.to_vec())
-        .collect()
+/// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items, moving the
+/// items out (no per-item clone).
+pub fn chunk_media_items<T>(items: Vec<T>) -> Vec<Vec<T>> {
+    let mut items = items.into_iter();
+    let mut batches = Vec::new();
+    loop {
+        let batch: Vec<T> = items.by_ref().take(MAX_MEDIA_GROUP).collect();
+        if batch.is_empty() {
+            return batches;
+        }
+        batches.push(batch);
+    }
 }
 
 /// Orders media for a Telegram media group: when photos and videos are

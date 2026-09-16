@@ -121,7 +121,9 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
         query.query,
         log_key(&query.query)
     );
-    match x_media::site::fetch(&query.query).await {
+    // No retries: the debounce plus a 1s/2s backoff would outlast the inline
+    // query the answer belongs to.
+    match x_media::site::fetch_once(&query.query).await {
         Ok(Some(fetched)) => {
             let mut results: Vec<InlineQueryResult> = Vec::new();
             // Inline results have the same 1024-char caption limit as regular

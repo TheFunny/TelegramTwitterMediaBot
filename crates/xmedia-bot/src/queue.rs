@@ -41,7 +41,13 @@ type DeadLetter = dyn Fn(Value, String) -> BoxFuture<'static, ()> + Send + Sync;
 
 pub struct PersistentTaskQueue {
     pool: std::sync::Arc<crate::db::DbPool>,
+    /// Wakes the workers when a row becomes leasable. `notify_one` stores a
+    /// permit, so nothing else may share it: a waiter that is not a worker
+    /// (the sweep) can consume the permit and leave the due row pending until
+    /// the next enqueue.
     notify: Arc<Notify>,
+    /// Wakes the lease-expiry sweep; `stop` is the only producer.
+    sweep_notify: Arc<Notify>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Vec<JoinHandle<()>>>,
     counter: AtomicU64,
@@ -88,6 +94,7 @@ impl PersistentTaskQueue {
         Self {
             pool,
             notify: Arc::new(Notify::new()),
+            sweep_notify: Arc::new(Notify::new()),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
@@ -119,12 +126,12 @@ impl PersistentTaskQueue {
             handles.push(tokio::spawn(worker.run_loop_supervised()));
         }
         // Periodic lease-expiry sweep: recovers rows a crashed/panicked
-        // worker left `in_progress` (the lock TTL bounds the wait). Woken by
-        // the same notify as the workers, so enqueue and stop interrupt the
-        // sleep; the first interval tick fires immediately (harmless extra
-        // recovery at startup).
+        // worker left `in_progress` (the lock TTL bounds the wait). Its own
+        // notify (not the workers'): sharing that one let this task consume a
+        // `notify_one` permit meant for a worker, which then slept through a
+        // due row until some later event. Only `stop` wakes it.
         let sweep_pool = std::sync::Arc::clone(&self.pool);
-        let sweep_notify = Arc::clone(&self.notify);
+        let sweep_notify = Arc::clone(&self.sweep_notify);
         let sweep_stop = Arc::clone(&self.stop);
         handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -150,6 +157,7 @@ impl PersistentTaskQueue {
     pub async fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
+        self.sweep_notify.notify_waiters();
         let handles = std::mem::take(&mut *self.worker.lock());
         for handle in handles {
             let _ = handle.await;

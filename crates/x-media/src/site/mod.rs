@@ -375,10 +375,24 @@ pub async fn validate_all() -> Vec<(&'static str, String)> {
 /// are returned immediately; retrying them only wastes attempts against the
 /// source site.
 pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
+    fetch_with_attempts(url, MAX_FETCH_ATTEMPTS).await
+}
+
+/// [`fetch`] without the retry backoff (one attempt). For callers with a
+/// short deadline: an inline query's answer window is measured in seconds, so
+/// the 1s + 2s retry sleeps would outlast the query the answer belongs to.
+pub async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
+    fetch_with_attempts(url, 1).await
+}
+
+/// Total attempts of the retried [`fetch`] (3: the initial try plus two).
+const MAX_FETCH_ATTEMPTS: u32 = 3;
+
+async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>, FetchError> {
     let Some(site) = find_site(url) else {
         return Ok(None);
     };
-    for attempt in 0..3u32 {
+    for attempt in 0..attempts.max(1) {
         match site.fetch_from_url(url).await {
             Ok(fetched) => {
                 // Per-request detail: debug only, keyed by the post id.
@@ -391,7 +405,7 @@ pub async fn fetch(url: &str) -> Result<Option<Fetched>, FetchError> {
                 return Ok(Some(fetched));
             }
             Err(err) => {
-                if site.is_retryable(&err) && attempt < 2 {
+                if site.is_retryable(&err) && attempt + 1 < attempts {
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 } else {
                     return Err(err);
