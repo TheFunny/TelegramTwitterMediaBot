@@ -3,12 +3,12 @@
 //! URL is blocked by hotlink protection; the bot downloads the file itself
 //! and uploads it via multipart).
 
-use crate::db::unix_now;
+use crate::db::{now_f64, unix_now};
 use crate::handlers::{CHAT_STORE, LINK_CACHE, TASK_QUEUE, log_key};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost, LinkCache};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
-use crate::queue::QueueError;
+use crate::queue::{PersistentTaskQueue, QueueError};
 use crate::state::EditMessage;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -334,7 +334,7 @@ pub fn is_media_fetch_failure(e: &ApiError) -> bool {
         "timeout",
         // Oversized photos (width + height > 10000 px) are rejected on URL
         // sends too; route them to the download-and-resize fallback.
-        "PHOTO_INVALID_DIMENSIONS",
+        "photo_invalid_dimensions",
     ];
     let description = e.to_string().to_lowercase();
     MARKERS.iter().any(|marker| description.contains(marker))
@@ -1279,15 +1279,7 @@ pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_id
                 delay_seconds,
                 task,
             }) => {
-                let payload = serde_json::to_value(task).expect("task serializes");
-                let run_after = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0)
-                    + delay_seconds;
-                if let Err(e) = TASK_QUEUE.enqueue(payload, run_after).await {
-                    log::error!("failed to enqueue forward retry: {e}");
-                }
+                enqueue_retry(&TASK_QUEUE, *task, delay_seconds).await;
             }
             Err(SendError::Permanent { message, .. }) => {
                 notify_failure(
@@ -1299,6 +1291,18 @@ pub async fn post_send_actions(sender: &dyn MediaSender, task: &Task, message_id
                 .await;
             }
         }
+    }
+}
+
+/// Enqueues a task for a later attempt (retry / forward resume). When the
+/// enqueue itself fails the task can never be sent again, so its keep-alive
+/// temp media is released instead of leaking until process exit.
+pub async fn enqueue_retry(queue: &PersistentTaskQueue, task: Task, delay_seconds: f64) {
+    let payload = serde_json::to_value(&task).expect("task serializes");
+    let run_after = now_f64() + delay_seconds;
+    if let Err(e) = queue.enqueue(payload, run_after).await {
+        log::error!("failed to enqueue retry: {e}");
+        release_keep_alive(&task);
     }
 }
 
@@ -1381,6 +1385,13 @@ async fn send_media_or_animation(
 
 /// Dead-letter callback wired to the queue in main: notifies the task's chat.
 pub async fn dead_letter_notify(payload: serde_json::Value, message: String) {
+    // A dead-lettered task never runs again. The queue dead-letters retry
+    // exhaustion itself (the handler is not called again), so this is the
+    // only place that sees the final payload — release the keep-alive temp
+    // media the fetch pipeline handed over, or it lives until process exit.
+    if let Ok(task) = serde_json::from_value::<Task>(payload.clone()) {
+        release_keep_alive(&task);
+    }
     let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
     let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
     if notify_chat_id.is_some() {
@@ -1485,6 +1496,9 @@ mod tests {
             "Bad Request: EMPTY_WEB_MEDIA",
             "Bad Request: webpage_curl_failed",
             "Bad Request: request timeout",
+            // Telegram sends the code in upper case; the comparison is against
+            // the lower-cased description.
+            "Bad Request: PHOTO_INVALID_DIMENSIONS: width and height must be <= 10000",
         ] {
             let api = ApiError::Unknown(description.to_string());
             assert!(is_media_fetch_failure(&api), "{description}");
@@ -1810,5 +1824,36 @@ mod tests {
             forward_messages(&sender, &task).await,
             Err(SendError::Permanent { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn dead_letter_releases_keep_alive_temp_media() {
+        // A task that exhausts its retries is dead-lettered by the queue
+        // without the handler running again: the keep-alive temp dir the
+        // fetch pipeline handed over must not outlive the task.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ugoira.mp4");
+        std::fs::write(&file, b"not-a-real-mp4").unwrap();
+        let mut task = sequence_task(file.to_str().unwrap());
+        if let Task::SendMediaSequence {
+            notify_chat_id,
+            notify_message_id,
+            ..
+        } = &mut task
+        {
+            // No chat to notify → no Bot is built by the notify path.
+            *notify_chat_id = None;
+            *notify_message_id = None;
+        }
+        let dir_path = dir.path().to_path_buf();
+        KEEP_ALIVE.lock().push(dir);
+
+        let payload = serde_json::to_value(&task).unwrap();
+        dead_letter_notify(payload, "task failed after 2 retries".into()).await;
+
+        assert!(
+            !KEEP_ALIVE.lock().iter().any(|dir| dir.path() == dir_path),
+            "dead-lettered task kept its temp media alive"
+        );
     }
 }

@@ -3,7 +3,6 @@
 
 use super::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE, log_key, reply};
 use crate::config::Config;
-use crate::db::now_f64;
 use crate::link_cache::{CachedMediaKind, CachedPost, LinkCache};
 use crate::media_sender::MediaSender;
 use crate::queue::PersistentTaskQueue;
@@ -174,14 +173,6 @@ fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
     }
 }
 
-pub(crate) async fn enqueue_retry(queue: &PersistentTaskQueue, task: Task, delay_seconds: f64) {
-    let payload = serde_json::to_value(task).expect("task serializes");
-    let run_after = now_f64() + delay_seconds;
-    if let Err(e) = queue.enqueue(payload, run_after).await {
-        log::error!("failed to enqueue retry: {e}");
-    }
-}
-
 /// Sends a task and handles the outcome: post-send actions on success, retry
 /// enqueue on retryable failure, reply + link-cache invalidation on
 /// permanent failure (a stale cached file id must not repeat forever).
@@ -216,7 +207,7 @@ async fn dispatch_send(
                 "send for [key={}] failed, queued for retry in {delay_seconds:.1}s",
                 log_key(url)
             );
-            enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
+            send::enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
             let _ = reply(
                 ctx.sender,
                 chat_id,

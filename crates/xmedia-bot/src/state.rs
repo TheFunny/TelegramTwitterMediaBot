@@ -102,19 +102,22 @@ impl ChatStore {
         }
     }
 
+    /// The per-chat async lock serializing get→mutate→set cycles.
+    fn lock_for(&self, chat_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .lock()
+            .entry(chat_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Serializes a get→mutate→set cycle per chat: concurrent handler tasks
     /// (the batch-forward design spawns several per chat) each snapshot the
     /// same `ChatData` and last-writer-wins would silently drop mutations,
     /// e.g. a second `edit_message` record. The per-chat lock makes the
     /// cycle atomic. Returns the closure's result.
     pub async fn update<R>(&self, chat_id: i64, f: impl FnOnce(&mut ChatData) -> R) -> R {
-        let lock = {
-            let mut locks = self.locks.lock();
-            locks
-                .entry(chat_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
+        let lock = self.lock_for(chat_id);
         let _guard = lock.lock().await;
         let mut data = self.get(chat_id).await;
         let r = f(&mut data);
@@ -128,43 +131,45 @@ impl ChatStore {
     pub async fn prune_expired(&self, ttl: Duration) -> Vec<(i64, i64)> {
         let now = unix_now();
         let ttl_secs = ttl.as_secs() as i64;
-        let mut removed = Vec::new();
-        // Chats with no live edit records: evicted from the cache (and their
-        // per-chat lock) so the cache stays bounded to active prompts. The DB
-        // keeps the row; the next get() reloads it.
-        let mut evicted_chats = Vec::new();
-        let changed: Vec<(i64, ChatData)> = {
-            let mut cache = self.cache.lock();
-            let mut out = Vec::new();
-            for (chat_id, data) in cache.iter_mut() {
-                let keys: Vec<i64> = data.edit_message.keys().copied().collect();
-                let mut kept = HashMap::new();
-                for key in keys {
-                    if let Some(entry) = data.edit_message.get(&key) {
-                        if entry.created_at + ttl_secs > now {
-                            kept.insert(key, entry.clone());
-                        } else {
-                            removed.push((*chat_id, key));
-                        }
-                    }
-                }
-                if kept.len() != data.edit_message.len() {
-                    // Persist the pruned row (removes expired records from
-                    // the DB too, not just the cache).
-                    data.edit_message = kept;
-                    out.push((*chat_id, data.clone()));
-                }
-                if data.edit_message.is_empty() {
-                    evicted_chats.push(*chat_id);
-                }
-            }
-            // Lock order: update() takes the per-chat lock before the cache
-            // lock, so prune must not hold the cache lock while taking locks.
-            drop(cache);
-            out
+        // Chats that may have an expired record, from a cache snapshot; the
+        // pruning itself re-reads and writes under the per-chat lock below
+        // (see the eviction note). Takes no lock of its own, so a chat
+        // appearing later is simply picked up by the next sweep.
+        let candidates: Vec<i64> = {
+            let cache = self.cache.lock();
+            cache
+                .iter()
+                .filter(|(_, data)| {
+                    data.edit_message
+                        .values()
+                        .any(|entry| entry.created_at + ttl_secs <= now)
+                })
+                .map(|(chat_id, _)| *chat_id)
+                .collect()
         };
-        for (chat_id, data) in changed {
-            self.set(chat_id, &data).await;
+        let mut removed = Vec::new();
+        let mut evicted_chats = Vec::new();
+        for chat_id in candidates {
+            let lock = self.lock_for(chat_id);
+            let _guard = lock.lock().await;
+            let mut data = self.get(chat_id).await;
+            let before = data.edit_message.len();
+            data.edit_message.retain(|key, entry| {
+                if entry.created_at + ttl_secs > now {
+                    return true;
+                }
+                removed.push((chat_id, *key));
+                false
+            });
+            if data.edit_message.len() != before {
+                self.set(chat_id, &data).await;
+            }
+            // Chats with no live edit records: evicted from the cache (and
+            // their per-chat lock) so the cache stays bounded to active
+            // prompts. The DB keeps the row; the next get() reloads it.
+            if data.edit_message.is_empty() {
+                evicted_chats.push(chat_id);
+            }
         }
         if !evicted_chats.is_empty() {
             let mut cache = self.cache.lock();
@@ -221,6 +226,68 @@ mod tests {
             data.edit_message.len(),
             4,
             "concurrent get→mutate→set must not drop records"
+        );
+    }
+
+    fn edit_entry(chat_id: i64, created_at: i64) -> EditMessage {
+        EditMessage {
+            url: "https://x.com/u/status/1".into(),
+            chat_id,
+            forward_message_ids: vec![9],
+            template: String::new(),
+            created_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_removes_only_expired_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open_store(dir.path().join("p.db").to_str().unwrap()).unwrap();
+        let store = ChatStore::new(pool);
+        let now = unix_now();
+        store
+            .update(7, |data| {
+                data.template.insert("t".into(), "[]".into());
+                data.edit_message.insert(1, edit_entry(7, now - 3600));
+                data.edit_message.insert(2, edit_entry(7, now));
+            })
+            .await;
+
+        let removed = store.prune_expired(Duration::from_secs(60)).await;
+
+        assert_eq!(removed, vec![(7, 1)]);
+        let data = store.get(7).await;
+        assert!(data.edit_message.contains_key(&2), "live record pruned");
+        assert_eq!(
+            data.template.get("t").map(String::as_str),
+            Some("[]"),
+            "unrelated state lost by the prune"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_eviction_keeps_the_persisted_state() {
+        // Every record expires → the chat is evicted from the cache; the
+        // pruned state must already be in the DB when that happens.
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open_store(dir.path().join("p.db").to_str().unwrap()).unwrap();
+        let store = ChatStore::new(pool);
+        store
+            .update(8, |data| {
+                data.template.insert("keep".into(), "[]".into());
+                data.edit_message.insert(1, edit_entry(8, 0));
+            })
+            .await;
+
+        let removed = store.prune_expired(Duration::from_secs(60)).await;
+
+        assert_eq!(removed, vec![(8, 1)]);
+        let data = store.get(8).await;
+        assert!(data.edit_message.is_empty());
+        assert_eq!(
+            data.template.get("keep").map(String::as_str),
+            Some("[]"),
+            "eviction dropped state the DB never received"
         );
     }
 }
