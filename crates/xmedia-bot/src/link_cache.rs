@@ -198,6 +198,49 @@ mod tests {
         }
     }
 
+    /// A payload written before the title/content split has no `content`
+    /// field. It must still read back — the cache deletes what it cannot
+    /// parse — with its text left where it was stored (`title`) and the
+    /// caption it replays untouched. No migration: a self-hosted cache entry
+    /// lives one TTL, and moving the text would only reshuffle `/set_format`
+    /// placeholders until it expires.
+    #[tokio::test]
+    async fn pre_split_entry_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LinkCache::new(
+            crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
+        );
+        let legacy = serde_json::json!({
+            "url": "https://x.com/u/status/1",
+            "caption": "https://x.com/u/status/1\n<a href=\"au\">a</a>: old text",
+            "title": "old text",
+            "author": "a",
+            "author_url": "au",
+            "tags": "",
+            "sensitive": false,
+            "media": [{"kind": "photo", "file_id": "AgAC..."}]
+        });
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("c.db")).unwrap();
+            conn.execute(
+                "INSERT INTO link_cache (url, payload, created_at) VALUES (?1, ?2, ?3)",
+                params!["twitter:1", legacy.to_string(), now_f64()],
+            )
+            .unwrap();
+        }
+
+        let got = cache
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .expect("a pre-split payload must not be dropped");
+        assert_eq!(got.title, "old text");
+        assert_eq!(got.content, "");
+        assert_eq!(
+            got.caption,
+            "https://x.com/u/status/1\n<a href=\"au\">a</a>: old text"
+        );
+    }
+
     #[tokio::test]
     async fn put_get_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
