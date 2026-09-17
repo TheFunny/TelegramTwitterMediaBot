@@ -68,6 +68,9 @@
 | `playurl`（仅调研用，未采用） | `fnval=1` 匿名给 durl：720P=9.18 MiB / 360P=2.97 MiB；`fnval=4048` 匿名 DASH 上限仅 480P |
 | `dyn_archive` 字段 | 有 `aid/bvid/cover/title/duration_text`，**没有 `cid`**（所以发流要再来一次 `view` 请求） |
 | **风控阶梯（同一 IP 连续请求后实测）** | ① 无 cookie → `-352`；② 仅 `buvid3` → 仍 `-352`；③ `buvid3`+`buvid4`（取自匿名 `/x/frontend/finger/spi`）→ **`code:0` 恢复**；④ 继续高频请求后 → 连同 buvid 一起 `-352`（此时只有登录 cookie 或换 IP） |
+| **正文位置（24 条真实动态逐条审计）** | 有正文的动态都在 `module_dynamic.desc.text`（图文/转发/纯文字，含 34–193 字样本）；**AV（视频投稿）动态 `desc` 恒为 `null`**，内容在 `major.archive.title` / `.desc` 卡片里 → 已做 title 回退 |
+| feed 与 detail 的差异 | `feed/space` 的 item 会把 `desc.text` 挖空，**只有 detail 有正文** → 排查时不要用 feed 数据判断正文缺失 |
+| 不存在的 19 位 id | `4101105 请求数据发生错误`（提示可重试，但只出现在不可能存在的 id 上）→ 仍归入永久错误，见 `code_error` 注释 |
 
 测试样本（live 测试用）：
 
@@ -117,6 +120,9 @@ crates/x-media/src/site/bilibili/model.rs      # 纯 Deserialize DTO（全 Optio
   - `major.archive.cover` → 1 张 `Illustration`（视频不发流）。
   - 转发且自身无媒体 → 递归取 `orig` 的媒体；正文拼 `//@{原作者}:\n{原文}`。
   - 其他 major（PGC/ARTICLE/MUSIC/LIVE/COMMON）不建模 → 无媒体，走既有 "No media found"。
+- **正文 / title**：`module_dynamic.desc.text`；为空时回退到 **`major.archive.title`**。
+  实测（24 条真实动态审计 + 9 条 AV 动态）AV 动态（视频投稿）的 `desc` 恒为 `null`——它的"内容"就是卡片，
+  不回退则所有视频动态的 `title`/`{title}` 都是空的。有正文的动态（图文/转发/纯文字）`desc.text` 实测正常。
 - **caption**（与 misskey 同形）：`{opus 链接}\n<a href="space.bilibili.com/{mid}">{name}</a>: {正文}`；
   `RenderData` 的 `{tags}` 来自话题名；正文由既有 `truncate_caption` 截断。
 - **注册表**：`SITES` 末尾追加 → `/set_format` 白名单、链接缓存、启动校验、日志前缀全部自动生效。

@@ -9,6 +9,9 @@
 //! `x/player/playurl` and its size/quality chasing — the cover plus the post
 //! link is what the operator asked for.
 //!
+//! Text: a post's own body (`module_dynamic.desc.text`); for a 视频投稿动态
+//! the body is empty by construction, so the archive card's title stands in.
+//!
 //! `b23.tv` short links are not matched: most of them point at videos, which
 //! this adapter does not handle, and matching them would turn a silently
 //! ignored link into the bot's "Failed to fetch media" reply.
@@ -221,7 +224,10 @@ pub async fn fetch(dynamic_id: &str) -> Result<model::Item, FetchError> {
 /// error on purpose: the queue retries them with backoff instead of dropping
 /// the post. A removed or nonexistent dynamic answers `500` (verified
 /// 2026-09-17; the older `4101147` is kept because nazurin still documents
-/// it) — permanent, so a dead link is not retried.
+/// it) — permanent, so a dead link is not retried. Codes that were never
+/// observed on a live post (e.g. `4101105 请求数据发生错误`, which only ever
+/// came back for ids that cannot exist) stay on the permanent arm too: its
+/// message hints at a retry, but the user-visible outcome is the same.
 fn code_error(code: i64, message: &str) -> Option<FetchError> {
     match code {
         0 => None,
@@ -301,6 +307,34 @@ fn desc_text(item: &model::Item) -> &str {
         .unwrap_or_default()
 }
 
+fn archive_title(item: &model::Item) -> Option<&str> {
+    item.modules
+        .as_ref()
+        .and_then(|modules| modules.module_dynamic.as_ref())
+        .and_then(|dynamic| dynamic.major.as_ref())
+        .and_then(|major| major.archive.as_ref())
+        .and_then(|archive| archive.title.as_deref())
+        .filter(|title| !title.trim().is_empty())
+}
+
+/// The dynamic's own words: its body, or the attached video's title when the
+/// body is empty.
+///
+/// A 视频投稿动态 (`MAJOR_TYPE_ARCHIVE`) carries **no body at all** — `desc`
+/// comes back `null`, the content being the archive card (verified on 9 live
+/// AV dynamics 2026-09-17). Falling back to the card title is what keeps
+/// `title` (and `{title}` in caption formats) populated for the most common
+/// dynamic type, mirroring pixiv, whose `title` is the artwork title rather
+/// than post text.
+fn own_text(item: &model::Item) -> &str {
+    let body = desc_text(item);
+    if body.trim().is_empty() {
+        archive_title(item).unwrap_or_default()
+    } else {
+        body
+    }
+}
+
 fn topic_name(item: &model::Item) -> &str {
     item.modules
         .as_ref()
@@ -313,11 +347,11 @@ fn topic_name(item: &model::Item) -> &str {
 /// The post's text: its own plus the quoted original's when it is a forward,
 /// marked the way bilibili's web UI does (`//@author:`).
 fn text_of(item: &model::Item) -> String {
-    let own = desc_text(item);
+    let own = own_text(item);
     let Some(orig) = item.orig.as_deref() else {
         return own.to_string();
     };
-    let orig_text = desc_text(orig);
+    let orig_text = own_text(orig);
     if orig_text.is_empty() {
         return own.to_string();
     }
@@ -616,6 +650,57 @@ mod tests {
         assert!(matches!(fetched.media[0], Media::Illustration { .. }));
     }
 
+    /// A 视频投稿动态 (`MAJOR_TYPE_ARCHIVE`) has **no body** — the API answers
+    /// `desc: null` — so the archive card's title is the post's content and
+    /// must fill `title` / `{title}` (regression: it used to stay empty).
+    #[test]
+    fn from_item_video_dynamic_uses_archive_title() {
+        let major = serde_json::json!({
+            "type": "MAJOR_TYPE_ARCHIVE",
+            "archive": {
+                "bvid": "BV1JTtt6JEZu",
+                "cover": "http://i0.hdslb.com/bfs/archive/c.jpg",
+                "title": "GTX760游戏性能测试，二手显卡尚能战否？",
+                "desc": "入手一张2GB显存的七彩虹GTX760",
+            },
+        });
+        let item = {
+            let mut json = item_json(major, "");
+            json["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
+            json
+        };
+        let fetched = parse(item.clone());
+
+        assert_eq!(fetched.title, "GTX760游戏性能测试，二手显卡尚能战否？");
+        assert!(
+            fetched
+                .caption
+                .ends_with(": GTX760游戏性能测试，二手显卡尚能战否？"),
+            "{}",
+            fetched.caption
+        );
+        assert_eq!(
+            fetched.render_fields().unwrap().2,
+            "GTX760游戏性能测试，二手显卡尚能战否？"
+        );
+        assert_eq!(fetched.media.len(), 1);
+
+        // Forwarding a video dynamic: the quoted card title lands after the
+        // `//@` marker, and the quoted cover becomes the media.
+        let mut forward = item_json(serde_json::Value::Null, "");
+        forward["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
+        forward["orig"] = item;
+        let fetched = parse(forward);
+        assert_eq!(
+            fetched.title,
+            "//@索尼音乐中国:\nGTX760游戏性能测试，二手显卡尚能战否？"
+        );
+        assert_eq!(
+            fetched.media[0].url(),
+            "https://i0.hdslb.com/bfs/archive/c.jpg"
+        );
+    }
+
     /// A forward shell carries the quote's text and, when it has no media of
     /// its own, the quote's images.
     #[test]
@@ -768,6 +853,24 @@ mod tests {
         };
         assert!(fetched.media.is_empty());
         assert!(!fetched.title.trim().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to api.bilibili.com"]
+    async fn live_fetch_video_dynamic_uses_archive_title() {
+        // 索尼音乐中国's AV dynamic: no body, so the video title is the text.
+        let Some(fetched) = live_fetch("https://t.bilibili.com/1248717597691609105").await else {
+            return;
+        };
+        assert!(!fetched.title.trim().is_empty(), "{fetched:?}");
+        assert!(
+            fetched.caption.contains(&fetched.title),
+            "{}",
+            fetched.caption
+        );
+        let urls: Vec<&str> = fetched.media.iter().map(|m| m.url()).collect();
+        assert_eq!(urls.len(), 1, "{urls:?}");
+        assert!(urls[0].contains("/bfs/archive/"), "{urls:?}");
     }
 
     /// Fetches a live dynamic, skipping the assertion when bilibili

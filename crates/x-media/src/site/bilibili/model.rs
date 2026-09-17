@@ -97,6 +97,10 @@ pub(crate) struct Archive {
     /// video itself is deliberately not resolved, see the module docs).
     #[serde(default)]
     pub(crate) cover: Option<String>,
+    /// The video's title. An AV dynamic has no body of its own (`desc` comes
+    /// back `null`), so this card title is the post's content.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
