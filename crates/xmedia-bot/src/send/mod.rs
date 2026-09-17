@@ -18,6 +18,7 @@ use crate::media_sender::MediaSender;
 use input_media::{build_media_group, input_file_for, item_url};
 use post_send::{cache_animation_send, cache_sent_task};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::sync::LazyLock;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InputFile, InputMedia, MessageId};
@@ -388,6 +389,61 @@ fn updated_sequence_task(task: &Task, batch_index: usize, sent_message_ids: Vec<
     updated
 }
 
+/// The caption's text tail: everything after the author link, provided it
+/// really is the post's text.
+///
+/// `text` is the *escaped* title + content the caption embeds; the caption may
+/// have been truncated inside it, in which case only its prefix is present, so
+/// the tail only has to match the text's start. `None` for a caption with
+/// another layout — pixiv's title-inside-a-link, a `/set_format` that moves
+/// `{title}`/`{content}` off the author line — which is left unquoted instead
+/// of guessing where the text begins.
+fn text_tail<'c>(caption: &'c str, text: &str) -> Option<&'c str> {
+    let (_, tail) = caption.rsplit_once("</a>: ")?;
+    let visible = tail.strip_suffix('\u{2026}').unwrap_or(tail);
+    (!visible.is_empty() && text.starts_with(visible)).then_some(tail)
+}
+
+/// The text a task's caption embeds, read from the same cache snapshot the
+/// caption came from: `title` and `content` joined the way the sites' built-in
+/// captions join them.
+fn task_text(task: &Task) -> String {
+    task.cache_data()
+        .map(|data| x_media::site::compose_text(&data.title, &data.content))
+        .unwrap_or_default()
+}
+
+/// Wraps the post's text inside the caption in an expandable blockquote once
+/// that text is long enough that the message would otherwise be a wall of text
+/// (`threshold` is `CAPTION_QUOTE_TEXT_CHARS`; `0` disables the wrap). The URL
+/// and the author line stay outside the quote.
+///
+/// Applied at the send boundary, after the caller's `truncate_caption`:
+/// Telegram measures a caption *after entities parsing*, so the tags cost no
+/// length and a wrapped caption cannot exceed the 1024-character limit.
+/// Retries replay the task's (unwrapped) caption, so the decision is remade on
+/// every attempt — changing the threshold takes effect immediately.
+///
+/// A caption that already carries a blockquote is left as it is: the API
+/// rejects nested ones ("all other entities can't contain each other"), and a
+/// user-written `/set_format` template may contain one.
+pub(crate) fn quote_long_caption<'a>(
+    caption: &'a str,
+    text: &str,
+    threshold: usize,
+) -> Cow<'a, str> {
+    if threshold == 0 || caption.contains("<blockquote") || text.chars().count() < threshold {
+        return Cow::Borrowed(caption);
+    }
+    let Some(tail) = text_tail(caption, text) else {
+        return Cow::Borrowed(caption);
+    };
+    let prefix = &caption[..caption.len() - tail.len()];
+    Cow::Owned(format!(
+        "{prefix}<blockquote expandable>{tail}</blockquote>"
+    ))
+}
+
 /// Sends the media batches starting at `task.batch_index`, extending
 /// `sent_message_ids`. Returns all sent message ids on full success; on
 /// failure returns a [`SendError`] whose task carries the resumed state.
@@ -406,6 +462,10 @@ pub async fn send_media_sequence(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
     };
     let chat_id = *chat_id;
     let reply_to = *reply_to_message_id;
+    // A long post is quoted so the message reads as a card rather than a wall
+    // of text; the text comes from the same cache snapshot as the caption.
+    let text = task_text(task);
+    let caption = quote_long_caption(caption, &text, ctx.config.caption_quote_text_chars);
     let mut sent = sent_message_ids.clone();
     // File ids accumulated across batches for the link cache. Only a fresh
     // (non-resumed) full send populates the cache.
@@ -414,7 +474,7 @@ pub async fn send_media_sequence(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
     for idx in *batch_index..media_batches.len() {
         let batch = &media_batches[idx];
         let caption = if idx == 0 {
-            Some(caption.as_str())
+            Some(caption.as_ref())
         } else {
             None
         };
@@ -515,6 +575,10 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
     };
     let chat_id = *chat_id;
     let reply_to = *reply_to_message_id;
+    // Same long-post quoting as the media-group path (see
+    // `quote_long_caption`); both sends below share this string.
+    let text = task_text(task);
+    let caption = quote_long_caption(caption, &text, ctx.config.caption_quote_text_chars);
     let (media_url, has_spoiler) = match animation {
         MediaItemPayload::Animation {
             media, has_spoiler, ..
@@ -536,7 +600,7 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
         ctx.sender,
         chat_id,
         reply_to,
-        caption,
+        &caption,
         has_spoiler,
         url_file,
     )
@@ -571,7 +635,7 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
                         ctx.sender,
                         chat_id,
                         reply_to,
-                        caption,
+                        &caption,
                         has_spoiler,
                         animation.media,
                     )
@@ -930,10 +994,16 @@ mod tests {
     }
 
     fn sequence_task(media: &str) -> Task {
+        sequence_task_with(media, "cap", None)
+    }
+
+    /// A media-group task; `text` (when given) rides in the link-cache
+    /// snapshot as `content`, which is where the quote threshold reads it.
+    fn sequence_task_with(media: &str, caption: &str, text: Option<&str>) -> Task {
         Task::SendMediaSequence {
             chat_id: 1,
             reply_to_message_id: 2,
-            caption: "cap".into(),
+            caption: caption.into(),
             media_batches: vec![vec![MediaItemPayload::Photo {
                 media: media.to_string(),
                 has_spoiler: false,
@@ -947,7 +1017,99 @@ mod tests {
             forward_channel_id: None,
             notify_chat_id: Some(1),
             notify_message_id: Some(2),
-            cache_data: None,
+            // The snapshot splits the post's text into title/content the way a
+            // real fetch does; the quote threshold joins them again.
+            cache_data: text.map(|text| CachedPost {
+                url: "https://x.com/u/status/1".into(),
+                caption: caption.into(),
+                title: String::new(),
+                content: text.into(),
+                author: "me".into(),
+                author_url: "https://x.com/u".into(),
+                tags: String::new(),
+                sensitive: false,
+                media: vec![],
+            }),
+        }
+    }
+
+    /// A media-group task whose built-in caption carries `text` behind the
+    /// author link — the shape the quote threshold locates the text in.
+    fn sequence_task_with_text(media: &str, text: &str) -> Task {
+        let caption =
+            format!("https://x.com/u/status/1\n<a href=\"https://x.com/u\">me</a>: {text}");
+        sequence_task_with(media, &caption, Some(text))
+    }
+
+    #[test]
+    fn quote_long_caption_wraps_only_the_text_tail() {
+        let text = "一二三四五";
+        let prefix = "https://x.com/u/status/1\n<a href=\"https://x.com/u\">me</a>: ";
+        let caption = format!("{prefix}{text}");
+
+        // Only the text goes inside the quote; the URL and author line stay
+        // outside.
+        assert_eq!(
+            quote_long_caption(&caption, text, 5),
+            format!("{prefix}<blockquote expandable>{text}</blockquote>")
+        );
+        // One char below the threshold, disabled, and a short text: untouched.
+        assert_eq!(
+            quote_long_caption(&caption, text, 6),
+            format!("{prefix}{text}")
+        );
+        assert_eq!(quote_long_caption(&caption, text, 0), caption);
+        // No author-line anchor means no text to locate — a pixiv caption
+        // (title inside the link) and a `{content}`-first format stay as they
+        // are rather than risking a blockquote nested in a tag.
+        let pixiv =
+            format!("<a href=\"https://pixiv.net/1\">{text}</a> / <a href=\"u\">me</a>\ntag");
+        assert_eq!(quote_long_caption(&pixiv, text, 5), pixiv);
+        let content_first = format!("{text}\nhttps://x.com/u/status/1");
+        assert_eq!(quote_long_caption(&content_first, text, 5), content_first);
+        // An empty body has nothing to quote.
+        assert_eq!(quote_long_caption(prefix, text, 5), prefix);
+        // A caption that already carries a blockquote is never nested.
+        let quoted = format!("<blockquote>{caption}</blockquote>");
+        assert_eq!(quote_long_caption(&quoted, text, 5), quoted);
+    }
+
+    /// `truncate_caption` cuts inside the text and appends an ellipsis; the
+    /// visible prefix still marks it, so the long-text case that most needs
+    /// quoting is still quoted.
+    #[test]
+    fn quote_long_caption_wraps_a_truncated_text() {
+        let text = "一二三四五六七八九十";
+        let prefix = "https://x.com/u/status/1\n<a href=\"https://x.com/u\">me</a>: ";
+        let caption = format!("{prefix}一二三四五…");
+        assert_eq!(
+            quote_long_caption(&caption, text, 5),
+            format!("{prefix}<blockquote expandable>一二三四五…</blockquote>")
+        );
+    }
+
+    #[tokio::test]
+    async fn long_text_caption_reaches_telegram_quoted() {
+        // The threshold is pinned here instead of read from the environment.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("media.jpg");
+        std::fs::write(&file, b"not-a-real-jpeg").unwrap();
+        let mut stores = TestStores::new();
+        stores.config_mut().caption_quote_text_chars = 5;
+        let prefix = "https://x.com/u/status/1\n<a href=\"https://x.com/u\">me</a>: ";
+
+        for (text, expected) in [
+            (
+                "一二三四五",
+                format!("{prefix}<blockquote expandable>一二三四五</blockquote>"),
+            ),
+            ("一二三四", format!("{prefix}一二三四")),
+        ] {
+            let sender = MockSender::scripted(vec![Outcome::GroupOk], media_fetch_error);
+            let ctx = stores.ctx(&sender);
+            let task = sequence_task_with_text(file.to_str().unwrap(), text);
+            assert!(send_media_sequence(&ctx, &task).await.is_ok());
+            assert_eq!(sender.captions(), vec![expected], "text {text:?}");
         }
     }
 

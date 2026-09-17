@@ -534,6 +534,35 @@ mod tests {
         );
     }
 
+    /// The caption-quote threshold matches the post's text inside the caption,
+    /// so a long-text cache hit is quoted and a short-text one is not.
+    #[tokio::test]
+    async fn cache_hit_quotes_a_long_text_caption() {
+        let mut stores = TestStores::new();
+        stores.config_mut().caption_quote_text_chars = 3;
+        let prefix = "https://x.com/u/status/1\n<a href=\"au\">a</a>: ";
+
+        for (text, expected) in [
+            (
+                "abc",
+                format!("{prefix}<blockquote expandable>abc</blockquote>"),
+            ),
+            ("ab", format!("{prefix}ab")),
+        ] {
+            let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
+            let ctx = stores.ctx(&sender);
+            let mut entry = cached_photo_entry();
+            entry.caption = format!("{prefix}{text}");
+            entry.title = String::new();
+            entry.content = text.into();
+            stores.link_cache().put("twitter:1", &entry).await;
+
+            url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
+
+            assert_eq!(sender.captions(), vec![expected], "text {text:?}");
+        }
+    }
+
     #[tokio::test]
     async fn unsupported_url_is_ignored_silently() {
         let stores = TestStores::new();

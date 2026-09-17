@@ -13,6 +13,10 @@ pub struct Config {
     pub edit_message_ttl: Duration,
     /// LINK_CACHE_TTL_SECONDS, default 604800 (7 days).
     pub link_cache_ttl: Duration,
+    /// CAPTION_QUOTE_TEXT_CHARS, default 200: a post whose text (title plus
+    /// content) is at least this many characters gets that text wrapped in an
+    /// expandable blockquote inside its caption. `0` disables the wrap.
+    pub caption_quote_text_chars: usize,
     // Webhook settings (moved out of main; names/defaults unchanged).
     pub webhook_enabled: bool,
     pub webhook_url: Option<url::Url>,
@@ -58,6 +62,7 @@ impl Config {
             Duration::from_secs(parse_u64("EDIT_MESSAGE_TTL_SECONDS", 24 * 3600));
         let link_cache_ttl =
             Duration::from_secs(parse_u64("LINK_CACHE_TTL_SECONDS", 7 * 24 * 3600));
+        let caption_quote_text_chars = parse_u64("CAPTION_QUOTE_TEXT_CHARS", 200) as usize;
 
         let webhook_enabled = env::var("WEBHOOK")
             .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "true" | "yes" | "1"));
@@ -93,6 +98,7 @@ impl Config {
             admin_ids,
             edit_message_ttl,
             link_cache_ttl,
+            caption_quote_text_chars,
             webhook_enabled,
             webhook_url,
             webhook_listen,

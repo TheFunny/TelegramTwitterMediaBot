@@ -6,6 +6,7 @@ Telegram 机器人，将 X / Twitter、Pixiv、Bluesky、Misskey (misskey.io)、
 
 - 私聊发送链接后自动抓取并发送图片、视频与 GIF，超量图片自动分批
 - 纯文字帖提示无媒体；不支持的链接静默忽略
+- 长帖（正文 ≥ `CAPTION_QUOTE_TEXT_CHARS`，默认 200）的**正文部分**用可折叠引用块展示，链接与作者行留在引用块外
 - 支持内联查询（`@机器人 <链接>`）
 - 可绑定转发频道自动转发；支持转发前编辑 caption 与自定义模板
 - 发送失败自动重试并持久化，重试耗尽后通知用户
@@ -87,6 +88,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
+| `CAPTION_QUOTE_TEXT_CHARS` | 正文（`{title}` + `{content}` 合计）达到该长度（字符）时，caption 的**正文部分**用可折叠引用块包裹，默认 200；`0` 关闭 |
 | `DATA_DIR` | 数据目录（SQLite 数据库 `task_queue.db` 所在目录），默认 `data`（相对工作目录，会自动创建） |
 | `RUST_LOG` | 日志级别 |
 | `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需 |

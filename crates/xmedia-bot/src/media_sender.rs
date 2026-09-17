@@ -327,9 +327,20 @@ pub(crate) mod test_support {
             &self,
             _chat_id: ChatId,
             _reply_to: MessageId,
-            _items: Vec<InputMedia>,
+            items: Vec<InputMedia>,
         ) -> BoxFuture<'_, Result<Vec<Message>, RequestError>> {
             Box::pin(async move {
+                // Record the captions exactly as Telegram receives them (only
+                // the first item of a group carries one), so tests can assert
+                // what a recipient sees.
+                self.captions
+                    .lock()
+                    .extend(items.iter().filter_map(|item| match item {
+                        InputMedia::Photo(photo) => photo.caption.clone(),
+                        InputMedia::Video(video) => video.caption.clone(),
+                        InputMedia::Animation(animation) => animation.caption.clone(),
+                        _ => None,
+                    }));
                 match self.next("send_media_group") {
                     Outcome::GroupOk => Ok(Vec::new()),
                     Outcome::GroupErr => Err(self.error()),

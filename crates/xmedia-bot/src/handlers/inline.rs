@@ -127,8 +127,23 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
         Ok(Some(fetched)) => {
             let mut results: Vec<InlineQueryResult> = Vec::new();
             // Inline results have the same 1024-char caption limit as regular
-            // messages; truncate once here for all items.
+            // messages; truncate once here for all items, then apply the same
+            // long-post quoting as the send paths. `answer_inline_query` has no
+            // `AppContext` (the debounce spawns it), so the parsed config comes
+            // from the process-wide static, and the text is the *escaped*
+            // title/content the built-in caption embeds (the raw
+            // `Fetched.title`/`content` differ whenever the post contains
+            // `<`/`&`).
             let caption = x_media::site::truncate_caption(&fetched.caption);
+            let text = fetched
+                .render_fields()
+                .map(|(_, _, title, content, _)| x_media::site::compose_text(title, content))
+                .unwrap_or_default();
+            let caption = crate::send::quote_long_caption(
+                &caption,
+                &text,
+                super::CONFIG.caption_quote_text_chars,
+            );
             for (i, media) in fetched.media.iter().enumerate() {
                 let id = format!("{i}");
                 let Some(url) = url::Url::parse(media.url()).ok() else {
@@ -138,7 +153,7 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
                     .thumbnail_url()
                     .and_then(|t| url::Url::parse(t).ok())
                     .unwrap_or_else(|| url.clone());
-                let caption = caption.clone();
+                let caption = caption.clone().into_owned();
                 let result = match media {
                     Media::Illustration { .. } => {
                         // Inline photo results have their own (smaller) size

@@ -6,6 +6,7 @@ A Telegram bot that turns post links from X / Twitter, Pixiv, Bluesky, Misskey (
 
 - Sending a link in a private chat fetches and sends the images, videos and GIFs automatically; oversized media is split into batches
 - Text-only posts report "no media"; unsupported links are silently ignored
+- Long posts (text ≥ `CAPTION_QUOTE_TEXT_CHARS`, default 200) show **the text part** of their caption inside a collapsible blockquote, with the link and author line left outside it
 - Inline queries (`@bot <link>`)
 - Bind a forward channel for automatic forwarding; edit the caption before forwarding and apply custom templates
 - Failed sends are retried automatically with persistence; the user is notified after retries are exhausted
@@ -87,6 +88,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `BOT_ADMIN` | Admin chat IDs, comma-separated; receives start/stop notifications |
 | `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400 |
 | `LINK_CACHE_TTL_SECONDS` | Link-result cache expiry in seconds, default 604800 (7 days) |
+| `CAPTION_QUOTE_TEXT_CHARS` | **The text part** of the caption (the joined `{title}` + `{content}`) is wrapped in a collapsible blockquote once it reaches this many characters, default 200; `0` disables |
 | `DATA_DIR` | Data directory (where the SQLite `task_queue.db` lives), default `data` (relative to the working directory, created automatically) |
 | `RUST_LOG` | Log level |
 | `TELOXIDE_PROXY` | HTTP proxy (e.g. `http://127.0.0.1:10808`); applies to both the Telegram Bot API and site fetches — required on restricted networks (e.g. behind the GFW) |

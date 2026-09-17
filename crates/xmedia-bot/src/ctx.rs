@@ -88,6 +88,12 @@ pub(crate) mod test_support {
             &self.chat_store
         }
 
+        /// The parsed config, mutable so a test can pin a knob (e.g. the
+        /// caption-quote threshold) instead of depending on the environment.
+        pub(crate) fn config_mut(&mut self) -> &mut Config {
+            &mut self.config
+        }
+
         pub(crate) fn link_cache(&self) -> &LinkCache {
             &self.link_cache
         }
