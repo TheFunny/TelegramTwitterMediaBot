@@ -4,7 +4,7 @@
 
 Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, Bluesky, Misskey (misskey.io), and Bilibili dynamics into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README is in Chinese; user-facing bot strings are in English. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
 
-Two-crate Cargo workspace (both v1.6.0, edition 2024, resolver 3):
+Two-crate Cargo workspace (both v1.7.0, edition 2024, resolver 3):
 
 - **`crates/x-media`** — library that fetches and normalizes media from the four sites. Pure, no Telegram knowledge.
 - **`crates/xmedia-bot`** — the bot binary: teloxide dispatcher, SQLite-backed chat state, persistent task queue.
@@ -99,7 +99,7 @@ Docker: `docker build -t tgxmb .` then `docker run --rm -d --name tgxmb --env-fi
 
 ## Testing & QA
 
-- **~150 tests, all inline `#[cfg(test)] mod tests`** — no `tests/` integration directories. Framework: built-in Rust test + `#[tokio::test]` (dev-deps only in `x-media`: tokio macros/rt-multi-thread, dotenv).
+- **~180 tests, all inline `#[cfg(test)] mod tests`** — no `tests/` integration directories. Framework: built-in Rust test + `#[tokio::test]` (dev-deps only in `x-media`: tokio macros/rt-multi-thread, dotenv).
 - No mocking framework anywhere (no mockito/wiremock/mockall). Conventions: pure-function units (regex parsing, serde round-trips, chunking, retry math) tested synchronously; async tests use real dependencies — file-backed SQLite via `tempfile` (`queue.rs::new_queue()` helper), live network fetches.
 - Live-network tests exist in `site/twitter/interface.rs` (5), `site/bsky/interface.rs` (2), `site/misskey/interface.rs` (1), `site/bilibili/interface.rs` (4), `site/pixiv/api.rs` (1); `photo.rs` adds one `#[ignore = "heavy: …"]` test. `site/mod.rs` also has a **token-gated but not `#[ignore]`d** pixiv download test (`download_media_pixiv_original_with_referer`): it hits `i.pximg.net` whenever `PIXIV_REFRESH_TOKEN` is set, so a local `cargo test --workspace` is not fully offline and can flake on a pixiv CDN body timeout. Test gating convention (enforced by `.github/workflows/ci.yml`): pure unit tests always run; live-network tests carry `#[ignore = "live network: ..."]` (run via `cargo test --workspace -- --ignored live`); token-gated pixiv tests early-return when `PIXIV_REFRESH_TOKEN` is absent **or empty** (an unset GitHub secret arrives as `""` — `is_err()` alone would run them tokenless and fail), and the bilibili live tests early-return when the API answers risk control (`-352`, which bilibili applies per IP by request volume). Run the full offline suite with `cargo test --workspace`.
 - Fixtures are inline `serde_json::json!` builder fns (`fixture()`, `thread_json()`, `illust_json()`), not files. The shared `CLIENT` sets `pool_max_idle_per_host(0)` under `#[cfg(test)]` to avoid cross-runtime `DispatchGone`.
