@@ -123,21 +123,23 @@ impl From<model::Note> for Fetched {
         let cw = content.cw.as_deref().unwrap_or_default();
         // Notes carry hashtags inline in the text (no structured tags array);
         // a CW note gets the marker prefixed so recipients see the spoiler.
-        let mut title = cw.to_string();
-        if !cw.is_empty() && !title.ends_with(' ') {
-            title.push(' ');
+        let mut text = cw.to_string();
+        if !cw.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
         }
-        title.push_str(content.text.as_deref().unwrap_or_default().trim());
-        let title = title.trim().to_string();
+        text.push_str(content.text.as_deref().unwrap_or_default().trim());
+        let text = text.trim().to_string();
 
-        let caption = caption(&url, &author_url, &author, &title);
+        let caption = caption(&url, &author_url, &author, &text);
         let sensitive = content.cw.is_some() || content.files.iter().any(|f| f.is_sensitive);
         let media: Vec<Media> = content.files.iter().filter_map(media_from_file).collect();
 
         Fetched {
             source_url: url.clone(),
             caption,
-            title: title.clone(),
+            // A note has no title: its text (CW marker included) is content.
+            title: String::new(),
+            content: text.clone(),
             media,
             sensitive,
             site_id: "misskey",
@@ -145,7 +147,8 @@ impl From<model::Note> for Fetched {
                 url,
                 author: encode_text(&author).into_owned(),
                 author_url: author_url.clone(),
-                title: encode_text(&title).into_owned(),
+                title: String::new(),
+                content: encode_text(&text).into_owned(),
                 tags: String::new(),
             }),
             _keep_alive: None,
@@ -257,7 +260,8 @@ mod tests {
             "https://misskey.io/notes/aotihl10lqrs015s"
         );
         assert_eq!(fetched.site_id, "misskey");
-        assert_eq!(fetched.title, "hello");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "hello");
         assert!(fetched.sensitive);
         assert_eq!(fetched.media.len(), 1);
         match &fetched.media[0] {
@@ -308,7 +312,8 @@ mod tests {
         note["text"] = serde_json::json!("body");
         let fetched: Fetched = note_json(note).into();
         assert!(fetched.sensitive);
-        assert_eq!(fetched.title, "spoiler body");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "spoiler body");
     }
 
     #[test]
@@ -341,7 +346,8 @@ mod tests {
             }
         });
         let fetched: Fetched = note_json(note).into();
-        assert_eq!(fetched.title, "inner text");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "inner text");
         assert_eq!(fetched.media.len(), 1);
         // The source URL still points at the renote shell the user posted.
         assert_eq!(

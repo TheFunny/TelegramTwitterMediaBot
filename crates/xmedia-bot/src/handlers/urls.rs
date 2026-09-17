@@ -327,6 +327,7 @@ pub(crate) async fn url_media(
                 &cached.author,
                 &cached.author_url,
                 &cached.title,
+                &cached.content,
                 &cached.tags,
             )
         };
@@ -406,18 +407,20 @@ pub(crate) async fn url_media(
             let caption = fetched.caption_with(&format);
             // Raw render data for the link cache; the send fills in the
             // Telegram file ids and persists the entry.
-            let cache_data = fetched
-                .render_fields()
-                .map(|(author, author_url, title, tags)| CachedPost {
-                    url: fetched.source_url.clone(),
-                    caption: fetched.caption.clone(),
-                    title: title.to_string(),
-                    author: author.to_string(),
-                    author_url: author_url.to_string(),
-                    tags: tags.to_string(),
-                    sensitive: fetched.sensitive,
-                    media: vec![],
-                });
+            let cache_data =
+                fetched
+                    .render_fields()
+                    .map(|(author, author_url, title, content, tags)| CachedPost {
+                        url: fetched.source_url.clone(),
+                        caption: fetched.caption.clone(),
+                        title: title.to_string(),
+                        content: content.to_string(),
+                        author: author.to_string(),
+                        author_url: author_url.to_string(),
+                        tags: tags.to_string(),
+                        sensitive: fetched.sensitive,
+                        media: vec![],
+                    });
             let items: Vec<MediaItemPayload> = fetched
                 .media
                 .iter()
@@ -465,6 +468,7 @@ mod tests {
             url: "https://x.com/u/status/1".into(),
             caption: "cap".into(),
             title: "t".into(),
+            content: "c".into(),
             author: "a".into(),
             author_url: "au".into(),
             tags: "".into(),

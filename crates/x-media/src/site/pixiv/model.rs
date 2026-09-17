@@ -6,6 +6,10 @@ use serde::Deserialize;
 pub struct IllustrationModel {
     pub id: u64,
     pub title: String,
+    /// The artwork's description as the app API returns it — HTML in most
+    /// works (`<br />`, `<a href>`, sometimes `<p>`), empty for many.
+    #[serde(default)]
+    pub caption: String,
     pub r#type: TypeModel,
     pub image_urls: ImageUrlsModel,
     pub user: UserInfoModel,

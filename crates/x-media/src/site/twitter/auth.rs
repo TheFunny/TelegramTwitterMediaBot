@@ -327,7 +327,8 @@ mod tests {
             "https://x.com/nsfw_author/status/2083868672721039569"
         );
         // The appended media short link (no URL-entity mapping) is stripped.
-        assert_eq!(fetched.title, "nsfw content");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "nsfw content");
     }
 
     #[test]

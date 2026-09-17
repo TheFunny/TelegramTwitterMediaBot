@@ -114,7 +114,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `/remove_forward_channel` | Remove the forward channel |
 | `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or taps a template button to apply one) |
 | `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward") |
-| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}` |
 | `/clear_cache [link]` | Clear the link cache (admin only); with a link only that entry, otherwise everything |
 | `/bot_dict` | Show the current chat state (debugging; admin only) |
 | `/test <link>` | Parse a link and send its media; no channel forward, no edit-before-forward prompt (send only) |

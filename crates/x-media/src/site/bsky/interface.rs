@@ -330,13 +330,16 @@ impl From<Post> for Fetched {
             url: url.clone(),
             author: encode_text(&post.author).into_owned(),
             author_url: author_url.clone(),
-            title: encode_text(&post.text).into_owned(),
+            // A post has no title: its text is all content.
+            title: String::new(),
+            content: encode_text(&post.text).into_owned(),
             tags: String::new(),
         });
         Fetched {
             source_url: url,
             caption: post.caption(),
-            title: post.text.clone(),
+            title: String::new(),
+            content: post.text.clone(),
             media: post.media,
             sensitive: post.sensitive,
             site_id: "bsky",
@@ -410,7 +413,8 @@ mod tests {
             fetched.source_url,
             "https://bsky.app/profile/user.bsky.social/post/3xxxx"
         );
-        assert_eq!(fetched.title, "hello <world>");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "hello <world>");
         assert_eq!(fetched.media.len(), 1);
         assert!(!fetched.sensitive);
         // display_name absent -> empty fallback

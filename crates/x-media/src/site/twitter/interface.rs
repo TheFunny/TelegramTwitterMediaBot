@@ -99,6 +99,7 @@ fn empty_fetched(url: &str) -> Fetched {
         // crafted links cannot break the parse (Telegram 400).
         caption: encode_text(url).into_owned(),
         title: String::new(),
+        content: String::new(),
         media: vec![],
         sensitive: true,
         site_id: "twitter",
@@ -352,17 +353,20 @@ impl From<Tweet> for Fetched {
     fn from(tweet: Tweet) -> Self {
         let url = tweet.url();
         let author_url = tweet.author_url();
+        // A tweet has no title: its text is all content.
         let render_data = Some(crate::site::RenderData {
             url: url.clone(),
             author: encode_text(&tweet.author).into_owned(),
             author_url: author_url.clone(),
-            title: encode_text(&tweet.text).into_owned(),
+            title: String::new(),
+            content: encode_text(&tweet.text).into_owned(),
             tags: String::new(),
         });
         Fetched {
             source_url: url,
             caption: tweet.caption(),
-            title: tweet.text.clone(),
+            title: String::new(),
+            content: tweet.text.clone(),
             media: tweet.media,
             sensitive: tweet.sensitive,
             site_id: "twitter",
@@ -437,7 +441,8 @@ mod tests {
         assert_eq!(tweet.text, ">^ω^< & more 'quoted'");
         assert_eq!(tweet.author, "O'Brien");
         let fetched: Fetched = tweet.into();
-        assert_eq!(fetched.title, ">^ω^< & more 'quoted'");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, ">^ω^< & more 'quoted'");
         // The caption escapes the raw text exactly once (encode_text covers
         // & < >; apostrophes stay literal — they are harmless in text).
         assert!(
@@ -496,7 +501,8 @@ mod tests {
             fetched.source_url,
             "https://x.com/author_handle/status/861627479294746624"
         );
-        assert_eq!(fetched.title, "a & b <c>");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "a & b <c>");
         assert!(fetched.sensitive);
         assert_eq!(fetched.media.len(), 2);
         match &fetched.media[0] {

@@ -107,10 +107,60 @@ pub fn media_headers(url: &str) -> Option<Vec<(&'static str, String)>> {
     }
 }
 
+/// Flattens the app API's HTML description into plain text: `<br>` (and `<p>`)
+/// become line breaks, other tags are dropped, entities decoded, the ends
+/// trimmed. A caption shows text, not markup, so the author's `<a href>` links
+/// contribute their link text only.
+fn flatten_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        // Only `<` followed by `/` or a letter opens a tag — a bare `<` in
+        // prose ("2 < 3") is text.
+        let opens_tag = c == '<'
+            && chars
+                .peek()
+                .is_some_and(|next| *next == '/' || next.is_ascii_alphabetic());
+        if !opens_tag {
+            out.push(c);
+            continue;
+        }
+        let mut tag = String::new();
+        let mut closed = false;
+        for c in chars.by_ref() {
+            if c == '>' {
+                closed = true;
+                break;
+            }
+            tag.push(c);
+        }
+        if !closed {
+            // Unclosed `<…`: keep it as text rather than dropping the tail.
+            out.push('<');
+            out.push_str(&tag);
+            break;
+        }
+        // `<br>`, `<br/>`, `<br />` with or without attributes, and both
+        // halves of a paragraph break the line; everything else is dropped.
+        let tag = tag
+            .trim()
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .trim()
+            .to_ascii_lowercase();
+        if tag == "p" || tag.starts_with("br") {
+            out.push('\n');
+        }
+    }
+    html_escape::decode_html_entities(&out).trim().to_string()
+}
+
 #[derive(Debug)]
 pub struct Illustration {
     id: String,
     title: String,
+    /// The artwork's description, HTML flattened to plain text.
+    content: String,
     author: String,
     author_id: String,
     tags: Vec<String>,
@@ -150,6 +200,7 @@ impl Illustration {
     pub fn from_model(model: &IllustrationModel) -> Self {
         let id = model.id.to_string();
         let title = model.title.clone();
+        let content = flatten_html(&model.caption);
         let author = model.user.name.clone();
         let author_id = model.user.id.to_string();
         let mut tags: Vec<String> = model.tags.iter().map(|tag| tag.name.clone()).collect();
@@ -193,6 +244,7 @@ impl Illustration {
         Self {
             id,
             title,
+            content,
             author,
             author_id,
             tags,
@@ -218,12 +270,14 @@ impl From<Illustration> for Fetched {
             author: encode_text(&illustration.author).into_owned(),
             author_url: author_url.clone(),
             title: encode_text(&illustration.title).into_owned(),
+            content: encode_text(&illustration.content).into_owned(),
             tags: encode_text(&tags).into_owned(),
         });
         Fetched {
             source_url: url,
             caption: illustration.caption(),
             title: illustration.title.clone(),
+            content: illustration.content.clone(),
             media: illustration.media,
             sensitive: illustration.nsfw,
             site_id: "pixiv",
@@ -262,6 +316,7 @@ mod tests {
             "illust": {
                 "id": 123,
                 "title": "Art <title>",
+                "caption": "一行说明<br />二行 <a href=\"https://x.example/\">链接</a> &amp; 结尾",
                 "type": type_,
                 "image_urls": {
                     "medium": "medium.jpg",
@@ -282,6 +337,44 @@ mod tests {
     fn parse(v: serde_json::Value) -> Illustration {
         let model: IllustrationModel = serde_json::from_value(v["illust"].clone()).unwrap();
         Illustration::from_model(&model)
+    }
+
+    /// The description arrives as HTML and becomes plain-text content: breaks
+    /// kept, tags dropped (links keep their text), entities decoded.
+    #[test]
+    fn from_json_maps_description_to_content() {
+        let v = illust_json("illust", 1, None, Some("o.jpg"), vec![], 0);
+        let illustration = parse(v);
+        assert_eq!(illustration.content, "一行说明\n二行 链接 & 结尾");
+
+        let fetched: Fetched = illustration.into();
+        assert_eq!(fetched.title, "Art <title>");
+        assert_eq!(fetched.content, "一行说明\n二行 链接 & 结尾");
+        // The built-in caption keeps its layout: the description stays out of
+        // it and is available through `{content}`.
+        assert!(!fetched.caption.contains("一行说明"), "{}", fetched.caption);
+        assert_eq!(
+            fetched.render_fields().unwrap().3,
+            "一行说明\n二行 链接 &amp; 结尾"
+        );
+        assert!(
+            fetched
+                .caption_with("{title}: {content}")
+                .ends_with("一行说明\n二行 链接 &amp; 结尾")
+        );
+    }
+
+    #[test]
+    fn flatten_html_handles_common_markup() {
+        assert_eq!(flatten_html(""), "");
+        assert_eq!(flatten_html("plain"), "plain");
+        assert_eq!(flatten_html("a<br />b<br/>c<br>d"), "a\nb\nc\nd");
+        // A paragraph break is a blank line, exactly like `<br /><br />` —
+        // writing it as one newline would flatten the author's paragraphs.
+        assert_eq!(flatten_html("<p>one</p><p>two</p>"), "one\n\ntwo");
+        assert_eq!(flatten_html("a &amp; b &lt;c&gt;"), "a & b <c>");
+        // Nothing to strip: angle brackets that are not a tag survive.
+        assert_eq!(flatten_html("2 < 3"), "2 < 3");
     }
 
     #[test]

@@ -29,7 +29,7 @@
 
 use super::model;
 use crate::media::Media;
-use crate::site::{FetchError, Fetched, RenderData, Site, SiteFuture};
+use crate::site::{FetchError, Fetched, RenderData, Site, SiteFuture, compose_text};
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -270,7 +270,8 @@ impl From<model::Item> for Fetched {
         let url = format!("https://www.bilibili.com/opus/{}", item.id_str);
         let author = author_name(&item).to_string();
         let author_url = author_url(&item).unwrap_or_else(|| url.clone());
-        let text = text_of(&item);
+        let (title, content) = text_parts(&item);
+        let text = compose_text(&title, &content);
         let tags = topic_name(&item).to_string();
 
         let caption = caption(&url, &author_url, &author, &text);
@@ -279,7 +280,8 @@ impl From<model::Item> for Fetched {
         Fetched {
             source_url: url.clone(),
             caption,
-            title: text.clone(),
+            title: title.clone(),
+            content: content.clone(),
             media,
             sensitive: false,
             site_id: "bilibili",
@@ -287,7 +289,8 @@ impl From<model::Item> for Fetched {
                 url,
                 author: encode_text(&author).into_owned(),
                 author_url,
-                title: encode_text(&text).into_owned(),
+                title: encode_text(&title).into_owned(),
+                content: encode_text(&content).into_owned(),
                 tags: encode_text(&tags).into_owned(),
             }),
             _keep_alive: None,
@@ -338,37 +341,33 @@ fn archive_title(item: &model::Item) -> Option<&str> {
         .filter(|title| !title.trim().is_empty())
 }
 
-/// The dynamic's own words, richest source first: the opus document
-/// (headline plus body) → `module_dynamic.desc.text` → the attached video's
-/// card title.
+/// The dynamic's own words, richest source first: the opus document's
+/// headline and body → the legacy body (`module_dynamic.desc.text`) → the
+/// attached video's card title, which is the text of a 视频投稿动态 because
+/// such a post has no body anywhere.
 ///
 /// The opus shape is what makes ordinary 图文 posts readable at all — their
-/// legacy serialization has no text — while a 视频投稿动态 has no body
-/// anywhere and is represented by its card title (mirroring pixiv, whose
-/// `title` is the artwork title rather than post text).
-fn own_text(item: &model::Item) -> String {
+/// legacy serialization has no text.
+fn own_parts(item: &model::Item) -> (String, String) {
     if let Some(opus) = opus(item) {
-        let title = opus.title.as_deref().unwrap_or_default().trim();
+        let title = opus.title.as_deref().unwrap_or_default().trim().to_string();
         let body = opus
             .summary
             .as_ref()
-            .map(|summary| summary.text.trim())
+            .map(|summary| summary.text.trim().to_string())
             .unwrap_or_default();
-        let text = match (title.is_empty(), body.is_empty()) {
-            (false, false) => format!("{title}\n{body}"),
-            (false, true) => title.to_string(),
-            (true, false) => body.to_string(),
-            (true, true) => String::new(),
-        };
-        if !text.is_empty() {
-            return text;
+        if !title.is_empty() || !body.is_empty() {
+            return (title, body);
         }
     }
     let body = desc_text(item).trim();
     if !body.is_empty() {
-        return body.to_string();
+        return (String::new(), body.to_string());
     }
-    archive_title(item).unwrap_or_default().to_string()
+    (
+        archive_title(item).unwrap_or_default().to_string(),
+        String::new(),
+    )
 }
 
 fn topic_name(item: &model::Item) -> &str {
@@ -380,28 +379,29 @@ fn topic_name(item: &model::Item) -> &str {
         .unwrap_or_default()
 }
 
-/// The post's text: its own plus the quoted original's when it is a forward,
-/// marked the way bilibili's web UI does (`//@author:`).
-fn text_of(item: &model::Item) -> String {
-    let own = own_text(item);
+/// The post's title and body: the dynamic's own, with the quoted original's
+/// text appended to the body the way bilibili's web UI shows forwards
+/// (`//@author:`).
+fn text_parts(item: &model::Item) -> (String, String) {
+    let (title, mut content) = own_parts(item);
     let Some(orig) = item.orig.as_deref() else {
-        return own;
+        return (title, content);
     };
-    let orig_text = own_text(orig);
+    let (orig_title, orig_content) = own_parts(orig);
+    let orig_text = compose_text(&orig_title, &orig_content);
     if orig_text.is_empty() {
-        return own;
+        return (title, content);
     }
     let name = author_name(orig);
-    let mut text = own;
-    if !text.is_empty() {
-        text.push('\n');
+    if !content.is_empty() {
+        content.push('\n');
     }
     if name.is_empty() {
-        text.push_str(&orig_text);
+        content.push_str(&orig_text);
     } else {
-        text.push_str(&format!("//@{name}:\n{orig_text}"));
+        content.push_str(&format!("//@{name}:\n{orig_text}"));
     }
-    text
+    (title, content)
 }
 
 /// The dynamic's media: its own grid (or video cover), falling back to the
@@ -592,7 +592,8 @@ mod tests {
             "https://www.bilibili.com/opus/1245284537985925159"
         );
         assert_eq!(fetched.site_id, "bilibili");
-        assert_eq!(fetched.title, "新歌上线");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "新歌上线");
         assert!(!fetched.sensitive);
         assert_eq!(fetched.media.len(), 1);
         match &fetched.media[0] {
@@ -627,6 +628,7 @@ mod tests {
             Some((
                 "索尼音乐中国",
                 "https://space.bilibili.com/486906719",
+                "",
                 "新歌上线",
                 "音乐"
             ))
@@ -696,9 +698,10 @@ mod tests {
         };
         let fetched = parse(item);
 
+        assert_eq!(fetched.title, "每个人的青春里，都有一首 A-Lin");
         assert_eq!(
-            fetched.title,
-            "每个人的青春里，都有一首 A-Lin\n那些曾经陪你失恋的歌\n\n【活动】详情见正文"
+            fetched.content,
+            "那些曾经陪你失恋的歌\n\n【活动】详情见正文"
         );
         assert!(
             fetched.caption.contains("那些曾经陪你失恋的歌"),
@@ -726,8 +729,8 @@ mod tests {
         // A body without a headline, and a headline without a body, both
         // stand alone rather than rendering an empty line.
         for (title, body, expected) in [
-            (None, "只有正文", "只有正文"),
-            (Some("只有标题"), "", "只有标题"),
+            (None, "只有正文", ("", "只有正文")),
+            (Some("只有标题"), "", ("只有标题", "")),
         ] {
             let major = serde_json::json!({
                 "type": "MAJOR_TYPE_OPUS",
@@ -735,7 +738,8 @@ mod tests {
             });
             let mut json = item_json(major, "");
             json["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
-            assert_eq!(parse(json).title, expected);
+            let fetched = parse(json);
+            assert_eq!((fetched.title.as_str(), fetched.content.as_str()), expected);
         }
     }
 
@@ -748,7 +752,8 @@ mod tests {
             draw_item("http://i0.hdslb.com/bfs/new_dyn/l.jpg"),
             "legacy 正文",
         ));
-        assert_eq!(fetched.title, "legacy 正文");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "legacy 正文");
         assert_eq!(fetched.media.len(), 1);
         assert_eq!(
             fetched.media[0].url(),
@@ -811,6 +816,7 @@ mod tests {
             fetched.render_fields().unwrap().2,
             "GTX760游戏性能测试，二手显卡尚能战否？"
         );
+        assert_eq!(fetched.content, "");
         assert_eq!(fetched.media.len(), 1);
 
         // Forwarding a video dynamic: the quoted card title lands after the
@@ -819,8 +825,9 @@ mod tests {
         forward["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
         forward["orig"] = item;
         let fetched = parse(forward);
+        assert_eq!(fetched.title, "");
         assert_eq!(
-            fetched.title,
+            fetched.content,
             "//@索尼音乐中国:\nGTX760游戏性能测试，二手显卡尚能战否？"
         );
         assert_eq!(
@@ -851,7 +858,8 @@ mod tests {
             fetched.media[0].url(),
             "https://i0.hdslb.com/bfs/new_dyn/o.jpg"
         );
-        assert_eq!(fetched.title, "转发理由\n//@A-SOUL_Official:\n原动态正文");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "转发理由\n//@A-SOUL_Official:\n原动态正文");
         // The forwarder stays the author; the quote appears in the text.
         assert!(
             fetched.caption.contains("索尼音乐中国"),
@@ -870,7 +878,8 @@ mod tests {
     fn from_item_without_major_has_no_media() {
         let fetched = parse(item_json(serde_json::Value::Null, "只有文字"));
         assert!(fetched.media.is_empty());
-        assert_eq!(fetched.title, "只有文字");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "只有文字");
     }
 
     #[test]
@@ -879,7 +888,8 @@ mod tests {
             draw_item("http://i0.hdslb.com/bfs/new_dyn/a.jpg"),
             "<b>\"x\" & y</b>",
         ));
-        assert_eq!(fetched.title, "<b>\"x\" & y</b>");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "<b>\"x\" & y</b>");
         // `encode_text` escapes markup only; a bare quote is text, not an
         // attribute delimiter, and stays as-is.
         assert!(
@@ -887,8 +897,8 @@ mod tests {
             "{}",
             fetched.caption
         );
-        let (_, _, title, _) = fetched.render_fields().unwrap();
-        assert_eq!(title, "&lt;b&gt;\"x\" &amp; y&lt;/b&gt;");
+        let (_, _, _, content, _) = fetched.render_fields().unwrap();
+        assert_eq!(content, "&lt;b&gt;\"x\" &amp; y&lt;/b&gt;");
     }
 
     #[test]
@@ -980,20 +990,22 @@ mod tests {
             return;
         };
         assert!(fetched.media.is_empty());
-        assert!(!fetched.title.trim().is_empty());
+        assert!(fetched.title.is_empty());
+        assert!(!fetched.content.trim().is_empty());
     }
 
     /// Regression for the reported case: this opus post's legacy
     /// serialization has `desc: null`, so without the `itemOpusStyle`
-    /// request it parsed with an empty title.
+    /// request it parsed with no text at all.
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to api.bilibili.com"]
-    async fn live_fetch_opus_dynamic_has_title_and_text() {
+    async fn live_fetch_opus_dynamic_has_content() {
         let Some(fetched) = live_fetch("https://www.bilibili.com/opus/1248857553488576532").await
         else {
             return;
         };
-        assert_eq!(fetched.title, "[doge_金箍]黑白搭配");
+        assert_eq!(fetched.title, "");
+        assert_eq!(fetched.content, "[doge_金箍]黑白搭配");
         assert!(fetched.caption.ends_with("黑白搭配"), "{}", fetched.caption);
         let urls: Vec<&str> = fetched.media.iter().map(|m| m.url()).collect();
         assert_eq!(urls.len(), 1, "{urls:?}");
@@ -1008,6 +1020,7 @@ mod tests {
             return;
         };
         assert!(!fetched.title.trim().is_empty(), "{fetched:?}");
+        assert!(fetched.content.is_empty(), "{fetched:?}");
         assert!(
             fetched.caption.contains(&fetched.title),
             "{}",

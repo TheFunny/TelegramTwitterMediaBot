@@ -419,6 +419,7 @@ pub(crate) async fn execute_command(
                         fetched.site_name(),
                         &fetched.source_url,
                         &fetched.title,
+                        &fetched.content,
                         fetched.render_fields(),
                         fetched.sensitive,
                         &fetched.caption,
@@ -471,7 +472,8 @@ fn debug_report(
     site_id: &str,
     source_url: &str,
     title: &str,
-    render: Option<(&str, &str, &str, &str)>,
+    content: &str,
+    render: Option<(&str, &str, &str, &str, &str)>,
     sensitive: bool,
     caption: &str,
     media: &[x_media::media::Media],
@@ -491,7 +493,8 @@ fn debug_report(
         html_escape::encode_text(source_url)
     ));
     lines.push(format!("title: {}", html_escape::encode_text(title)));
-    if let Some((author, author_url, _title, tags)) = render {
+    lines.push(format!("content: {}", html_escape::encode_text(content)));
+    if let Some((author, author_url, _title, _content, tags)) = render {
         // The render fields are already pre-escaped for HTML captions; embed
         // them as-is so the report renders them exactly like the final
         // caption. `author_url` is raw and gets escaped here.
@@ -559,7 +562,14 @@ mod tests {
             "twitter",
             "https://x.com/u/status/1",
             "My title",
-            Some(("Author", "https://x.com/u", "My title", "tag1 tag2")),
+            "My content",
+            Some((
+                "Author",
+                "https://x.com/u",
+                "My title",
+                "My content",
+                "tag1 tag2",
+            )),
             false,
             "<a href=\"https://x.com/u\">Author</a> · My title",
             &media,
@@ -567,6 +577,7 @@ mod tests {
         assert!(report.contains("site: twitter"), "{report}");
         assert!(report.contains("key: twitter:1"), "{report}");
         assert!(report.contains("title: My title"), "{report}");
+        assert!(report.contains("content: My content"), "{report}");
         assert!(report.contains("author: Author"), "{report}");
         assert!(report.contains("author_url: https://x.com/u"), "{report}");
         assert!(report.contains("tags: tag1 tag2"), "{report}");
@@ -584,7 +595,7 @@ mod tests {
 
     #[test]
     fn debug_report_without_render_data_and_no_media() {
-        let report = debug_report("u", "pixiv", "s", "t", None, true, "c", &[]);
+        let report = debug_report("u", "pixiv", "s", "t", "c", None, true, "p", &[]);
         assert!(!report.contains("author:"), "{report}");
         assert!(report.contains("sensitive: true"), "{report}");
         assert!(report.contains("media (0):"), "{report}");
@@ -601,10 +612,12 @@ mod tests {
             "twitter",
             "https://x.com/u/status/1",
             "A & B <C>",
+            "body & <more>",
             Some((
                 "A &amp; B",
                 "https://x.com/u",
                 "A &amp; B &lt;C&gt;",
+                "body &amp; &lt;more&gt;",
                 "#a &amp; #b",
             )),
             false,
@@ -640,7 +653,7 @@ mod tests {
                 fallback_url: None,
             })
             .collect();
-        let report = debug_report("u", "twitter", "s", "t", None, false, "c", &media);
+        let report = debug_report("u", "twitter", "s", "t", "c", None, false, "p", &media);
         assert!(report.chars().count() <= MAX_DEBUG_REPORT_CHARS, "{report}");
         assert!(report.ends_with('…'), "{report}");
     }

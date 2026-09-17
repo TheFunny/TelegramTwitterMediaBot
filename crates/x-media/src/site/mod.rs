@@ -21,8 +21,8 @@ pub mod twitter;
 
 pub use pixiv::PixivError;
 
-/// The result of fetching a post: canonical URL, HTML caption, raw text,
-/// media list and spoiler flag. Produced by [`fetch`].
+/// The result of fetching a post: canonical URL, HTML caption, the post's
+/// title and body, media list and spoiler flag. Produced by [`fetch`].
 #[derive(Debug)]
 pub struct Fetched {
     /// Canonical URL: `x.com/{author}/status/{id}` |
@@ -32,8 +32,16 @@ pub struct Fetched {
     pub source_url: String,
     /// The exact HTML produced by the site's caption().
     pub caption: String,
-    /// Raw post text (tweet text / bsky text / pixiv title).
+    /// The post's own title, where the platform has one: a pixiv artwork's
+    /// title, the headline of a bilibili opus post or the title of the video
+    /// an AV dynamic attaches. Empty on the platforms whose posts are text
+    /// only (x/twitter, bsky, misskey) and on bilibili posts without a
+    /// headline.
     pub title: String,
+    /// The post's body text, as the platform exposes it: a tweet, a bsky or
+    /// misskey post, a bilibili dynamic's text, a pixiv artwork's description
+    /// (HTML flattened). Empty when the post has no text at all.
+    pub content: String,
     pub media: Vec<crate::media::Media>,
     /// Spoiler flag for all media of this post.
     pub sensitive: bool,
@@ -48,22 +56,36 @@ pub struct Fetched {
     pub(crate) _keep_alive: Option<tempfile::TempDir>,
 }
 
-/// Values for the `{url} {author} {author_url} {title} {tags}` placeholders in
-/// user-supplied caption formats, substituted by [`caption_from_fields`] as
-/// HTML text (never as an attribute value).
+/// Values for the `{url} {author} {author_url} {title} {content} {tags}`
+/// placeholders in user-supplied caption formats, substituted by
+/// [`caption_from_fields`] as HTML text (never as an attribute value).
 ///
-/// `author`, `title` and `tags` come from the site API (post text, display
-/// names) and are HTML-escaped at construction. `url` and `author_url` stay
-/// raw: they are canonical URLs the adapter builds from numeric ids and
-/// API-constrained handles/DIDs, so they carry no escapable character — the
-/// bot's `/test` report relies on that when it embeds them.
+/// `author`, `title`, `content` and `tags` come from the site API (post
+/// text, display names, descriptions) and are HTML-escaped at construction.
+/// `url` and `author_url` stay raw: they are canonical URLs the adapter
+/// builds from numeric ids and API-constrained handles/DIDs, so they carry
+/// no escapable character — the bot's `/test` report relies on that when it
+/// embeds them.
 #[derive(Debug)]
 pub(crate) struct RenderData {
     pub url: String,
     pub author: String,
     pub author_url: String,
     pub title: String,
+    pub content: String,
     pub tags: String,
+}
+
+/// The post's text as one string: title and content joined by a line break,
+/// each only when it is non-empty. This is what the sites' built-in captions
+/// show after the author line, and what the bot quotes when it is long.
+pub fn compose_text(title: &str, content: &str) -> String {
+    match (title.is_empty(), content.is_empty()) {
+        (false, false) => format!("{title}\n{content}"),
+        (false, true) => title.to_string(),
+        (true, false) => content.to_string(),
+        (true, true) => String::new(),
+    }
 }
 
 impl Fetched {
@@ -89,21 +111,23 @@ impl Fetched {
                 &data.author,
                 &data.author_url,
                 &data.title,
+                &data.content,
                 &data.tags,
             ),
             _ => truncate_caption(&self.caption),
         }
     }
 
-    /// The pre-escaped placeholder values (author, author_url, title, tags)
-    /// a caller needs to rebuild a caption later, e.g. for a cached post
-    /// where the [`Fetched`] is no longer available.
-    pub fn render_fields(&self) -> Option<(&str, &str, &str, &str)> {
+    /// The pre-escaped placeholder values (author, author_url, title,
+    /// content, tags) a caller needs to rebuild a caption later, e.g. for a
+    /// cached post where the [`Fetched`] is no longer available.
+    pub fn render_fields(&self) -> Option<(&str, &str, &str, &str, &str)> {
         self.render_data.as_ref().map(|d| {
             (
                 d.author.as_str(),
                 d.author_url.as_str(),
                 d.title.as_str(),
+                d.content.as_str(),
                 d.tags.as_str(),
             )
         })
@@ -149,6 +173,11 @@ pub fn truncate_caption(caption: &str) -> String {
 /// [`Fetched::caption_with`]. An empty format returns `built_in` unchanged.
 /// The result is truncated to [`MAX_CAPTION_CHARS`] (Telegram's caption
 /// limit for HTML parse mode).
+///
+/// One flat argument per placeholder keeps the two callers (the fresh and the
+/// cached caption path) mirroring each other; the same shape as the bot's
+/// `debug_report`.
+#[allow(clippy::too_many_arguments)]
 pub fn caption_from_fields(
     format: &str,
     built_in: &str,
@@ -156,6 +185,7 @@ pub fn caption_from_fields(
     author: &str,
     author_url: &str,
     title: &str,
+    content: &str,
     tags: &str,
 ) -> String {
     if format.is_empty() {
@@ -168,6 +198,7 @@ pub fn caption_from_fields(
             .replace("{author}", author)
             .replace("{author_url}", author_url)
             .replace("{title}", title)
+            .replace("{content}", content)
             .replace("{tags}", tags),
     )
 }
@@ -598,23 +629,32 @@ mod tests {
         // The format string is escaped, the field values are substituted
         // verbatim (callers pass the already-escaped render data).
         let out = caption_from_fields(
-            "see {author} at {url} — {title}",
+            "see {author} at {url} — {title}: {content}",
             "",
             "https://x.com/u/status/1",
             "A &amp; B",
             "https://x.com/u",
             "hello <world>",
+            "the body",
             "",
         );
         assert_eq!(
             out,
-            "see A &amp; B at https://x.com/u/status/1 — hello <world>"
+            "see A &amp; B at https://x.com/u/status/1 — hello <world>: the body"
         );
         // Empty format keeps the built-in caption untouched.
         assert_eq!(
-            caption_from_fields("", "built-in", "u", "a", "au", "t", "g"),
+            caption_from_fields("", "built-in", "u", "a", "au", "t", "c", "g"),
             "built-in"
         );
+    }
+
+    #[test]
+    fn compose_text_joins_title_and_content() {
+        assert_eq!(compose_text("标题", "正文"), "标题\n正文");
+        assert_eq!(compose_text("标题", ""), "标题");
+        assert_eq!(compose_text("", "正文"), "正文");
+        assert_eq!(compose_text("", ""), "");
     }
 
     #[test]

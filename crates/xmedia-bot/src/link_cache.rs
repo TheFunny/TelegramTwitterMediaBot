@@ -38,6 +38,10 @@ pub struct CachedPost {
     /// override).
     pub caption: String,
     pub title: String,
+    /// The post's body text. Defaulted on read: entries written before the
+    /// title/content split carry it inside `title`.
+    #[serde(default)]
+    pub content: String,
     pub author: String,
     pub author_url: String,
     pub tags: String,
@@ -182,6 +186,7 @@ mod tests {
             url: "https://x.com/u/status/1".into(),
             caption: "cap".into(),
             title: "t".into(),
+            content: "c".into(),
             author: "a".into(),
             author_url: "au".into(),
             tags: "".into(),

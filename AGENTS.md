@@ -24,7 +24,7 @@ Debug command: `/debug <url>` runs the same `x_media::site::fetch` and replies w
 
 The `/test <url>` command runs the ordinary link pipeline (`urls::url_media`) with `PostSend::Suppressed`: the media is sent and cached like any other link, but the chat's `forward_channel_id`/`edit_before_forward` are ignored, so a test never forwards to the channel and never opens the edit prompt (retries and dead-letter notifications behave as usual). Both commands use a custom `parse_arg_remainder` parser (whole remainder, trimmed) because teloxide's built-in `split` parser takes exactly one space-separated token.
 
-The `x-media` library: `site::fetch(url)` dispatches through the `SITES` registry (per-site `impl Site`, in order twitter → bsky → misskey → pixiv → bilibili) and returns `Ok(None)` for unmatched URLs. `Fetched { source_url, caption, title, media: Vec<Media>, sensitive, site_id, … }`; `caption_with(format)` substitutes `{url} {author} {author_url} {title} {tags}`.
+The `x-media` library: `site::fetch(url)` dispatches through the `SITES` registry (per-site `impl Site`, in order twitter → bsky → misskey → pixiv → bilibili) and returns `Ok(None)` for unmatched URLs. `Fetched { source_url, caption, title, content, media: Vec<Media>, sensitive, site_id, … }` (title and content are split per platform: a pixiv artwork's title and description, a bilibili headline and body, and text-only posts whose text is all `content`); `caption_with(format)` substitutes `{url} {author} {author_url} {title} {content} {tags}`.
 
 ## Key Directories
 

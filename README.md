@@ -114,7 +114,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `/remove_forward_channel` | 取消转发频道 |
 | `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
 | `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
-| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}` |
 | `/clear_cache [链接]` | 清空链接缓存（仅管理员）；带链接只清该条，否则清空全部 |
 | `/bot_dict` | 查看当前聊天状态（调试用；仅管理员） |
 | `/test <链接>` | 解析链接并发送媒体；不转发到频道、不弹转发前编辑提示（仅发送） |

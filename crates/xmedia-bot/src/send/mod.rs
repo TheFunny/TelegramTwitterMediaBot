@@ -1259,6 +1259,7 @@ mod tests {
                 url: "https://x.com/u/status/1".into(),
                 caption: "cap".into(),
                 title: "t".into(),
+                content: "c".into(),
                 author: "a".into(),
                 author_url: "au".into(),
                 tags: String::new(),
