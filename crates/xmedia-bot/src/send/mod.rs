@@ -17,7 +17,6 @@ use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::media_sender::MediaSender;
 use input_media::{build_media_group, input_file_for, item_url};
 use post_send::{cache_animation_send, cache_sent_task};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use teloxide::prelude::*;
@@ -261,7 +260,7 @@ pub fn photos_first(items: Vec<MediaItemPayload>) -> Vec<MediaItemPayload> {
 
 /// Exponential backoff with jitter, capped at 30s.
 pub fn retry_delay_seconds(attempts: u32) -> f64 {
-    let jitter: f64 = rand::thread_rng().gen_range(0.2..0.8);
+    let jitter: f64 = rand::random_range(0.2..0.8);
     (2f64.powi(attempts as i32) + jitter).min(30.0)
 }
 
