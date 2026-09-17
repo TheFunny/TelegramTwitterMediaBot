@@ -68,13 +68,15 @@ pub(crate) struct Desc {
     pub(crate) text: String,
 }
 
-/// `major` is a tagged union: `type` (`MAJOR_TYPE_DRAW` / `_ARCHIVE` / …)
-/// plus one payload object per type. Only the two payloads this adapter reads
-/// are modeled; an unknown major simply yields no media.
+/// `major` is a tagged union: `type` (`MAJOR_TYPE_DRAW` / `_OPUS` /
+/// `_ARCHIVE` / …) plus one payload object per type. Only the three payloads
+/// this adapter reads are modeled; an unknown major simply yields no media.
 #[derive(Deserialize, Debug)]
 pub(crate) struct Major {
     #[serde(default)]
     pub(crate) draw: Option<Draw>,
+    #[serde(default)]
+    pub(crate) opus: Option<Opus>,
     #[serde(default)]
     pub(crate) archive: Option<Archive>,
 }
@@ -87,8 +89,36 @@ pub(crate) struct Draw {
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Pic {
-    /// Image URL, served as `http://` — normalized to https by the adapter.
-    pub(crate) src: String,
+    /// `major.draw` image URL.
+    #[serde(default)]
+    pub(crate) src: Option<String>,
+    /// `major.opus.pics` image URL — the opus shape names the field
+    /// differently while carrying the same image.
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+}
+
+impl Pic {
+    /// The image URL, whichever key this serialization put it under.
+    pub(crate) fn url(&self) -> Option<&str> {
+        self.src.as_deref().or(self.url.as_deref())
+    }
+}
+
+/// `major.opus`: the serialization of an image/text post the web client asks
+/// for (`features=itemOpusStyle`). It carries the parts the legacy shape drops
+/// entirely — the document title and body of an opus post, whose
+/// `module_dynamic.desc` comes back `null`.
+#[derive(Deserialize, Debug)]
+pub(crate) struct Opus {
+    /// Document headline; often absent.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    /// Document body (untruncated: a 307-char sample came back whole).
+    #[serde(default)]
+    pub(crate) summary: Option<Desc>,
+    #[serde(default)]
+    pub(crate) pics: Vec<Pic>,
 }
 
 #[derive(Deserialize, Debug)]

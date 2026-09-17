@@ -9,8 +9,10 @@
 //! `x/player/playurl` and its size/quality chasing — the cover plus the post
 //! link is what the operator asked for.
 //!
-//! Text: a post's own body (`module_dynamic.desc.text`); for a 视频投稿动态
-//! the body is empty by construction, so the archive card's title stands in.
+//! Text: an image/text post is read from its opus serialization
+//! (`features=itemOpusStyle` — the legacy serialization carries no text at
+//! all), a forward from its own body plus the quote's, and a 视频投稿动态
+//! from the archive card's title, which it has instead of a body.
 //!
 //! `b23.tv` short links are not matched: most of them point at videos, which
 //! this adapter does not handle, and matching them would turn a silently
@@ -41,6 +43,17 @@ const SPI_URL: &str = "https://api.bilibili.com/x/frontend/finger/spi";
 /// Sent with every API request: requests without it are the ones bilibili
 /// risk-controls (`code -352`, HTTP 412).
 const REFERER: &str = "https://www.bilibili.com/";
+
+/// Web feature flag that makes the detail endpoint serialize an image/text
+/// post as `major.opus` instead of the legacy `major.draw` + `desc` pair.
+///
+/// Not optional: without it an opus post comes back with **no text at all**
+/// (`desc: null` and no `major.opus`), which is how the document title and
+/// body — the post's actual content — used to be lost (verified 2026-09-17
+/// on `opus/1248857553488576532`: legacy `desc: null`, flagged
+/// `major.opus.summary.text = "[doge_金箍]黑白搭配"`). The adapter still
+/// parses the legacy shape as a fallback, in case the flag is retired.
+const OPUS_FEATURE: &str = "itemOpusStyle";
 
 /// hdslb image variant used as thumbnail (and as the oversized fallback): a
 /// downscaled still of the same image, ~30 KB instead of ~570 KB. Verified
@@ -194,7 +207,7 @@ async fn request(url: &str) -> reqwest::RequestBuilder {
 pub async fn fetch(dynamic_id: &str) -> Result<model::Item, FetchError> {
     let response = request(API_URL)
         .await
-        .query(&[("id", dynamic_id)])
+        .query(&[("id", dynamic_id), ("features", OPUS_FEATURE)])
         .send()
         .await?;
     let status = response.status();
@@ -307,32 +320,55 @@ fn desc_text(item: &model::Item) -> &str {
         .unwrap_or_default()
 }
 
-fn archive_title(item: &model::Item) -> Option<&str> {
+fn major(item: &model::Item) -> Option<&model::Major> {
     item.modules
         .as_ref()
         .and_then(|modules| modules.module_dynamic.as_ref())
         .and_then(|dynamic| dynamic.major.as_ref())
+}
+
+fn opus(item: &model::Item) -> Option<&model::Opus> {
+    major(item).and_then(|major| major.opus.as_ref())
+}
+
+fn archive_title(item: &model::Item) -> Option<&str> {
+    major(item)
         .and_then(|major| major.archive.as_ref())
         .and_then(|archive| archive.title.as_deref())
         .filter(|title| !title.trim().is_empty())
 }
 
-/// The dynamic's own words: its body, or the attached video's title when the
-/// body is empty.
+/// The dynamic's own words, richest source first: the opus document
+/// (headline plus body) → `module_dynamic.desc.text` → the attached video's
+/// card title.
 ///
-/// A 视频投稿动态 (`MAJOR_TYPE_ARCHIVE`) carries **no body at all** — `desc`
-/// comes back `null`, the content being the archive card (verified on 9 live
-/// AV dynamics 2026-09-17). Falling back to the card title is what keeps
-/// `title` (and `{title}` in caption formats) populated for the most common
-/// dynamic type, mirroring pixiv, whose `title` is the artwork title rather
-/// than post text.
-fn own_text(item: &model::Item) -> &str {
-    let body = desc_text(item);
-    if body.trim().is_empty() {
-        archive_title(item).unwrap_or_default()
-    } else {
-        body
+/// The opus shape is what makes ordinary 图文 posts readable at all — their
+/// legacy serialization has no text — while a 视频投稿动态 has no body
+/// anywhere and is represented by its card title (mirroring pixiv, whose
+/// `title` is the artwork title rather than post text).
+fn own_text(item: &model::Item) -> String {
+    if let Some(opus) = opus(item) {
+        let title = opus.title.as_deref().unwrap_or_default().trim();
+        let body = opus
+            .summary
+            .as_ref()
+            .map(|summary| summary.text.trim())
+            .unwrap_or_default();
+        let text = match (title.is_empty(), body.is_empty()) {
+            (false, false) => format!("{title}\n{body}"),
+            (false, true) => title.to_string(),
+            (true, false) => body.to_string(),
+            (true, true) => String::new(),
+        };
+        if !text.is_empty() {
+            return text;
+        }
     }
+    let body = desc_text(item).trim();
+    if !body.is_empty() {
+        return body.to_string();
+    }
+    archive_title(item).unwrap_or_default().to_string()
 }
 
 fn topic_name(item: &model::Item) -> &str {
@@ -349,19 +385,19 @@ fn topic_name(item: &model::Item) -> &str {
 fn text_of(item: &model::Item) -> String {
     let own = own_text(item);
     let Some(orig) = item.orig.as_deref() else {
-        return own.to_string();
+        return own;
     };
     let orig_text = own_text(orig);
     if orig_text.is_empty() {
-        return own.to_string();
+        return own;
     }
     let name = author_name(orig);
-    let mut text = own.to_string();
+    let mut text = own;
     if !text.is_empty() {
         text.push('\n');
     }
     if name.is_empty() {
-        text.push_str(orig_text);
+        text.push_str(&orig_text);
     } else {
         text.push_str(&format!("//@{name}:\n{orig_text}"));
     }
@@ -380,19 +416,26 @@ fn media_of(item: &model::Item) -> Vec<Media> {
 }
 
 fn own_media(item: &model::Item) -> Vec<Media> {
-    let Some(major) = item
-        .modules
-        .as_ref()
-        .and_then(|modules| modules.module_dynamic.as_ref())
-        .and_then(|dynamic| dynamic.major.as_ref())
-    else {
+    // Flagged serialization first: image posts put their pictures in
+    // `major.opus.pics` (and carry no `major.draw` at all).
+    if let Some(opus) = opus(item) {
+        let pics: Vec<Media> = opus
+            .pics
+            .iter()
+            .filter_map(|pic| pic.url().and_then(image))
+            .collect();
+        if !pics.is_empty() {
+            return pics;
+        }
+    }
+    let Some(major) = major(item) else {
         return Vec::new();
     };
     if let Some(draw) = major.draw.as_ref() {
         return draw
             .items
             .iter()
-            .filter_map(|pic| image(&pic.src))
+            .filter_map(|pic| pic.url().and_then(image))
             .collect();
     }
     major
@@ -628,6 +671,91 @@ mod tests {
         assert!(fetched.media.is_empty());
     }
 
+    /// The serialization the web client asks for: an image/text post arrives
+    /// as `major.opus` (pictures, body and optional headline) with **no**
+    /// `desc` — the legacy shape would lose the text entirely.
+    #[test]
+    fn from_item_opus_shape_carries_text_and_pics() {
+        let major = serde_json::json!({
+            "type": "MAJOR_TYPE_OPUS",
+            "opus": {
+                "title": "每个人的青春里，都有一首 A-Lin",
+                "summary": { "text": "那些曾经陪你失恋的歌\n\n【活动】详情见正文" },
+                "pics": [
+                    { "url": "http://i0.hdslb.com/bfs/new_dyn/a.jpg", "width": 2304, "height": 2880 },
+                    { "url": "http://i0.hdslb.com/bfs/new_dyn/b.jpg", "width": 2304, "height": 2880 },
+                ],
+                "fold_action": ["展开", "收起"],
+                "jump_url": "//www.bilibili.com/opus/1245284537985925159",
+            },
+        });
+        let item = {
+            let mut json = item_json(major, "");
+            json["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
+            json
+        };
+        let fetched = parse(item);
+
+        assert_eq!(
+            fetched.title,
+            "每个人的青春里，都有一首 A-Lin\n那些曾经陪你失恋的歌\n\n【活动】详情见正文"
+        );
+        assert!(
+            fetched.caption.contains("那些曾经陪你失恋的歌"),
+            "{}",
+            fetched.caption
+        );
+        assert_eq!(fetched.media.len(), 2);
+        match &fetched.media[0] {
+            Media::Illustration {
+                url, thumbnail_url, ..
+            } => {
+                assert_eq!(url, "https://i0.hdslb.com/bfs/new_dyn/a.jpg");
+                assert_eq!(
+                    thumbnail_url.as_deref(),
+                    Some("https://i0.hdslb.com/bfs/new_dyn/a.jpg@518w.jpg")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            fetched.media[1].url(),
+            "https://i0.hdslb.com/bfs/new_dyn/b.jpg"
+        );
+
+        // A body without a headline, and a headline without a body, both
+        // stand alone rather than rendering an empty line.
+        for (title, body, expected) in [
+            (None, "只有正文", "只有正文"),
+            (Some("只有标题"), "", "只有标题"),
+        ] {
+            let major = serde_json::json!({
+                "type": "MAJOR_TYPE_OPUS",
+                "opus": { "title": title, "summary": { "text": body }, "pics": [] },
+            });
+            let mut json = item_json(major, "");
+            json["modules"]["module_dynamic"]["desc"] = serde_json::Value::Null;
+            assert_eq!(parse(json).title, expected);
+        }
+    }
+
+    /// The legacy shape stays supported: bilibili's `itemOpusStyle` flag is
+    /// what moves the pictures to `major.opus.pics`, but `major.draw` items
+    /// and a text-only `desc` must keep working if it is retired.
+    #[test]
+    fn from_item_legacy_draw_shape_still_parses() {
+        let fetched = parse(item_json(
+            draw_item("http://i0.hdslb.com/bfs/new_dyn/l.jpg"),
+            "legacy 正文",
+        ));
+        assert_eq!(fetched.title, "legacy 正文");
+        assert_eq!(fetched.media.len(), 1);
+        assert_eq!(
+            fetched.media[0].url(),
+            "https://i0.hdslb.com/bfs/new_dyn/l.jpg"
+        );
+    }
+
     /// The video stream is out of scope; an AV dynamic still yields its cover.
     #[test]
     fn from_item_maps_archive_cover() {
@@ -853,6 +981,23 @@ mod tests {
         };
         assert!(fetched.media.is_empty());
         assert!(!fetched.title.trim().is_empty());
+    }
+
+    /// Regression for the reported case: this opus post's legacy
+    /// serialization has `desc: null`, so without the `itemOpusStyle`
+    /// request it parsed with an empty title.
+    #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to api.bilibili.com"]
+    async fn live_fetch_opus_dynamic_has_title_and_text() {
+        let Some(fetched) = live_fetch("https://www.bilibili.com/opus/1248857553488576532").await
+        else {
+            return;
+        };
+        assert_eq!(fetched.title, "[doge_金箍]黑白搭配");
+        assert!(fetched.caption.ends_with("黑白搭配"), "{}", fetched.caption);
+        let urls: Vec<&str> = fetched.media.iter().map(|m| m.url()).collect();
+        assert_eq!(urls.len(), 1, "{urls:?}");
+        assert!(urls[0].starts_with("https://i0.hdslb.com/"), "{urls:?}");
     }
 
     #[tokio::test]

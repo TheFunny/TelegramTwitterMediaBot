@@ -69,6 +69,7 @@
 | `dyn_archive` 字段 | 有 `aid/bvid/cover/title/duration_text`，**没有 `cid`**（所以发流要再来一次 `view` 请求） |
 | **风控阶梯（同一 IP 连续请求后实测）** | ① 无 cookie → `-352`；② 仅 `buvid3` → 仍 `-352`；③ `buvid3`+`buvid4`（取自匿名 `/x/frontend/finger/spi`）→ **`code:0` 恢复**；④ 继续高频请求后 → 连同 buvid 一起 `-352`（此时只有登录 cookie 或换 IP） |
 | **正文位置（24 条真实动态逐条审计）** | 有正文的动态都在 `module_dynamic.desc.text`（图文/转发/纯文字，含 34–193 字样本）；**AV（视频投稿）动态 `desc` 恒为 `null`**，内容在 `major.archive.title` / `.desc` 卡片里 → 已做 title 回退 |
+| **`features=itemOpusStyle` 的效果** | 同一端点带此参数后，图文帖改为 `major.opus` 形态：`pics[]`（图，key 是 `url`）、`summary.text`（正文，未截断，实测 307 字整段）、`title`（可选标题）；不带参数则是 legacy `major.draw` + `desc`，而 **opus 图文帖的 `desc` 为 `null`、正文与标题完全丢失**（`opus/1248857553488576532`：legacy `desc:null`，带参数 `summary.text="[doge_金箍]黑白搭配"`）。AV / 转发帖不受该参数影响 → 适配器改为请求时带参数，并保留 legacy 形态兜底 |
 | feed 与 detail 的差异 | `feed/space` 的 item 会把 `desc.text` 挖空，**只有 detail 有正文** → 排查时不要用 feed 数据判断正文缺失 |
 | 不存在的 19 位 id | `4101105 请求数据发生错误`（提示可重试，但只出现在不可能存在的 id 上）→ 仍归入永久错误，见 `code_error` 注释 |
 
@@ -114,15 +115,16 @@ crates/x-media/src/site/bilibili/model.rs      # 纯 Deserialize DTO（全 Optio
 - **错误映射**：`0` → 成功；`-352/-412` 与 HTTP 412 → `Transient`（可重试，队列退避；首次记一条 warn 提示
   `BILIBILI_COOKIE`）；`500`/`4101147` → `NotFound`（永久）；其他 code → `Site`（永久）。
 - **媒体**：
-  - `major.draw.items[]` → 每张一张图（`http://` / `//` → `https://`，非 https 开头直接丢弃）；
+  - `major.opus.pics[]`（带 `features=itemOpusStyle` 时的图文帖形态，字段名是 `url`）→ 每张一张图；
+    其次 `major.draw.items[]`（legacy，字段名 `src`）→ 同样逐张；`http://` / `//` → `https://`，非 https 开头直接丢弃。
     `.gif` → `Media::Animated`（`thumbnail_url` 留空，Telegram 自己取首帧——`@518w.jpg` 只对 jpg/webp 实测过），
     其余 → `Media::Illustration`（`thumbnail_url = url + "@518w.jpg"`，兼作超大时的降级 URL）。
   - `major.archive.cover` → 1 张 `Illustration`（视频不发流）。
   - 转发且自身无媒体 → 递归取 `orig` 的媒体；正文拼 `//@{原作者}:\n{原文}`。
   - 其他 major（PGC/ARTICLE/MUSIC/LIVE/COMMON）不建模 → 无媒体，走既有 "No media found"。
-- **正文 / title**：`module_dynamic.desc.text`；为空时回退到 **`major.archive.title`**。
-  实测（24 条真实动态审计 + 9 条 AV 动态）AV 动态（视频投稿）的 `desc` 恒为 `null`——它的"内容"就是卡片，
-  不回退则所有视频动态的 `title`/`{title}` 都是空的。有正文的动态（图文/转发/纯文字）`desc.text` 实测正常。
+- **正文 / title**（按信息量从多到少回退）：`major.opus.title` + `major.opus.summary.text`
+  → `module_dynamic.desc.text` → `major.archive.title`。三者分别对应：图文文档（标题+正文）、
+  legacy/转发帖正文、视频投稿卡片标题。开头结尾空白做 trim；整体再由既有 `truncate_caption` 截断。
 - **caption**（与 misskey 同形）：`{opus 链接}\n<a href="space.bilibili.com/{mid}">{name}</a>: {正文}`；
   `RenderData` 的 `{tags}` 来自话题名；正文由既有 `truncate_caption` 截断。
 - **注册表**：`SITES` 末尾追加 → `/set_format` 白名单、链接缓存、启动校验、日志前缀全部自动生效。
@@ -138,6 +140,7 @@ crates/x-media/src/site/bilibili/model.rs      # 纯 Deserialize DTO（全 Optio
 | `validate()` 校验 cookie | 不做 | 匿名可用，cookie 失效不致命；校验要额外请求一个端点，收益低 |
 | `media_headers` 给 hdslb 加 Referer | 返回 `None` | 实测图片与 durl 均无需 Referer（注释里记了这条验证） |
 | 计划阶段认为设备 cookie 是 YAGNI，不实现 | **实现**（`buvid3`+`buvid4`） | 计划之后做了对照实验：同一 IP 上"无 cookie → -352、只有 buvid3 → -352、buvid3+buvid4 → code:0"，说明这是对本适配器主要失败模式的直接修复，而不是冗余保险 |
+| 只用不带参数的 `v1/detail` | 加 `features=itemOpusStyle` | 用户实测反馈"有内容的动态没有 title"：不带参数时 opus 图文帖返回 legacy 形态，`desc` 为 `null`，正文与标题整个丢失。带参数后同一 ID 返回 `major.opus.summary.text` / `title` / `pics`。AV / 转发帖不受影响，legacy 形态仍保留为兜底 |
 
 ---
 
