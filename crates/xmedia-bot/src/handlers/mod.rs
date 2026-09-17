@@ -60,8 +60,8 @@ pub(crate) async fn reply_html(
 
 /// Log prefix tying the whole lifecycle of one link (fetch → send → cache →
 /// forward) together: the normalized cache key (`twitter:123…`, `pixiv:123`,
-/// `bsky:handle/rkey`) instead of the raw URL, so logs stay short and do not
-/// echo full user-submitted URLs at info level.
+/// `bsky:handle/rkey`, `bilibili:123…`) instead of the raw URL, so logs stay
+/// short and do not echo full user-submitted URLs at info level.
 pub fn log_key(url: &str) -> String {
     x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
 }

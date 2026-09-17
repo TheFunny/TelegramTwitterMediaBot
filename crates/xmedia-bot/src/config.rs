@@ -1,5 +1,6 @@
 //! Central env handling. The only other places that read env are
-//! `Bot::from_env` (TELOXIDE_TOKEN) and x-media (PIXIV_REFRESH_TOKEN).
+//! `Bot::from_env` (TELOXIDE_TOKEN) and x-media (PIXIV_REFRESH_TOKEN,
+//! TWITTER_AUTH_TOKEN, BILIBILI_COOKIE).
 
 use std::env;
 use std::net::IpAddr;

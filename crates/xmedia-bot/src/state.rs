@@ -17,7 +17,7 @@ pub struct ChatData {
     pub edit_message: HashMap<i64, EditMessage>,
     /// name -> HTML template containing "[]"
     pub template: HashMap<String, String>,
-    /// site name (twitter/bsky/misskey/pixiv) -> user-supplied caption format
+    /// site name (twitter/bsky/misskey/pixiv/bilibili) -> user-supplied caption format
     /// with {url} {author} {author_url} {title} {tags} placeholders.
     pub message_format: HashMap<String, String>,
 }

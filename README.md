@@ -1,6 +1,6 @@
 # TelegramXMediaBot
 
-Telegram 机器人，将 X / Twitter、Pixiv、Bluesky、Misskey (misskey.io) 的帖子链接转换为媒体消息发送，附带帖子标题、作者与标签。
+Telegram 机器人，将 X / Twitter、Pixiv、Bluesky、Misskey (misskey.io)、Bilibili 动态的帖子链接转换为媒体消息发送，附带帖子标题、作者与标签。
 
 ## 功能
 
@@ -30,9 +30,11 @@ docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 ```
 
-环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`LINK_CACHE_TTL_SECONDS`、`RUST_LOG`、`TELOXIDE_PROXY`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）。
+环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`LINK_CACHE_TTL_SECONDS`、`RUST_LOG`、`TELOXIDE_PROXY`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）、`BILIBILI_COOKIE`（可选）。
 
 NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTER_AUTH_TOKEN`（登录 x.com 后浏览器 Cookie 里的 `auth_token` 值）后，bot 会仅在遇到 NSFW 推文时以登录态获取媒体；未设置则提示无媒体。
+
+Bilibili 动态默认匿名抓取（无需登录，bot 会自动从 B 站的匿名指纹接口取 `buvid3`/`buvid4` 设备 cookie 以提高成功率）。若服务器出口 IP 被 B 站重度风控（日志里的 `risk control (-352)` 或 HTTP 412，且持续出现），设置 `BILIBILI_COOKIE`（登录后浏览器里整条 Cookie 串，如 `SESSDATA=…; bili_jct=…`）可恢复访问。当前只发送动态里的图片与动图，动态内嵌视频发送其封面。
 
 ### Webhook 部署（需要反向代理）
 
@@ -81,6 +83,7 @@ Telegram 只接受 443/80/88/8443 端口。
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token（必填） |
 | `PIXIV_REFRESH_TOKEN` | Pixiv 刷新令牌；未设置则禁用 Pixiv |
+| `BILIBILI_COOKIE` | 可选的 B 站 Cookie 串（`SESSDATA=…; bili_jct=…`），仅在出口 IP 被持续风控时才需要（设备 cookie 由 bot 自动获取） |
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
@@ -111,7 +114,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `/remove_forward_channel` | 取消转发频道 |
 | `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
 | `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
-| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{tags}` |
 | `/clear_cache [链接]` | 清空链接缓存（仅管理员）；带链接只清该条，否则清空全部 |
 | `/bot_dict` | 查看当前聊天状态（调试用；仅管理员） |
 | `/test <链接>` | 解析链接并发送媒体；不转发到频道、不弹转发前编辑提示（仅发送） |

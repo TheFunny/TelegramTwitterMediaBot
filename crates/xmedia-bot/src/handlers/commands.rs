@@ -279,7 +279,7 @@ pub(crate) async fn execute_command(
                     bot,
                     message.chat.id.0,
                     message.id,
-                    "Unknown site. Use twitter, bsky, pixiv or misskey.",
+                    "Unknown site. Use twitter, bsky, pixiv, misskey or bilibili.",
                 )
                 .await?;
                 return Ok(());
@@ -320,7 +320,7 @@ pub(crate) async fn execute_command(
                             bot,
                             message.chat.id.0,
                             message.id,
-                            "Unrecognized link. Use a twitter/x, pixiv, bsky or misskey post URL.",
+                            "Unrecognized link. Use a twitter/x, pixiv, bsky, misskey or bilibili post URL.",
                         )
                         .await?;
                         return Ok(());
@@ -358,7 +358,7 @@ pub(crate) async fn execute_command(
                     bot,
                     message.chat.id.0,
                     message.id,
-                    "No enabled site matches this link (twitter/x, pixiv, bsky or misskey).",
+                    "No enabled site matches this link (twitter/x, pixiv, bsky, misskey or bilibili).",
                 )
                 .await?;
                 return Ok(());
@@ -400,7 +400,7 @@ pub(crate) async fn execute_command(
                         bot,
                         message.chat.id.0,
                         message.id,
-                        "No enabled site matches this link (twitter/x, pixiv, bsky or misskey).",
+                        "No enabled site matches this link (twitter/x, pixiv, bsky, misskey or bilibili).",
                     )
                     .await?;
                 }

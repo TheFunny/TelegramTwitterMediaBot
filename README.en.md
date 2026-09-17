@@ -1,6 +1,6 @@
 # TelegramXMediaBot
 
-A Telegram bot that turns post links from X / Twitter, Pixiv, Bluesky, and Misskey (misskey.io) into media messages (images, video, GIF) with the post's title, author, and tags.
+A Telegram bot that turns post links from X / Twitter, Pixiv, Bluesky, Misskey (misskey.io), and Bilibili dynamics into media messages (images, video, GIF) with the post's title, author, and tags.
 
 ## Features
 
@@ -30,9 +30,11 @@ docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 ```
 
-Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `TELOXIDE_PROXY`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional).
+Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `TELOXIDE_PROXY`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional), `BILIBILI_COOKIE` (optional).
 
 NSFW tweets: the public syndication endpoint does not return sensitive content. Setting `TWITTER_AUTH_TOKEN` (the `auth_token` cookie value of a logged-in x.com session) lets the bot fetch NSFW media in the logged-in state only when it hits a withheld tweet; without it, the bot reports no media.
+
+Bilibili dynamics are fetched anonymously by default (no login; the bot fetches bilibili's anonymous `buvid3`/`buvid4` device cookies itself to raise the success rate). If the server's egress IP gets hard-flagged by bilibili (persistent `risk control (-352)` log lines or HTTP 412), set `BILIBILI_COOKIE` (the whole cookie string from a logged-in browser, e.g. `SESSDATA=…; bili_jct=…`) to restore access. Only a dynamic's images and animations are sent; an attached video degrades to its cover image.
 
 ### Webhook deployment (needs a reverse proxy)
 
@@ -81,6 +83,7 @@ Telegram only accepts ports 443/80/88/8443.
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token (required) |
 | `PIXIV_REFRESH_TOKEN` | Pixiv refresh token; Pixiv is disabled without it |
+| `BILIBILI_COOKIE` | Optional bilibili cookie string (`SESSDATA=…; bili_jct=…`); only needed when the egress IP stays risk-controlled (device cookies are fetched automatically) |
 | `BOT_ADMIN` | Admin chat IDs, comma-separated; receives start/stop notifications |
 | `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400 |
 | `LINK_CACHE_TTL_SECONDS` | Link-result cache expiry in seconds, default 604800 (7 days) |
@@ -111,7 +114,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `/remove_forward_channel` | Remove the forward channel |
 | `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or taps a template button to apply one) |
 | `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward") |
-| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{tags}` |
+| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{tags}` |
 | `/clear_cache [link]` | Clear the link cache (admin only); with a link only that entry, otherwise everything |
 | `/bot_dict` | Show the current chat state (debugging; admin only) |
 | `/test <link>` | Parse a link and send its media; no channel forward, no edit-before-forward prompt (send only) |

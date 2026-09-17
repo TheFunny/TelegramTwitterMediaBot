@@ -1,8 +1,8 @@
 //! Site fetching dispatcher and unified result types.
 //!
-//! Dispatch order: twitter → bsky → misskey → pixiv. Each site module
-//! exports a `PATTERN`, `enabled()` and `fetch_from_url()`; a future site
-//! plugs in by adding one guarded entry in `SITES`.
+//! Dispatch order: twitter → bsky → misskey → pixiv → bilibili. Each site
+//! module exports a `PATTERN`, `enabled()` and `fetch_from_url()`; a future
+//! site plugs in by adding one guarded entry in `SITES`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -13,6 +13,7 @@ use std::time::Duration;
 use regex::Regex;
 use thiserror::Error;
 
+pub mod bilibili;
 pub mod bsky;
 pub mod misskey;
 pub mod pixiv;
@@ -26,7 +27,8 @@ pub use pixiv::PixivError;
 pub struct Fetched {
     /// Canonical URL: `x.com/{author}/status/{id}` |
     /// `https://www.pixiv.net/artworks/{id}` |
-    /// `https://bsky.app/profile/{handle}/post/{rkey}`
+    /// `https://bsky.app/profile/{handle}/post/{rkey}` |
+    /// `https://www.bilibili.com/opus/{id}`
     pub source_url: String,
     /// The exact HTML produced by the site's caption().
     pub caption: String,
@@ -35,7 +37,7 @@ pub struct Fetched {
     pub media: Vec<crate::media::Media>,
     /// Spoiler flag for all media of this post.
     pub sensitive: bool,
-    /// Site id (`"twitter"` / `"bsky"` / `"pixiv"`): the single source of
+    /// Site id (`"twitter"` / `"bsky"` / `"pixiv"` / `"bilibili"`): the single source of
     /// truth for site identity — caption-format lookup, cache-key prefix and
     /// the SetFormat whitelist all derive from it. Set by the producing site.
     pub site_id: &'static str,
@@ -283,7 +285,7 @@ pub(crate) fn log_once_ffmpeg_missing() {
 }
 
 /// Site adapter: one impl per supported site (twitter / bsky / misskey /
-/// pixiv), registered in `SITES`. All site-specific knowledge — URL pattern,
+/// pixiv / bilibili), registered in `SITES`. All site-specific knowledge — URL pattern,
 /// cache-key format, fetch, retry policy, media-host headers, startup
 /// validation — lives in the site module; the central dispatcher only
 /// iterates the registry.
@@ -294,9 +296,9 @@ pub(crate) fn log_once_ffmpeg_missing() {
 /// site structs are stateless unit structs, so the boxed futures never
 /// borrow from `self` beyond the call's scope.
 pub trait Site: Send + Sync {
-    /// Stable site id (`"twitter"` / `"bsky"` / `"misskey"` / `"pixiv"`):
-    /// caption-format lookup, cache-key prefixes and the SetFormat whitelist
-    /// derive from it.
+    /// Stable site id (`"twitter"` / `"bsky"` / `"misskey"` / `"pixiv"` /
+    /// `"bilibili"`): caption-format lookup, cache-key prefixes and the
+    /// SetFormat whitelist derive from it.
     fn id(&self) -> &'static str;
     /// URL pattern; the dispatcher's first match wins (dispatch order).
     fn pattern(&self) -> &'static Regex;
@@ -332,14 +334,15 @@ pub trait Site: Send + Sync {
 type SiteFuture<'a, T, E = FetchError> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
 /// The one registry of supported sites, in dispatch order (twitter → bsky →
-/// misskey → pixiv). Adding a site = new module + one `Box::new(...)` entry
-/// here; the bot crate never lists sites itself.
+/// misskey → pixiv → bilibili). Adding a site = new module + one
+/// `Box::new(...)` entry here; the bot crate never lists sites itself.
 static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| {
     vec![
         Box::new(twitter::TwitterSite),
         Box::new(bsky::BskySite),
         Box::new(misskey::MisskeySite),
         Box::new(pixiv::PixivSite),
+        Box::new(bilibili::BilibiliSite),
     ]
 });
 
@@ -541,6 +544,10 @@ mod tests {
             cache_key("https://bsky.app/profile/handle.example/post/3lorem"),
             Some("bsky:handle.example/3lorem".into())
         );
+        assert_eq!(
+            cache_key("https://t.bilibili.com/1245284537985925159"),
+            Some("bilibili:1245284537985925159".into())
+        );
         assert_eq!(cache_key("https://example.com/not-a-post"), None);
     }
 
@@ -549,16 +556,21 @@ mod tests {
         assert_eq!(site_id_from_key("twitter:123"), "twitter");
         assert_eq!(site_id_from_key("pixiv:123"), "pixiv");
         assert_eq!(site_id_from_key("bsky:handle.example/3lorem"), "bsky");
+        assert_eq!(site_id_from_key("bilibili:123"), "bilibili");
         assert_eq!(site_id_from_key("unknown:1"), "unknown");
         assert_eq!(site_id_from_key("no-colon"), "unknown");
     }
 
     #[test]
     fn registry_lists_all_sites_in_dispatch_order() {
-        assert_eq!(site_ids(), vec!["twitter", "bsky", "misskey", "pixiv"]);
+        assert_eq!(
+            site_ids(),
+            vec!["twitter", "bsky", "misskey", "pixiv", "bilibili"]
+        );
         // Enabled sites dispatch; unsupported URLs never match.
         assert!(find_site("https://x.com/u/status/1").is_some());
         assert!(find_site("https://misskey.io/notes/abc").is_some());
+        assert!(find_site("https://t.bilibili.com/1245284537985925159").is_some());
         assert!(find_site("https://example.com/x").is_none());
         // Cache keys are pattern-driven, independent of the enabled() gate
         // (pixiv is disabled in tests without PIXIV_REFRESH_TOKEN).
