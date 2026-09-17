@@ -80,6 +80,11 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # No `actions/checkout` here on purpose: `docker/build-push-action` defaults
+  # to the Git context (`https://github.com/<owner>/<repo>.git#<ref>`), so
+  # BuildKit clones the repo itself and authenticates with the automatic
+  # github.token. Adding `context: .` below without a checkout step would hand
+  # BuildKit an empty workspace.
   docker:
     needs: should-build
     if: needs.should-build.outputs.build == 'true'
