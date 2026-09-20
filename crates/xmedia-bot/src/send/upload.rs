@@ -6,10 +6,22 @@ use super::input_media::{animation_media, input_file_for, item_url, photo_media,
 use super::{MediaItemPayload, SendError, Task, classify_to_send_error, retry_delay_seconds};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
+use std::sync::LazyLock;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InputFile, InputMedia, MessageId};
 use tempfile::NamedTempFile;
 use x_media::site::FetchError;
+
+/// How many fallback items may be downloaded and processed at once, across the
+/// whole process. A per-batch bound is not a memory bound: `URL_WORKERS` (8)
+/// and the queue's workers (4) can each be inside a batch, so a per-batch three
+/// allowed two dozen downloads in flight, each buffering a whole photo
+/// (up to [`photo::MAX_PHOTO_DOWNLOAD_BYTES`]) before it is processed. This is
+/// the only admission control on the media path; the send itself is paced by
+/// the rate limiter.
+const PREP_CONCURRENCY: usize = 6;
+static PREP_SLOTS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(PREP_CONCURRENCY));
 
 /// Infers a file extension from magic bytes so Telegram detects the mime type
 /// on multipart uploads.
@@ -62,12 +74,13 @@ async fn download_to_temp(
         | MediaItemPayload::Animation { media, .. } => media,
     };
     // Photos are downloaded even over the upload cap so `prepare_photo` can
-    // downscale / transcode them (cap = decode budget); videos and animations
-    // are refused as soon as the declared size crosses the upload cap — the
-    // boundary the size probe this replaced drew: a file of exactly the cap is
-    // admitted (`len > max_bytes` is false), one byte over is not.
+    // downscale / transcode them, up to their own download cap; videos and
+    // animations are refused as soon as the declared size crosses the upload
+    // cap. The limit is that cap, not `cap + 1`: a file of exactly the cap is
+    // admitted (`len > max_bytes` is false), and one byte over is not — the
+    // same boundary the size probe this replaced drew.
     let limit = if matches!(item, MediaItemPayload::Photo { .. }) {
-        photo::MAX_DECODE_BYTES
+        photo::MAX_PHOTO_DOWNLOAD_BYTES
     } else {
         MAX_UPLOAD_BYTES
     };
@@ -276,10 +289,12 @@ pub(super) async fn prepare_upload_item(
 
 /// Download-and-reupload fallback for one media batch. Files over the upload
 /// cap are not downloaded/uploaded; the item falls back to its smaller URL
-/// (which Telegram fetches itself). Items are prepared concurrently (bounded)
-/// because the downloads are network-bound; the batch is then uploaded in its
-/// original order. Returns the fallback-error without the task attached;
-/// callers wrap it with the updated task state.
+/// (which Telegram fetches itself). Items are prepared concurrently because the
+/// downloads are network-bound, under one process-wide bound ([`PREP_SLOTS`] —
+/// the URL and queue workers can each be inside a batch, so a per-batch bound
+/// would multiply); the batch is then uploaded in its original order. Returns
+/// the fallback-error without the task attached; callers wrap it with the
+/// updated task state.
 pub(super) async fn send_batch_via_upload(
     sender: &dyn MediaSender,
     chat_id: i64,
@@ -288,7 +303,6 @@ pub(super) async fn send_batch_via_upload(
     caption: Option<&str>,
     task: Task,
 ) -> Result<Vec<Message>, SendError> {
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
     let mut set = tokio::task::JoinSet::new();
     for (i, item) in batch.iter().enumerate() {
         let item_caption = if i == 0 {
@@ -297,9 +311,8 @@ pub(super) async fn send_batch_via_upload(
             None
         };
         let item = item.clone();
-        let sem = std::sync::Arc::clone(&sem);
         set.spawn(async move {
-            let _permit = sem.acquire().await.expect("upload semaphore closed");
+            let _permit = PREP_SLOTS.acquire().await.expect("upload semaphore closed");
             prepare_upload_item(item, i, item_caption.as_deref()).await
         });
     }
