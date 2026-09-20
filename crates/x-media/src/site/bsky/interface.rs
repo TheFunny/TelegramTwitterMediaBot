@@ -190,8 +190,14 @@ async fn resolve_bsky_video(
         return Err("bsky video has too many segments".to_string());
     }
 
-    let frames_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let frames_dir = tempfile::Builder::new()
+        .prefix(crate::TEMP_FILE_PREFIX)
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let out_dir = tempfile::Builder::new()
+        .prefix(crate::TEMP_FILE_PREFIX)
+        .tempdir()
+        .map_err(|e| e.to_string())?;
     let mut total: u64 = 0;
     let mut list = String::new();
     for (i, seg) in segments.iter().enumerate() {

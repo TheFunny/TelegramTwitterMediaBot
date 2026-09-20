@@ -1,4 +1,5 @@
 use dotenv::dotenv;
+use std::time::Duration;
 use teloxide::dptree::endpoint;
 use teloxide::prelude::*;
 use teloxide::stop::StopToken;
@@ -40,6 +41,54 @@ fn spawn_sigterm_handler(stop_token: StopToken) {
 #[cfg(not(unix))]
 fn spawn_sigterm_handler(_stop_token: StopToken) {}
 
+/// A leftover temp file must be at least this old before the startup sweep
+/// touches it. Orphans come from a *previous* run; anything younger could
+/// belong to a second instance sharing the temp directory (a misconfiguration,
+/// but one that must not cost it its in-flight download).
+const ORPHAN_TEMP_AGE: Duration = Duration::from_secs(3600);
+
+/// Removes this project's own leftover temp entries (`x_media::TEMP_FILE_PREFIX`)
+/// from `dir` once they are older than `older_than`. Returns how many were
+/// removed. Entries that are not ours, or are too young, or cannot be dated,
+/// are left alone: the OS temp directory is shared, and the marker prefix plus
+/// the age gate are the only two things that make deleting here safe.
+fn sweep_temp_dir(dir: &std::path::Path, older_than: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let cutoff = std::time::SystemTime::now() - older_than;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name
+            .to_string_lossy()
+            .starts_with(x_media::TEMP_FILE_PREFIX)
+        {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified < cutoff);
+        if !old_enough {
+            continue;
+        }
+        let path = entry.path();
+        let result = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            // Not worth a warning per entry: a file another process removed
+            // first (or one we may not delete) is not a problem here.
+            Err(e) => log::debug!("could not remove orphaned temp entry {path:?}: {e}"),
+        }
+    }
+    removed
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -56,6 +105,17 @@ async fn main() {
         )
         .init();
     log::info!("Starting bot");
+
+    // Temp media (downloaded files, ugoira/remux dirs) is cleaned up by
+    // `TempDir`/`NamedTempFile` on drop — which a killed process never runs.
+    // Without this sweep every hard restart left its downloads behind (up to
+    // hundreds of MB each) and nothing could tell them apart from a live
+    // process's files or from anything else in the OS temp dir. See
+    // [`sweep_temp_dir`] for why the age gate makes that safe.
+    let orphans = sweep_temp_dir(&std::env::temp_dir(), ORPHAN_TEMP_AGE);
+    if orphans > 0 {
+        log::info!("swept {orphans} orphaned temp file(s) from a previous run");
+    }
 
     let bot = Bot::from_env();
     // Force the queue workers' shared Bot to initialize now so a missing
@@ -258,5 +318,55 @@ async fn main() {
         log::warn!("graceful shutdown timed out after {SHUTDOWN_TIMEOUT:?}; exiting");
     } else {
         log::info!("Bot stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_removes_only_our_old_temp_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(7200);
+        let make = |name: &str, aged: bool| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            if aged {
+                let file = std::fs::File::options().write(true).open(&path).unwrap();
+                file.set_modified(old).unwrap();
+            }
+            path
+        };
+        let ours_old = make(&format!("{}photo-old.jpg", x_media::TEMP_FILE_PREFIX), true);
+        let ours_fresh = make(
+            &format!("{}photo-new.jpg", x_media::TEMP_FILE_PREFIX),
+            false,
+        );
+        let theirs = make("someone-elses-file", true);
+
+        assert_eq!(sweep_temp_dir(dir.path(), Duration::from_secs(3600)), 1);
+        assert!(!ours_old.exists(), "an old leftover of ours is removed");
+        assert!(ours_fresh.exists(), "a fresh file may belong to a live run");
+        assert!(
+            theirs.exists(),
+            "files without our prefix are never touched"
+        );
+
+        // A caller with no age gate also reaches the directory branch (aging a
+        // *directory* is not portable, so the gate is what the first half
+        // above proves): the fresh dir and file go, the unrelated file stays.
+        let leftover_dir = dir
+            .path()
+            .join(format!("{}ugoira", x_media::TEMP_FILE_PREFIX));
+        std::fs::create_dir(&leftover_dir).unwrap();
+        std::fs::write(leftover_dir.join("frame.png"), b"x").unwrap();
+        assert_eq!(sweep_temp_dir(dir.path(), Duration::ZERO), 2);
+        assert!(
+            !leftover_dir.exists(),
+            "leftover dirs go with their contents"
+        );
+        assert!(!ours_fresh.exists(), "no age gate: ours, however fresh");
+        assert!(theirs.exists());
     }
 }

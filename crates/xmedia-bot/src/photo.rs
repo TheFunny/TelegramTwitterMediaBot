@@ -199,6 +199,7 @@ fn encode_jpeg(pix: &PixBuf, w: u32, h: u32) -> Result<Vec<u8>, String> {
 
 fn write_temp(bytes: &[u8], ext: &str) -> Result<NamedTempFile, String> {
     let mut file = tempfile::Builder::new()
+        .prefix(x_media::TEMP_FILE_PREFIX)
         .suffix(&format!(".{ext}"))
         .tempfile()
         .map_err(|e| format!("temp file failed: {e}"))?;

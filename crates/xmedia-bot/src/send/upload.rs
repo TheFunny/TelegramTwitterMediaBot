@@ -75,6 +75,7 @@ async fn download_to_temp(
     };
     let ext = sniff_ext(&bytes);
     let mut file = tempfile::Builder::new()
+        .prefix(x_media::TEMP_FILE_PREFIX)
         .suffix(&format!(".{ext}"))
         .tempfile()
         .map_err(|e| FallbackError::Permanent {

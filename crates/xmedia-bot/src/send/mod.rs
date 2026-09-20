@@ -899,7 +899,7 @@ mod tests {
         // A send failure names the post (the cache key) and the cause, so the
         // user knows which of their links died.
         let task = sequence_task("https://x.com/u/status/1");
-        let text = super::post_send::failure_text(Some(&task), "retries exhausted");
+        let text = super::post_send::failure_text(task.source_url(), "retries exhausted");
         assert!(text.contains("twitter:1"), "{text}");
         assert!(text.contains("retries exhausted"), "{text}");
 
@@ -912,7 +912,7 @@ mod tests {
             notify_chat_id: None,
             notify_message_id: None,
         };
-        let text = super::post_send::failure_text(Some(&forward), "chat not found");
+        let text = super::post_send::failure_text(forward.source_url(), "chat not found");
         assert!(text.starts_with("Forward failed permanently"), "{text}");
         assert!(text.contains("chat not found"), "{text}");
     }

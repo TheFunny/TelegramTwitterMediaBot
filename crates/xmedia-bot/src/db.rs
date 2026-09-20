@@ -124,7 +124,37 @@ pub fn open_store(path: &str) -> rusqlite::Result<Arc<DbPool>> {
     }
     let conn = open_db(path)?;
     schema_init(&conn)?;
+    migrate(&conn)?;
     Ok(Arc::new(DbPool::new(path)))
+}
+
+/// Schema migrations, applied in order and tracked by `PRAGMA user_version`
+/// (the index in this array + 1 is the version a statement brings the
+/// database to). Append only — never edit or reorder an entry, or databases
+/// already past it would skip or repeat work.
+const MIGRATIONS: &[&str] = &[
+    // 1: lease fencing. A worker's write-backs (`delete`/`reschedule`/the
+    // lease heartbeat) are guarded by the token it was leased with, so a
+    // lease that expired and was re-leased by another worker can no longer be
+    // written by its former holder — which used to duplicate a send or drop
+    // the new holder's retry state, silently.
+    "ALTER TABLE tasks ADD COLUMN lease_token TEXT",
+];
+
+/// Brings an existing database up to [`MIGRATIONS`]. Idempotent: a database
+/// already at the latest version does no work.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    for (index, statement) in MIGRATIONS.iter().enumerate() {
+        let target = index as i64 + 1;
+        if version >= target {
+            continue;
+        }
+        conn.execute_batch(statement)?;
+        // `PRAGMA` does not take bind parameters; the value is our own index.
+        conn.execute_batch(&format!("PRAGMA user_version = {target}"))?;
+    }
+    Ok(())
 }
 
 fn rusqlite_error(e: std::io::Error) -> rusqlite::Error {
@@ -135,11 +165,11 @@ fn rusqlite_error(e: std::io::Error) -> rusqlite::Error {
 /// The three stores used to own their own schema; keeping it in one place
 /// means one initialization for the whole database file.
 ///
-/// ⚠️ Schema-change reminder (deferred, see `docs/architecture-refactor.md`
-/// §5): this is a plain `CREATE TABLE IF NOT EXISTS` with no versioning.
-/// Before any column/table change that must migrate existing databases, land
-/// the `PRAGMA user_version` migration chain first (`MIGRATIONS: &[&str]` +
-/// `migrate(conn)`), then restructure this function.
+/// This is the **baseline** schema (version 0): a fresh database is created
+/// exactly like this, and anything that must *change* an existing one is
+/// appended to [`MIGRATIONS`] instead of being edited in here — otherwise a
+/// database created before the change would never gain the new column and a
+/// freshly created one would try to apply the migration a second time.
 pub fn schema_init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \

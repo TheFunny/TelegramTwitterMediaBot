@@ -221,6 +221,7 @@ impl PixivAPI {
         // memory: ugoira zips can be hundreds of MB, and the old
         // download_media_limited path spiked RAM up to the size cap.
         let mut zip_file = tempfile::Builder::new()
+            .prefix(crate::TEMP_FILE_PREFIX)
             .suffix(".zip")
             .tempfile()
             .map_err(|e| PixivError::Api(format!("temp zip failed: {e}")))?;
@@ -233,8 +234,14 @@ impl PixivAPI {
         let frame_delays = metadata.frames.iter().map(|f| f.delay).collect::<Vec<_>>();
         let result =
             tokio::task::spawn_blocking(move || -> Result<(String, tempfile::TempDir), String> {
-                let frames_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-                let out_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+                let frames_dir = tempfile::Builder::new()
+                    .prefix(crate::TEMP_FILE_PREFIX)
+                    .tempdir()
+                    .map_err(|e| e.to_string())?;
+                let out_dir = tempfile::Builder::new()
+                    .prefix(crate::TEMP_FILE_PREFIX)
+                    .tempdir()
+                    .map_err(|e| e.to_string())?;
 
                 // Extract frames to canonical zero-padded names; pixiv ugoira
                 // frames are uniformly jpg or png per artwork. The zip is read

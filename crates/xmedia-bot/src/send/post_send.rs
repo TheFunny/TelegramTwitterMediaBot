@@ -321,7 +321,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                         ctx.sender,
                         notify_chat_id,
                         notify_message_id,
-                        &failure_text(Some(&task), "retry could not be queued"),
+                        &failure_text(task.source_url(), "retry could not be queued"),
                     )
                     .await;
                 }
@@ -435,13 +435,32 @@ async fn send_media_or_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
 
 /// User-facing text for a task that will never run again: which link died and
 /// why. The raw error alone left the user guessing which post it was about.
-pub(super) fn failure_text(task: Option<&Task>, message: &str) -> String {
-    match task.and_then(|task| task.source_url()).map(log_key) {
+pub(super) fn failure_text(source_url: Option<&str>, message: &str) -> String {
+    match source_url.map(log_key) {
         Some(key) => format!("Send failed permanently for {key}: {message}"),
-        // `ForwardMessages` carries no source URL: that failure is about the
-        // channel copy, not about a post.
+        // `ForwardMessages` carries no source URL (and neither does an
+        // unparsable payload): that failure is about the channel copy, not
+        // about a post.
         None => format!("Forward failed permanently: {message}"),
     }
+}
+
+/// The post a stored payload is about, without parsing it into a [`Task`]:
+/// used when the payload no longer deserializes (written by an older version,
+/// or corrupted) but its identity fields are still readable.
+fn payload_source_url(payload: &serde_json::Value) -> Option<&str> {
+    payload.get("source_url").and_then(|v| v.as_str())
+}
+
+/// Whether a stored payload was a *cached* send (see `Task::is_cached_send`),
+/// read straight off the JSON — the unparsable case still has to know whether
+/// a link-cache entry may be holding the media that failed.
+fn payload_is_cached_send(payload: &serde_json::Value) -> bool {
+    payload
+        .get("cache_data")
+        .and_then(|data| data.get("media"))
+        .and_then(|media| media.as_array())
+        .is_some_and(|media| !media.is_empty())
 }
 
 /// Dead-letter callback wired to the queue in main: settles the task and
@@ -457,6 +476,18 @@ pub(crate) async fn dead_letter_notify(
     let task = serde_json::from_value::<Task>(payload.clone()).ok();
     if let Some(task) = &task {
         settle_task(ctx, task, Settled::Failed).await;
+    } else {
+        // A payload that no longer parses (an older version's row shape, a
+        // corrupted one) still says which post it was about: drop the stale
+        // cache entry the same way, instead of leaving a bad file id to be
+        // re-sent forever — and name the post in the notification rather than
+        // reporting a *forward* failure for a send task.
+        if payload_is_cached_send(&payload)
+            && let Some(key) = payload_source_url(&payload).and_then(x_media::site::cache_key)
+        {
+            log::debug!("removing stale link cache entry for [key={key}]");
+            ctx.link_cache.remove(&key).await;
+        }
     }
     let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
     let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
@@ -464,7 +495,12 @@ pub(crate) async fn dead_letter_notify(
         ctx.sender,
         notify_chat_id,
         notify_message_id,
-        &failure_text(task.as_ref(), &message),
+        &failure_text(
+            task.as_ref()
+                .and_then(|task| task.source_url())
+                .or_else(|| payload_source_url(&payload)),
+            &message,
+        ),
     )
     .await;
 }

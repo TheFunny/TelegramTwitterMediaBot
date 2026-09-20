@@ -68,7 +68,18 @@ struct LeasedRow {
     id: String,
     payload: String,
     attempts: i32,
+    /// Random token for *this* lease. Every write-back the worker makes is
+    /// guarded by it, so a lease that expired (heartbeat starved, host
+    /// suspended) and was re-leased by another worker cannot be written by
+    /// its former holder.
+    lease_token: String,
 }
+
+/// The row is no longer ours: its lease expired and another worker took it.
+/// The former holder must not write anything back — a `delete` would erase the
+/// new holder's row (or a `reschedule` would overwrite its retry state) — so
+/// the attempt stops at the next heartbeat instead.
+struct LeaseLost;
 
 /// Owned worker state so the spawned loop does not borrow the queue handle.
 #[derive(Clone)]
@@ -252,15 +263,22 @@ impl PersistentTaskQueue {
 /// Last-resort terminal state for a row whose `DELETE` would not go through:
 /// `done` is invisible to `lease_next` (`status='pending'`), to the expiry
 /// sweep (`status='in_progress'`) and to the backlog line, so a task that
-/// already ran cannot be leased and run again.
-async fn mark_done(pool: &std::sync::Arc<crate::db::DbPool>, id: &str) -> rusqlite::Result<()> {
+/// already ran cannot be leased and run again. Token-guarded like every other
+/// write-back: `Ok(false)` means the row was re-leased and is not ours to
+/// tombstone.
+async fn mark_done(
+    pool: &std::sync::Arc<crate::db::DbPool>,
+    id: &str,
+    lease_token: &str,
+) -> rusqlite::Result<bool> {
     let id = id.to_string();
+    let lease_token = lease_token.to_string();
     pool.with_conn(move |conn| {
-        conn.execute(
-            "UPDATE tasks SET status='done', locked_until=0 WHERE id = ?1",
-            params![id],
+        let affected = conn.execute(
+            "UPDATE tasks SET status='done', locked_until=0 WHERE id = ?1 AND lease_token = ?2",
+            params![id, lease_token],
         )?;
-        Ok(())
+        Ok(affected == 1)
     })
     .await
 }
@@ -364,15 +382,17 @@ impl QueueWorker {
                 }
                 Err(e) => return Err(e),
             };
+            let lease_token = format!("{:016x}", rand::random::<u64>());
             tx.execute(
-                "UPDATE tasks SET status='in_progress', locked_until=?1 WHERE id=?2",
-                params![now + LOCK_TTL_SECONDS, id],
+                "UPDATE tasks SET status='in_progress', locked_until=?1, lease_token=?2 WHERE id=?3",
+                params![now + LOCK_TTL_SECONDS, lease_token, id],
             )?;
             tx.commit()?;
             Ok(Some(LeasedRow {
                 id,
                 payload,
                 attempts,
+                lease_token,
             }))
         })
         .await
@@ -410,7 +430,7 @@ impl QueueWorker {
             Ok(value) => value,
             Err(e) => {
                 log::error!("queue: unparseable payload for {}: {e}", row.id);
-                self.delete_row(&row.id).await;
+                self.delete_row(&row.id, &row.lease_token).await;
                 (self.dead_letter)(Value::Null, format!("invalid stored payload: {e}")).await;
                 return;
             }
@@ -422,12 +442,28 @@ impl QueueWorker {
             row.attempts + 1
         );
         let attempt_started = std::time::Instant::now();
-        let outcome = self.run_with_lease(&row.id, payload).await;
+        let outcome = match self
+            .run_with_lease(&row.id, &row.lease_token, payload)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(LeaseLost) => {
+                // Another worker owns this row now and is delivering the same
+                // task: write nothing (no delete, no reschedule, no
+                // dead-letter) and leave it to them.
+                log::warn!(
+                    "queue: lost the lease on {} {fields} (attempt {}); abandoning this attempt",
+                    row.id,
+                    row.attempts + 1
+                );
+                return;
+            }
+        };
         let attempt_ms = attempt_started.elapsed().as_millis();
         match outcome {
             Ok(()) => {
                 log::debug!("task {} {fields} completed in {attempt_ms}ms", row.id);
-                self.delete_row(&row.id).await;
+                self.delete_row(&row.id, &row.lease_token).await;
             }
             Err(QueueError::Retryable {
                 delay_seconds,
@@ -444,7 +480,7 @@ impl QueueWorker {
                         row.id,
                         row.attempts + 1
                     );
-                    self.delete_row(&row.id).await;
+                    self.delete_row(&row.id, &row.lease_token).await;
                     (self.dead_letter)(payload, message).await;
                 } else {
                     let delay = scaled_retry_delay(delay_seconds, row.attempts);
@@ -453,13 +489,13 @@ impl QueueWorker {
                         row.id,
                         row.attempts + 1
                     );
-                    self.reschedule(&row.id, payload, delay, row.attempts + 1)
+                    self.reschedule(&row.id, &row.lease_token, payload, delay, row.attempts + 1)
                         .await;
                 }
             }
             Err(QueueError::Permanent { message, payload }) => {
                 log::error!("dead-lettering {} {fields}: {message}", row.id);
-                self.delete_row(&row.id).await;
+                self.delete_row(&row.id, &row.lease_token).await;
                 (self.dead_letter)(payload, message).await;
             }
         }
@@ -470,7 +506,12 @@ impl QueueWorker {
     /// The heartbeat is part of this future, not a separate spawned task: if
     /// the worker task dies (panic) the heartbeat dies with it and the sweep
     /// recovers the row exactly as before.
-    async fn run_with_lease(&self, id: &str, payload: Value) -> Result<(), QueueError> {
+    async fn run_with_lease(
+        &self,
+        id: &str,
+        lease_token: &str,
+        payload: Value,
+    ) -> Result<Result<(), QueueError>, LeaseLost> {
         let fut = (self.handler)(payload);
         tokio::pin!(fut);
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -478,23 +519,33 @@ impl QueueWorker {
         // just set by lease_next).
         interval.tick().await;
         let id_owned = id.to_string();
+        let token_owned = lease_token.to_string();
         loop {
             tokio::select! {
-                result = &mut fut => return result,
+                result = &mut fut => return Ok(result),
                 _ = interval.tick() => {
                     let now = now_f64();
                     let id = id_owned.clone();
+                    let token = token_owned.clone();
                     let result = self
                         .pool
                         .with_conn(move |conn| {
                             conn.execute(
-                                "UPDATE tasks SET locked_until=?1 WHERE id=?2 AND status='in_progress'",
-                                params![now + LOCK_TTL_SECONDS, id],
+                                "UPDATE tasks SET locked_until=?1 \
+                                 WHERE id=?2 AND status='in_progress' AND lease_token=?3",
+                                params![now + LOCK_TTL_SECONDS, id, token],
                             )
                         })
                         .await;
-                    if let Err(e) = result {
-                        log::error!("queue lease heartbeat failed: {e}");
+                    match result {
+                        // Still ours: the lease is extended.
+                        Ok(1) => {}
+                        // The row is no longer leased to us (another worker
+                        // re-leased it, or it is gone): dropping the handler
+                        // future here stops this attempt instead of racing the
+                        // new holder through the same send.
+                        Ok(_) => return Err(LeaseLost),
+                        Err(e) => log::error!("queue lease heartbeat failed: {e}"),
                     }
                 }
             }
@@ -511,18 +562,26 @@ impl QueueWorker {
     /// already ran can never be re-leased. Both writes failing is logged at
     /// error level with the row id, since that is the one case where a
     /// duplicate send stays possible.
-    async fn delete_row(&self, id: &str) {
+    async fn delete_row(&self, id: &str, lease_token: &str) {
         for attempt in 0..TERMINAL_WRITE_ATTEMPTS {
-            match self.try_delete_row(id).await {
-                Ok(()) => return,
+            match self.try_delete_row(id, lease_token).await {
+                Ok(true) => return,
+                // The row is not ours any more (re-leased while we worked):
+                // leaving it alone *is* the clean outcome — retrying or
+                // tombstoning here would erase the new holder's work.
+                Ok(false) => {
+                    log::warn!("queue: row {id} was re-leased; not deleting it");
+                    return;
+                }
                 Err(e) => {
                     log::error!("queue delete failed (attempt {}): {e}", attempt + 1);
                     tokio::time::sleep(terminal_write_backoff(attempt)).await;
                 }
             }
         }
-        match mark_done(&self.pool, id).await {
-            Ok(()) => log::warn!("queue: row {id} marked done instead of deleted"),
+        match mark_done(&self.pool, id, lease_token).await {
+            Ok(true) => log::warn!("queue: row {id} marked done instead of deleted"),
+            Ok(false) => log::warn!("queue: row {id} was re-leased; nothing to tombstone"),
             Err(e) => log::error!(
                 "queue: row {id} could not be deleted or marked done ({e}); \
                  the expiry sweep may run this finished task again"
@@ -530,12 +589,17 @@ impl QueueWorker {
         }
     }
 
-    async fn try_delete_row(&self, id: &str) -> rusqlite::Result<()> {
+    /// `Ok(false)` when the `WHERE` matched no row — the lease is not ours.
+    async fn try_delete_row(&self, id: &str, lease_token: &str) -> rusqlite::Result<bool> {
         let id = id.to_string();
+        let lease_token = lease_token.to_string();
         self.pool
             .with_conn(move |conn| {
-                conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
-                Ok(())
+                let affected = conn.execute(
+                    "DELETE FROM tasks WHERE id = ?1 AND lease_token = ?2 AND status='in_progress'",
+                    params![id, lease_token],
+                )?;
+                Ok(affected == 1)
             })
             .await
     }
@@ -547,28 +611,46 @@ impl QueueWorker {
     /// safe terminal fallback here (marking it done would drop the retry
     /// without telling anyone), so a persistent failure is logged loudly and
     /// the sweep's re-run — at-least-once, the documented trade — is named.
-    async fn reschedule(&self, id: &str, payload: Value, delay_seconds: f64, attempts: i32) {
-        let id = id.to_string();
+    async fn reschedule(
+        &self,
+        id: &str,
+        lease_token: &str,
+        payload: Value,
+        delay_seconds: f64,
+        attempts: i32,
+    ) {
+        let row_id = id.to_string();
+        let lease_token = lease_token.to_string();
         let payload = payload.to_string();
         let run_after = now_f64() + delay_seconds;
         let mut last_error = None;
         for attempt in 0..TERMINAL_WRITE_ATTEMPTS {
-            let id = id.clone();
+            let id = row_id.clone();
+            let lease_token = lease_token.clone();
             let payload = payload.clone();
             let result = self
                 .pool
                 .with_conn(move |conn| {
-                    conn.execute(
-                        "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
-                        params![payload, run_after, attempts, id],
+                    let affected = conn.execute(
+                        "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 \
+                         WHERE id=?4 AND lease_token=?5 AND status='in_progress'",
+                        params![payload, run_after, attempts, id, lease_token],
                     )?;
-                    Ok(())
+                    Ok(affected == 1)
                 })
                 .await;
             match result {
-                Ok(()) => {
+                Ok(true) => {
                     // Same permit semantics as enqueue: never lose the wakeup.
                     self.notify.notify_one();
+                    return;
+                }
+                // Re-leased while we worked: the new holder owns the row and
+                // its retry, so writing our payload would overwrite progress.
+                Ok(false) => {
+                    log::warn!(
+                        "queue: row {row_id} was re-leased; not rescheduling it (the new holder decides)"
+                    );
                     return;
                 }
                 Err(e) => {
@@ -579,7 +661,7 @@ impl QueueWorker {
             }
         }
         log::error!(
-            "queue: row {id} could not be rescheduled ({}); the expiry sweep will \
+            "queue: row {row_id} could not be rescheduled ({}); the expiry sweep will \
              re-run this attempt from its previous state",
             last_error.unwrap_or_default()
         );
@@ -603,6 +685,22 @@ mod tests {
         // 1800s flood-control wait used to become 300s and earn another 429.
         assert_eq!(scaled_retry_delay(1800.0, 0), 1800.0);
         assert_eq!(scaled_retry_delay(1800.0, 1), 1800.0);
+    }
+
+    /// Puts a row into the state a worker holds while running it.
+    async fn set_lease(queue: &PersistentTaskQueue, id: &str, token: &str) {
+        let (id, token) = (id.to_string(), token.to_string());
+        queue
+            .pool
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE tasks SET status='in_progress', lease_token=?1 WHERE id=?2",
+                    params![token, id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {
@@ -672,7 +770,16 @@ mod tests {
             .with_conn(|conn| conn.query_row("SELECT id FROM tasks", [], |r| r.get(0)))
             .await
             .unwrap();
-        mark_done(&queue.pool, &id).await.unwrap();
+        // A token that is not the row's is refused: only the lease holder can
+        // write the row back.
+        assert!(
+            !mark_done(&queue.pool, &id, "someone-elses-token")
+                .await
+                .unwrap(),
+            "a foreign lease must not be able to tombstone the row"
+        );
+        set_lease(&queue, &id, "ours").await;
+        assert!(mark_done(&queue.pool, &id, "ours").await.unwrap());
 
         assert_eq!(
             queue.pending_backlog().await,
