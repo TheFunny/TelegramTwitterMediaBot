@@ -105,28 +105,49 @@ pub async fn stop_url_workers() {
 }
 
 /// Extracts URL and text-link entities (text + caption), deduped in order.
+///
+/// The offset work (`parse_entities` turning entities into slices of the
+/// message text) is teloxide's; the two decisions that are ours are
+/// [`url_of`] and [`dedupe_urls`], which is why they are separate and tested.
 pub fn extract_urls(message: &Message) -> Vec<String> {
-    let mut urls = Vec::new();
-    for entity in message.parse_entities().into_iter().flatten() {
-        match entity.kind() {
-            MessageEntityKind::Url => urls.push(entity.text().to_string()),
-            MessageEntityKind::TextLink { url } => urls.push(url.to_string()),
-            _ => {}
-        }
+    let entities = message
+        .parse_entities()
+        .into_iter()
+        .flatten()
+        .chain(message.parse_caption_entities().into_iter().flatten());
+    dedupe_urls(
+        entities
+            .filter_map(|entity| url_of(entity.kind(), entity.text()))
+            .collect(),
+    )
+}
+
+/// The URL an entity carries: a bare `Url` entity is its own text, a
+/// `TextLink` is its target (its display text is often a different string).
+/// Every other entity kind (bold, code, hashtag, …) carries none.
+fn url_of(kind: &MessageEntityKind, text: &str) -> Option<String> {
+    match kind {
+        MessageEntityKind::Url => Some(text.to_string()),
+        MessageEntityKind::TextLink { url } => Some(url.to_string()),
+        _ => None,
     }
-    for entity in message.parse_caption_entities().into_iter().flatten() {
-        match entity.kind() {
-            MessageEntityKind::Url => urls.push(entity.text().to_string()),
-            MessageEntityKind::TextLink { url } => urls.push(url.to_string()),
-            _ => {}
-        }
-    }
+}
+
+/// Keeps the first occurrence of each link, in order. Dedup is by the
+/// normalized post id, so variant URLs of the same post (`/status/1` vs
+/// `/status/1/photo/1`, or a text link whose target equals a pasted URL) are
+/// sent once; URLs no site claims (and plain text that is no URL) fall back to
+/// exact-string dedup.
+fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    // Dedup by the normalized post id so variant URLs of the same post
-    // (/status/1 vs /status/1/photo/1) are sent once; unsupported URLs fall
-    // back to exact-string dedup.
-    urls.retain(|url| seen.insert(x_media::site::cache_key(url).unwrap_or_else(|| url.clone())));
-    urls
+    let mut out = Vec::with_capacity(urls.len());
+    for url in urls {
+        let key = x_media::site::cache_key(&url).unwrap_or_else(|| url.clone());
+        if seen.insert(key) {
+            out.push(url);
+        }
+    }
+    out
 }
 
 /// For locally produced media (encoded ugoira MP4) the thumbnail URL is a
@@ -1027,6 +1048,73 @@ mod tests {
         assert_eq!(forward_channel_id, None, "`/test` must not forward");
         // Dead-letter notification still reaches the chat that asked.
         assert_eq!(notify_chat_id, Some(1));
+    }
+
+    #[test]
+    fn only_url_carrying_entities_yield_a_link() {
+        use teloxide::types::MessageEntityKind;
+        let post = "https://x.com/u/status/1";
+        assert_eq!(
+            url_of(&MessageEntityKind::Url, post),
+            Some(post.to_string())
+        );
+        // A text link keeps its target, not the words the user sees.
+        assert_eq!(
+            url_of(
+                &MessageEntityKind::TextLink {
+                    url: url::Url::parse(post).unwrap()
+                },
+                "the post"
+            ),
+            Some(post.to_string())
+        );
+        for kind in [
+            MessageEntityKind::Bold,
+            MessageEntityKind::Code,
+            MessageEntityKind::Hashtag,
+            MessageEntityKind::Mention,
+        ] {
+            assert_eq!(url_of(&kind, "#nope"), None, "{kind:?}");
+        }
+        // Plain text that is no URL still comes back when it is a `Url` entity
+        // (the fetch layer ignores what no site claims, and the user gets the
+        // one explanatory reply it produces).
+        assert_eq!(
+            url_of(&MessageEntityKind::Url, "https://example.com/x"),
+            Some("https://example.com/x".to_string())
+        );
+    }
+
+    #[test]
+    fn dedupe_by_post_and_by_exact_text() {
+        // Two variants of one post, and a text link to the same post: one entry,
+        // the first one seen.
+        assert_eq!(
+            dedupe_urls(vec![
+                "https://x.com/u/status/1".into(),
+                "https://x.com/u/status/1/photo/1".into(),
+                "https://x.com/u/status/1".into(),
+            ]),
+            vec!["https://x.com/u/status/1"]
+        );
+        // Different posts both survive, in order.
+        assert_eq!(
+            dedupe_urls(vec![
+                "https://x.com/a/status/1".into(),
+                "https://x.com/b/status/2".into(),
+            ]),
+            vec!["https://x.com/a/status/1", "https://x.com/b/status/2"]
+        );
+        // A URL no site claims: exact-string dedup only.
+        assert_eq!(
+            dedupe_urls(vec![
+                "https://example.com/a".into(),
+                "https://example.com/a".into(),
+                "https://example.com/b".into(),
+            ]),
+            vec!["https://example.com/a", "https://example.com/b"]
+        );
+        assert!(dedupe_urls(vec![]).is_empty());
     }
 
     fn queued_task(media: &str, batch_index: usize, sent: Vec<i64>) -> Task {
