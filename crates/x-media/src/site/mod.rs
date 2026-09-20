@@ -656,21 +656,6 @@ fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwe
     request
 }
 
-/// Downloads media bytes for the bot's upload fallback: when Telegram's own
-/// fetch of a media URL is blocked (hotlink protection), the bot downloads
-/// the file itself and uploads it via multipart. Site-appropriate headers
-/// come from each site's `media_headers` (pixiv image hosts need `Referer`).
-/// Returns the Content-Length of a media URL, or `None` when the server does
-/// not report one. Used to check whether a file fits Telegram's size limits
-/// before downloading/uploading it.
-pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
-    let response = apply_media_headers(CLIENT.get(url), url)
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(response.content_length())
-}
-
 /// Maps a media download's HTTP status onto the same classes the site
 /// adapters use, so callers can tell "try again" from "this URL is dead":
 /// 4xx is a property of the media (gone, refused by the host), while 429/5xx
@@ -687,7 +672,13 @@ fn download_status_error(status: reqwest::StatusCode) -> FetchError {
 /// Downloads a media file with a hard size cap: the body is streamed and the
 /// download aborts with [`FetchError::TooLarge`] the moment the cap is
 /// crossed (or when a declared Content-Length already exceeds it). Keeps the
-/// bot from buffering arbitrarily large bodies into memory.
+/// bot from buffering arbitrarily large bodies into memory — the size check
+/// the bot's upload fallback needs is the one here, not a probe of its own.
+///
+/// This is the bot's download path for the upload fallback: when Telegram
+/// cannot fetch a media URL itself (hotlink protection), the bot downloads
+/// the file and uploads it via multipart. Site-appropriate headers come from
+/// each site's `media_headers` (pixiv image hosts need `Referer`).
 pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
     let response = send_download(media_request(url)?).await?;
     if let Some(len) = response.content_length()

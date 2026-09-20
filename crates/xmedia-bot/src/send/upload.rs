@@ -62,12 +62,14 @@ async fn download_to_temp(
         | MediaItemPayload::Animation { media, .. } => media,
     };
     // Photos are downloaded even over the upload cap so `prepare_photo` can
-    // downscale / transcode them (cap = decode budget); videos/animations
-    // abort as soon as the upload cap is crossed mid-stream.
+    // downscale / transcode them (cap = decode budget); videos and animations
+    // are refused as soon as the declared size crosses the upload cap — the
+    // boundary the size probe this replaced drew: a file of exactly the cap is
+    // admitted (`len > max_bytes` is false), one byte over is not.
     let limit = if matches!(item, MediaItemPayload::Photo { .. }) {
         photo::MAX_DECODE_BYTES
     } else {
-        MAX_UPLOAD_BYTES + 1
+        MAX_UPLOAD_BYTES
     };
     let bytes = match x_media::site::download_media_limited(media_url, limit).await {
         Ok(bytes) => bytes,
@@ -197,28 +199,13 @@ pub(super) async fn prepare_upload_item(
             keep_alive: None,
         });
     }
-    // Size check before downloading/uploading: over the cap, use the
-    // smaller URL instead of the file. Photos are exempt — they are
-    // downloaded and processed (downscale / PNG→JPEG) before uploading.
-    let too_large = match x_media::site::media_size(media_url).await {
-        Ok(Some(size)) => size > MAX_UPLOAD_BYTES,
-        _ => false,
-    };
-    let too_large = too_large && !matches!(item, MediaItemPayload::Photo { .. });
-    if too_large {
-        let url = item
-            .fallback_url()
-            .ok_or_else(|| FallbackError::Permanent {
-                message: "media too large".into(),
-            })?;
-        let media = media_from_url(&item, url, caption, item.thumbnail_url())
-            .map_err(|message| FallbackError::Permanent { message })?;
-        return Ok(PreparedItem {
-            index,
-            media,
-            keep_alive: None,
-        });
-    }
+    // Whether a file is over the cap is settled by the download itself:
+    // `download_media_limited` reads the declared Content-Length before any
+    // body byte and aborts with `FetchError::TooLarge`, which arrives here as
+    // `FallbackError::MediaTooLarge` — turned into the item's smaller URL by
+    // the match below. A separate size probe used to issue a second GET of the
+    // same URL for an answer this path already has (and issued it for photos,
+    // whose answer was discarded one line later).
     match download_to_temp(&item).await {
         Ok((file, bytes)) => {
             if matches!(item, MediaItemPayload::Photo { .. }) {
