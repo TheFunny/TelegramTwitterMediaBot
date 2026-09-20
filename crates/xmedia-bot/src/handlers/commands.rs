@@ -42,12 +42,12 @@ pub(crate) enum Command {
     BotDict,
     #[command(
         description = "Set site caption format (- to reset)",
-        parse_with = "split"
+        parse_with = parse_arg_remainder
     )]
     SetFormat(String),
     #[command(
         description = "Clear link cache (admin; optional URL, else all)",
-        parse_with = "split"
+        parse_with = parse_arg_remainder
     )]
     ClearCache(String),
     #[command(
@@ -984,6 +984,76 @@ mod tests {
             Ok(Command::RemoveTemplate(name)) => assert_eq!(name, "tpl"),
             Ok(_) => panic!("/remove_template parsed as another command"),
             Err(e) => panic!("parse error: {e}"),
+        }
+    }
+
+    #[test]
+    fn every_documented_invocation_parses() {
+        use teloxide::utils::command::BotCommands;
+
+        use super::Command;
+
+        // The README's forms, verbatim. teloxide's `split` parser accepts
+        // EXACTLY one token per `String` field, so a command documented with
+        // two arguments (or an optional one) silently stops parsing — and a
+        // command that does not parse falls through to the URL flow in
+        // silence.
+        type Check = fn(&Command) -> bool;
+        let cases: Vec<(&str, Check)> = vec![
+            ("/start", |c| matches!(c, Command::Start)),
+            ("/help", |c| matches!(c, Command::Help)),
+            ("/settings", |c| matches!(c, Command::Settings)),
+            ("/edit_before_forward", |c| {
+                matches!(c, Command::EditBeforeForward)
+            }),
+            ("/remove_forward_channel", |c| {
+                matches!(c, Command::RemoveForwardChannel)
+            }),
+            ("/bot_dict", |c| matches!(c, Command::BotDict)),
+            (
+                "/set_forward_channel @a_channel",
+                |c| matches!(c, Command::SetForwardChannel(a) if a == "@a_channel"),
+            ),
+            (
+                "/set_template tpl",
+                |c| matches!(c, Command::SetTemplate(a) if a == "tpl"),
+            ),
+            (
+                "/remove_template tpl",
+                |c| matches!(c, Command::RemoveTemplate(a) if a == "tpl"),
+            ),
+            (
+                "/set_format twitter {author}: {title}",
+                |c| matches!(c, Command::SetFormat(a) if a == "twitter {author}: {title}"),
+            ),
+            (
+                "/set_format twitter -",
+                |c| matches!(c, Command::SetFormat(a) if a == "twitter -"),
+            ),
+            // Documented as "clear everything" when called without a link.
+            (
+                "/clear_cache",
+                |c| matches!(c, Command::ClearCache(a) if a.is_empty()),
+            ),
+            (
+                "/clear_cache https://x.com/u/status/1",
+                |c| matches!(c, Command::ClearCache(a) if a == "https://x.com/u/status/1"),
+            ),
+            (
+                "/test https://x.com/u/status/1",
+                |c| matches!(c, Command::Test(a) if a == "https://x.com/u/status/1"),
+            ),
+            (
+                "/debug https://x.com/u/status/1",
+                |c| matches!(c, Command::Debug(a) if a == "https://x.com/u/status/1"),
+            ),
+        ];
+
+        for (text, ok) in cases {
+            match Command::parse(text, "") {
+                Ok(parsed) => assert!(ok(&parsed), "{text} parsed as the wrong variant"),
+                Err(e) => panic!("{text} did not parse: {e}"),
+            }
         }
     }
 
