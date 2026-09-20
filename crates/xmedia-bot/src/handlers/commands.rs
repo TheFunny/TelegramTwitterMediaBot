@@ -619,6 +619,24 @@ pub(crate) async fn execute_command(
                     .await?;
                 }
                 Ok(Some(fetched)) => {
+                    // The preview must show what a link would actually send:
+                    // the chat's per-site format override plus the long-post
+                    // quoting. Rendering the raw built-in caption here made
+                    // `/set_format` look like it did nothing.
+                    let format = CHAT_STORE
+                        .get(message.chat.id.0)
+                        .await
+                        .message_format
+                        .get(fetched.site_name())
+                        .cloned()
+                        .unwrap_or_default();
+                    let caption = preview_caption(
+                        &format,
+                        &fetched.caption,
+                        &fetched.source_url,
+                        fetched.render_fields(),
+                        CONFIG.caption_quote_text_chars,
+                    );
                     let report = debug_report(
                         url,
                         fetched.site_name(),
@@ -627,7 +645,7 @@ pub(crate) async fn execute_command(
                         &fetched.content,
                         fetched.render_fields(),
                         fetched.sensitive,
-                        &fetched.caption,
+                        &caption,
                         &fetched.media,
                     );
                     // HTML report: the caption renders inside a <blockquote>
@@ -681,6 +699,31 @@ const MAX_DEBUG_REPORT_CHARS: usize = 4000;
 /// Cap for the `/bot_dict` debug dump: the state is echoed as one plain-text
 /// message, so it must stay under Telegram's 4096-char limit.
 const MAX_DEBUG_DUMP_CHARS: usize = 3500;
+
+/// The caption a link would actually send for this chat: the per-site format
+/// override (empty = the site's built-in caption) and, on a long post, the
+/// same text quoting the send paths apply. `/debug` shows this so the preview
+/// cannot drift from what the send paths produce.
+fn preview_caption(
+    format: &str,
+    built_in: &str,
+    url: &str,
+    fields: Option<(&str, &str, &str, &str, &str)>,
+    quote_chars: usize,
+) -> String {
+    let caption = match fields {
+        // Same call the send paths make through `Fetched::caption_with`: an
+        // empty format falls back to the built-in caption.
+        Some((author, author_url, title, content, tags)) => x_media::site::caption_from_fields(
+            format, built_in, url, author, author_url, title, content, tags,
+        ),
+        None => x_media::site::truncate_caption(built_in),
+    };
+    let text = fields
+        .map(|(_, _, title, content, _)| x_media::site::compose_text(title, content))
+        .unwrap_or_default();
+    crate::send::quote_long_caption(&caption, &text, quote_chars).into_owned()
+}
 
 /// Builds the HTML report for the `/debug` command: what the parser produced
 /// for a link (site, canonical URL, title/author/tags, caption and the media
@@ -764,7 +807,9 @@ fn debug_report(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DEBUG_REPORT_CHARS, debug_report, settings_text, unknown_placeholder};
+    use super::{
+        MAX_DEBUG_REPORT_CHARS, debug_report, preview_caption, settings_text, unknown_placeholder,
+    };
     use x_media::media::Media;
 
     #[test]
@@ -1055,6 +1100,71 @@ mod tests {
                 Err(e) => panic!("{text} did not parse: {e}"),
             }
         }
+    }
+
+    #[test]
+    fn preview_caption_applies_the_chat_format_and_the_long_post_quote() {
+        let fields = Some((
+            "Author",
+            "https://x.com/u",
+            "Pinned title",
+            "Pinned body",
+            "#tag",
+        ));
+
+        // No format override → the site's built-in caption, untouched.
+        assert_eq!(
+            preview_caption(
+                "",
+                "built-in caption",
+                "https://x.com/u/status/1",
+                fields,
+                200
+            ),
+            "built-in caption"
+        );
+
+        // The bug this pins: `/debug` used to print the built-in caption even
+        // with a format set, so `/set_format` looked like it did nothing.
+        let formatted = preview_caption(
+            "{author} · {title}",
+            "built-in caption",
+            "https://x.com/u/status/1",
+            fields,
+            200,
+        );
+        assert_eq!(formatted, "Author · Pinned title");
+
+        // `{url}` comes from the canonical post URL, as in the send paths.
+        assert_eq!(
+            preview_caption(
+                "{url} {title}",
+                "built-in",
+                "https://x.com/u/status/1",
+                fields,
+                200
+            ),
+            "https://x.com/u/status/1 Pinned title"
+        );
+
+        // A long post's text is quoted exactly like the send paths quote it.
+        let long = "正".repeat(300);
+        let fields = Some(("Author", "https://x.com/u", "", long.as_str(), ""));
+        let quoted = preview_caption(
+            "",
+            "https://x.com/u/status/1\n<a href=\"https://x.com/u\">Author</a>: 正…",
+            "https://x.com/u/status/1",
+            fields,
+            200,
+        );
+        assert!(quoted.contains("<blockquote expandable>"), "{quoted}");
+
+        // Without render fields (a site that does not expose them) the
+        // built-in caption is all there is.
+        assert_eq!(
+            preview_caption("", "built-in", "https://x.com/u/status/1", None, 200),
+            "built-in"
+        );
     }
 
     #[test]
