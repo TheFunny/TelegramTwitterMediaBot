@@ -43,27 +43,25 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     match fetch(id).await {
         Ok(tweet) => Ok(tweet.into()),
         // Syndication withholds NSFW/age-restricted tweets (empty `{}`).
-        // Retry as the logged-in user when TWITTER_AUTH_TOKEN is set;
-        // otherwise degrade to an empty result (the bot replies
-        // "No media found").
+        // Retry as the logged-in user when TWITTER_AUTH_TOKEN is set; without
+        // the token the withholding is reported as `Sensitive`, so the bot can
+        // answer "age-restricted / needs TWITTER_AUTH_TOKEN" instead of the
+        // misleading "No media found".
         Err(FetchError::Sensitive) => {
             if super::auth::enabled() {
                 match super::auth::fetch(id).await {
                     Ok(tweet) => Ok(tweet.into()),
-                    // The tweet is genuinely gone (deleted / suspended /
-                    // tombstoned): report it instead of degrading to an
-                    // empty result ("No media found"). Only unexpected
-                    // fallback failures (network, parse) keep the NSFW
-                    // placeholder.
-                    Err(FetchError::NotFound) => Err(FetchError::NotFound),
+                    // Deleted/suspended (tombstoned) and unexpected fallback
+                    // failures keep their own class: the bot reports what
+                    // actually happened rather than "No media found".
                     Err(e) => {
                         log::warn!("twitter auth fallback failed for {id}: {e}");
-                        Ok(empty_fetched(url))
+                        Err(e)
                     }
                 }
             } else {
                 log::debug!("tweet {id} is sensitive; set TWITTER_AUTH_TOKEN to fetch NSFW media");
-                Ok(empty_fetched(url))
+                Err(FetchError::Sensitive)
             }
         }
         Err(e) => Err(e),
@@ -88,24 +86,6 @@ pub fn is_retryable(err: &FetchError) -> bool {
 /// twimg URLs need no extra headers (no hotlink protection).
 pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
     None
-}
-
-/// A Fetched with no media for withheld tweets: the bot replies
-/// "No media found" and moves on instead of erroring.
-fn empty_fetched(url: &str) -> Fetched {
-    Fetched {
-        source_url: url.to_string(),
-        // The raw user-supplied URL goes into an HTML caption; escape it so
-        // crafted links cannot break the parse (Telegram 400).
-        caption: encode_text(url).into_owned(),
-        title: String::new(),
-        content: String::new(),
-        media: vec![],
-        sensitive: true,
-        site_id: "twitter",
-        render_data: None,
-        _keep_alive: None,
-    }
 }
 
 /// Fetches a tweet from the syndication endpoint. Deleted/blocked tweets

@@ -35,7 +35,10 @@ pub(crate) enum Command {
     SetTemplate(String),
     #[command(description = "Show chat state (debug; admin only)")]
     BotDict,
-    #[command(description = "Set site caption format", parse_with = "split")]
+    #[command(
+        description = "Set site caption format (- to reset)",
+        parse_with = "split"
+    )]
     SetFormat(String),
     #[command(
         description = "Clear link cache (admin; optional URL, else all)",
@@ -60,6 +63,29 @@ pub(crate) enum Command {
 /// pasted text) would silently fall through to the URL flow instead.
 fn parse_arg_remainder(s: String) -> Result<(String,), ParseError> {
     Ok((s.trim().to_string(),))
+}
+
+/// Placeholders `/set_format` accepts, mirroring what
+/// `x_media::site::caption_from_fields` substitutes.
+const FORMAT_PLACEHOLDERS: [&str; 6] = ["url", "author", "author_url", "title", "content", "tags"];
+
+/// The first `{…}` token in a caption format that is not a known placeholder
+/// (`None` when all of them are). The renderer replaces exact keys only, so an
+/// unknown token would be published verbatim in every caption of that site —
+/// caught here instead.
+fn unknown_placeholder(format: &str) -> Option<&str> {
+    let mut rest = format;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        // An unclosed `{` is not a placeholder token at all.
+        let close = after.find('}')?;
+        let token = &after[..close];
+        if !FORMAT_PLACEHOLDERS.contains(&token) {
+            return Some(token);
+        }
+        rest = &after[close + 1..];
+    }
+    None
 }
 
 enum SetForwardChannelError {
@@ -284,12 +310,56 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
+            // `-` resets to the site's built-in caption: without it a chat that
+            // set a format once could never get back to the default (the
+            // built-in format string is not something a user can retype).
+            if format == "-" {
+                CHAT_STORE
+                    .update(chat_id, |data| {
+                        data.message_format.remove(site);
+                    })
+                    .await;
+                reply(
+                    bot,
+                    message.chat.id.0,
+                    message.id,
+                    "Format reset to the built-in one.",
+                )
+                .await?;
+                return Ok(());
+            }
+            // A typo like {titel} would otherwise be rendered literally into
+            // every caption of that site (the renderer only substitutes the
+            // exact keys), which is invisible until a post arrives.
+            if let Some(token) = unknown_placeholder(&format) {
+                reply(
+                    bot,
+                    message.chat.id.0,
+                    message.id,
+                    format!(
+                        "Unknown placeholder {{{token}}}. Available: {}",
+                        FORMAT_PLACEHOLDERS
+                            .iter()
+                            .map(|name| format!("{{{name}}}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
             CHAT_STORE
                 .update(chat_id, |data| {
                     data.message_format.insert(site.to_string(), format);
                 })
                 .await;
-            reply(bot, message.chat.id.0, message.id, "Format set.").await?;
+            reply(
+                bot,
+                message.chat.id.0,
+                message.id,
+                "Format set. Use /debug <link> to preview the caption.",
+            )
+            .await?;
         }
         Command::ClearCache(arg) => {
             let sender_id = message
@@ -539,7 +609,7 @@ fn debug_report(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DEBUG_REPORT_CHARS, debug_report};
+    use super::{MAX_DEBUG_REPORT_CHARS, debug_report, unknown_placeholder};
     use x_media::media::Media;
 
     #[test]
@@ -656,5 +726,23 @@ mod tests {
         let report = debug_report("u", "twitter", "s", "t", "c", None, false, "p", &media);
         assert!(report.chars().count() <= MAX_DEBUG_REPORT_CHARS, "{report}");
         assert!(report.ends_with('…'), "{report}");
+    }
+
+    #[test]
+    fn unknown_placeholder_finds_typos_only() {
+        assert_eq!(unknown_placeholder("{author} — {title}"), None);
+        // Every key the renderer substitutes must pass, in any combination.
+        assert_eq!(
+            unknown_placeholder("{url}{author}{author_url}{title}{content}{tags}"),
+            None
+        );
+        // Plain text and braces Telegram renders literally are not tokens.
+        assert_eq!(unknown_placeholder("no placeholders here"), None);
+        assert_eq!(unknown_placeholder("{unclosed"), None);
+
+        assert_eq!(unknown_placeholder("{titel}"), Some("titel"));
+        assert_eq!(unknown_placeholder("{title} {Content}"), Some("Content"));
+        // A typo after a valid token is still found.
+        assert_eq!(unknown_placeholder("{url} {tag}"), Some("tag"));
     }
 }

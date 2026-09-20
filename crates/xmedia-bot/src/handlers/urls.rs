@@ -4,9 +4,11 @@
 use super::{log_key, reply};
 use crate::ctx::{AppContext, CONTEXT};
 use crate::link_cache::{CachedMediaKind, CachedPost};
+use crate::media_sender::MediaSender;
 use crate::send::{self, MediaItemPayload, Task};
 use crate::state::ChatData;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::LazyLock;
 use teloxide::types::{ChatAction, ChatId, Message, MessageEntityKind, MessageId};
 use x_media::media::Media;
@@ -285,6 +287,11 @@ fn build_send_task(
 /// workers pass [`PostSend::FromChat`], the `/test` command
 /// [`PostSend::Suppressed`]. Everything else (cache write, retry enqueue,
 /// dead-letter notification) is identical.
+///
+/// Wraps [`url_media_inner`] with the chat-action keep-alive: Telegram expires
+/// an action indicator after ~5s, while a fetch (ugoira encode, HLS remux) plus
+/// a download-and-reupload fallback routinely takes longer — without the
+/// refresh the chat shows nothing and the bot reads as stalled.
 pub(crate) async fn url_media(
     ctx: &AppContext<'_>,
     chat_id: i64,
@@ -292,14 +299,136 @@ pub(crate) async fn url_media(
     url: &str,
     post_send: PostSend,
 ) {
-    let reply_to = MessageId(reply_to_message_id as i32);
-    if let Err(e) = ctx
-        .sender
-        .send_chat_action(ChatId(chat_id), ChatAction::Typing)
-        .await
-    {
+    // Shared with the pipeline: once the media types are known the indicator
+    // switches from "typing" to "sending photo/video".
+    let hint = parking_lot::Mutex::new(ActionHint::Typing);
+    run_with_chat_action(
+        ctx.sender,
+        chat_id,
+        &hint,
+        url_media_inner(ctx, chat_id, reply_to_message_id, url, post_send, &hint),
+    )
+    .await;
+}
+
+/// Runs `pipeline` while keeping the chat's action indicator alive: Telegram
+/// expires an action after ~5s, while a fetch (ugoira encode, HLS remux) plus a
+/// download-and-reupload fallback routinely takes longer. The pipeline updates
+/// `hint` when it knows what it is sending.
+async fn run_with_chat_action<F: Future<Output = ()>>(
+    sender: &dyn MediaSender,
+    chat_id: i64,
+    hint: &parking_lot::Mutex<ActionHint>,
+    pipeline: F,
+) {
+    // The guard is released before the await: a parking_lot guard held across
+    // it makes the future !Send, and the URL workers spawn these.
+    let action = hint.lock().action();
+    if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
         log::error!("send_chat_action failed: {e}");
     }
+    tokio::pin!(pipeline);
+    loop {
+        tokio::select! {
+            // `biased` polls the pipeline first, so a finished pipeline returns
+            // without ever arming the refresh timer (no stray actions).
+            biased;
+            () = &mut pipeline => return,
+            () = tokio::time::sleep(ACTION_REFRESH) => {
+                let action = hint.lock().action();
+                if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
+                    log::error!("send_chat_action failed: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// How often the chat-action indicator is refreshed while a pipeline runs.
+/// Telegram's indicator lasts ~5s; refreshing slightly inside that keeps it
+/// on-screen continuously.
+const ACTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// What the chat action should say. Unknown before the fetch, so the pipeline
+/// starts with `Typing` and switches as soon as the media types are known.
+#[derive(Clone, Copy)]
+enum ActionHint {
+    Typing,
+    Photo,
+    Video,
+}
+
+impl ActionHint {
+    /// Photos make Telegram label the send "sending photo"; video/animation
+    /// only payloads get "sending video". A mixed post takes the photo label
+    /// (the group's first item is always a photo, see `photos_first`).
+    fn for_items(items: &[MediaItemPayload]) -> Self {
+        if items
+            .iter()
+            .any(|item| matches!(item, MediaItemPayload::Photo { .. }))
+        {
+            Self::Photo
+        } else {
+            Self::Video
+        }
+    }
+
+    fn action(self) -> ChatAction {
+        match self {
+            Self::Typing => ChatAction::Typing,
+            Self::Photo => ChatAction::UploadPhoto,
+            Self::Video => ChatAction::UploadVideo,
+        }
+    }
+}
+
+/// User-facing text for a failed fetch. The [`FetchError`] class is what tells
+/// the user whether the post is gone, withheld or the source is refusing
+/// requests; a single generic sentence threw that away.
+fn fetch_error_message(err: &x_media::site::FetchError) -> String {
+    use x_media::site::FetchError;
+    match err {
+        FetchError::NotFound => "Post not found (deleted, private or unavailable).".to_string(),
+        FetchError::Sensitive => concat!(
+            "This post's media is withheld (age-restricted). ",
+            "The bot owner must set TWITTER_AUTH_TOKEN to fetch it."
+        )
+        .to_string(),
+        FetchError::Blocked => {
+            "The source site refused the request (risk control). Try again later.".to_string()
+        }
+        FetchError::Disabled { site } => {
+            format!("{} support is disabled on this bot.", site_title(site))
+        }
+        FetchError::Transient(_) | FetchError::Http(_) => {
+            "The source site is unavailable right now (tried 3 times). Try again later.".to_string()
+        }
+        // Parse/shape surprises, pixiv auth details, oversized media: nothing
+        // actionable for the user beyond "this did not work".
+        _ => "Failed to fetch media from this link.".to_string(),
+    }
+}
+
+/// Site ids are lowercase ASCII (`pixiv`); user-facing text capitalizes the
+/// first letter.
+fn site_title(site: &str) -> String {
+    let mut chars = site.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn url_media_inner(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to_message_id: i64,
+    url: &str,
+    post_send: PostSend,
+    hint: &parking_lot::Mutex<ActionHint>,
+) {
+    let reply_to = MessageId(reply_to_message_id as i32);
 
     // Link cache: a post sent before is re-sent from Telegram file ids —
     // no source-site request, no download, no upload. Keyed by the
@@ -355,6 +484,9 @@ pub(crate) async fn url_media(
                 },
             })
             .collect();
+        // The indicator switches to "sending photo/video" once the kinds are
+        // known; `items` is moved into the task below.
+        *hint.lock() = ActionHint::for_items(&items);
         let task = build_send_task(
             &chat_data,
             chat_id,
@@ -378,13 +510,7 @@ pub(crate) async fn url_media(
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
             log::error!("fetch {url}: {e}");
-            let _ = reply(
-                ctx.sender,
-                chat_id,
-                reply_to,
-                "Failed to fetch media from this link.",
-            )
-            .await;
+            let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(&e)).await;
         }
         Ok(Some(mut fetched)) => {
             if fetched.media.is_empty() {
@@ -426,6 +552,9 @@ pub(crate) async fn url_media(
                 .iter()
                 .map(|media| media_to_payload(media, fetched.sensitive))
                 .collect();
+            // The indicator switches to "sending photo/video" once the kinds
+            // are known; `items` is moved into the task below.
+            *hint.lock() = ActionHint::for_items(&items);
             let task = build_send_task(
                 &chat_data,
                 chat_id,
@@ -694,5 +823,90 @@ mod tests {
         assert_eq!(forward_channel_id, None, "`/test` must not forward");
         // Dead-letter notification still reaches the chat that asked.
         assert_eq!(notify_chat_id, Some(1));
+    }
+
+    #[test]
+    fn fetch_errors_map_to_distinct_user_messages() {
+        use x_media::site::FetchError;
+
+        let disabled = fetch_error_message(&FetchError::Disabled { site: "pixiv" });
+        assert_eq!(disabled, "Pixiv support is disabled on this bot.");
+        assert_eq!(
+            fetch_error_message(&FetchError::NotFound),
+            "Post not found (deleted, private or unavailable)."
+        );
+        let sensitive = fetch_error_message(&FetchError::Sensitive);
+        assert!(sensitive.contains("TWITTER_AUTH_TOKEN"), "{sensitive}");
+        let blocked = fetch_error_message(&FetchError::Blocked);
+        assert!(blocked.contains("refused"), "{blocked}");
+
+        // Each class that has something to say must differ from the generic
+        // fallback — one generic sentence for everything is what this fixes.
+        let generic = fetch_error_message(&FetchError::TooLarge);
+        for text in [disabled, sensitive, blocked] {
+            assert_ne!(text, generic);
+        }
+    }
+
+    #[test]
+    fn action_hint_follows_the_media_kind() {
+        use MediaItemPayload::{Animation, Photo, Video};
+
+        let photo = || Photo {
+            media: "https://p/1.jpg".into(),
+            has_spoiler: false,
+            fallback_url: None,
+            file_id: false,
+        };
+        let video = || Video {
+            media: "https://v/1.mp4".into(),
+            has_spoiler: false,
+            thumbnail: None,
+            fallback_url: None,
+            file_id: false,
+        };
+
+        // Unknown before the fetch: the pipeline starts on "typing".
+        assert!(matches!(ActionHint::Typing.action(), ChatAction::Typing));
+        assert!(matches!(
+            ActionHint::for_items(&[photo()]).action(),
+            ChatAction::UploadPhoto
+        ));
+        assert!(matches!(
+            ActionHint::for_items(&[
+                video(),
+                Animation {
+                    media: "https://v/2.mp4".into(),
+                    has_spoiler: false,
+                    file_id: false,
+                }
+            ])
+            .action(),
+            ChatAction::UploadVideo
+        ));
+        // A mixed post takes the photo label: `photos_first` always leads with
+        // a photo, which is what Telegram shows.
+        assert!(matches!(
+            ActionHint::for_items(&[video(), photo()]).action(),
+            ChatAction::UploadPhoto
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_pipeline_keeps_the_chat_action_alive() {
+        let sender = MockSender::scripted(vec![], permanent_error);
+        let hint = parking_lot::Mutex::new(ActionHint::Typing);
+        // Three refresh windows of work: Telegram would have dropped the
+        // indicator twice without the keep-alive.
+        let pipeline = async { tokio::time::sleep(ACTION_REFRESH * 3).await };
+
+        run_with_chat_action(&sender, 1, &hint, pipeline).await;
+
+        let actions = sender
+            .calls()
+            .iter()
+            .filter(|call| **call == "send_chat_action")
+            .count();
+        assert_eq!(actions, 3, "expected the initial action plus two refreshes");
     }
 }

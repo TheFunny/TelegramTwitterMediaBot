@@ -2,7 +2,7 @@ use dotenv::dotenv;
 use teloxide::dptree::endpoint;
 use teloxide::prelude::*;
 use teloxide::stop::StopToken;
-use teloxide::types::{ChatId, InputFile, MessageId};
+use teloxide::types::{ChatId, InlineKeyboardMarkup, InputFile, MessageId};
 use teloxide::update_listeners::{self, UpdateListener, webhooks};
 use tokio::sync::watch;
 use x_media::site;
@@ -119,13 +119,19 @@ async fn main() {
                     log::debug!("rate limiter: dropped {idle_limiters} idle bucket(s)");
                 }
                 for (chat_id, prompt_message_id) in removed {
-                    // If the prompt was already deleted, this fails with a
-                    // 400 "message to edit not found" — log and ignore.
+                    // Rewritten in place, not announced: the sweep is a
+                    // background timer, and a fresh message would wake the chat
+                    // up to a full TTL later about a prompt the user already
+                    // walked away from. The edit drops the buttons too. If the
+                    // prompt was already deleted this fails with a 400
+                    // "message to edit not found" — log and ignore.
                     if let Err(e) = bot
-                        .edit_message_reply_markup(
+                        .edit_message_text(
                             ChatId(chat_id),
                             MessageId(prompt_message_id as i32),
+                            send::EDIT_PROMPT_EXPIRED_TEXT,
                         )
+                        .reply_markup(InlineKeyboardMarkup::default())
                         .await
                     {
                         log::info!("edit-expiry sweep: prompt message gone: {e}");

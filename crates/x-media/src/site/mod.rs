@@ -247,6 +247,12 @@ pub enum FetchError {
     NotFound,
     #[error("blocked")]
     Blocked,
+    /// The URL matches a registered site that is disabled right now (pixiv
+    /// without `PIXIV_REFRESH_TOKEN`, or after a failed login). Distinct from
+    /// `Ok(None)` — an unsupported link — so the bot can tell the user why
+    /// the link was not handled instead of silently ignoring it.
+    #[error("{site} support is disabled")]
+    Disabled { site: &'static str },
     /// The post exists but its content is withheld (twitter NSFW /
     /// age-restricted tweets come back as an empty `{}` from syndication).
     #[error("content withheld (sensitive)")]
@@ -385,6 +391,17 @@ fn find_site(url: &str) -> Option<&'static dyn Site> {
         .map(|site| site.as_ref())
 }
 
+/// The site whose pattern matches `url` but which is disabled right now.
+/// `None` when no site matches the URL at all, or when the matching site is
+/// enabled. Lets the dispatcher tell "unsupported link" (silently ignored)
+/// apart from "this bot has that site switched off" (reported to the user).
+fn disabled_site(url: &str) -> Option<&'static str> {
+    SITES
+        .iter()
+        .find(|site| !site.enabled() && site.pattern().is_match(url))
+        .map(|site| site.id())
+}
+
 /// Every supported site id, in dispatch order. The bot's SetFormat whitelist
 /// derives from this list.
 pub fn site_ids() -> Vec<&'static str> {
@@ -408,7 +425,9 @@ pub async fn validate_all() -> Vec<(&'static str, String)> {
 }
 
 /// Fetches a post from its URL. Returns `Ok(None)` when no site pattern
-/// matches (unsupported links are silently ignored by the bot).
+/// matches (unsupported links are silently ignored by the bot) and
+/// [`FetchError::Disabled`] when the URL belongs to a registered site that is
+/// switched off right now — the two are different answers for the user.
 ///
 /// Transient failures are retried: 3 total attempts with 1s then 2s delays.
 /// What counts as transient is the matched site's own policy (`is_retryable`
@@ -432,7 +451,13 @@ const MAX_FETCH_ATTEMPTS: u32 = 3;
 
 async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>, FetchError> {
     let Some(site) = find_site(url) else {
-        return Ok(None);
+        // A registered-but-disabled site (pixiv without a token) is not an
+        // unsupported link: report it, so the bot answers the user instead of
+        // ignoring the message.
+        return match disabled_site(url) {
+            Some(site) => Err(FetchError::Disabled { site }),
+            None => Ok(None),
+        };
     };
     for attempt in 0..attempts.max(1) {
         match site.fetch_from_url(url).await {
@@ -706,6 +731,31 @@ mod tests {
     async fn unknown_scheme_returns_none() {
         let result = fetch("not a url at all").await;
         assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn disabled_site_is_reported_not_ignored() {
+        // pixiv is the only token-gated site; with PIXIV_REFRESH_TOKEN set it
+        // is enabled and this link would hit the network, so skip then.
+        if std::env::var("PIXIV_REFRESH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            eprintln!("skipping: PIXIV_REFRESH_TOKEN is set");
+            return;
+        }
+        let result = fetch("https://www.pixiv.net/artworks/1").await;
+        assert!(
+            matches!(result, Err(FetchError::Disabled { site: "pixiv" })),
+            "got {result:?}"
+        );
+        // The cache key still resolves: the bot keys the reply and the link
+        // cache off it even when the site is off.
+        assert_eq!(
+            cache_key("https://www.pixiv.net/artworks/1"),
+            Some("pixiv:1".into())
+        );
     }
 
     #[tokio::test]

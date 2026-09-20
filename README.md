@@ -4,12 +4,13 @@ Telegram 机器人，将 X / Twitter、Pixiv、Bluesky、Misskey (misskey.io)、
 
 ## 功能
 
-- 私聊发送链接后自动抓取并发送图片、视频与 GIF，超量图片自动分批
-- 纯文字帖提示无媒体；不支持的链接静默忽略
+- 私聊发送链接后自动抓取并发送图片、视频与 GIF，超量图片自动分批（每批 10 张）
+- 纯文字帖提示无媒体；不支持的链接静默忽略。抓取失败会按原因分别提示（帖子已删除 / 内容受限 / 源站风控 / 站点未启用）
 - 长帖（正文 ≥ `CAPTION_QUOTE_TEXT_CHARS`，默认 200）的**正文部分**用可折叠引用块展示，链接与作者行留在引用块外
-- 支持内联查询（`@机器人 <链接>`）
-- 可绑定转发频道自动转发；支持转发前编辑 caption 与自定义模板
+- 支持内联查询（`@机器人 <链接>`）；在群聊里发链接会提示改用私聊或内联查询（频道内保持静默）
+- 可绑定转发频道自动转发；支持转发前编辑 caption 与自定义模板（提示消息带 Confirm / Skip 按钮并写明过期时间，过期后就地标记为已过期）
 - 发送失败自动重试并持久化，重试耗尽后通知用户
+- 抓取期间持续显示"正在输入 / 正在发送"状态，长任务（ugoira 转码、大图上传）不会看起来卡死
 - Pixiv ugoira 动图自动转码为 MP4；Bluesky 视频自动转码（HLS 流 → MP4）
 - 超过 Telegram 尺寸/大小限制的图片自动压缩（保持原格式，必要时转 JPEG）
 - 链接结果本地缓存：成功发送后缓存 Telegram file id 与 caption 等，再次收到相同链接直接本地重发，不再请求源站、不保存媒体文件（`LINK_CACHE_TTL_SECONDS` 控制过期，默认 7 天）
@@ -33,7 +34,7 @@ docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 
 环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`LINK_CACHE_TTL_SECONDS`、`RUST_LOG`、`TELOXIDE_PROXY`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）、`BILIBILI_COOKIE`（可选）。
 
-NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTER_AUTH_TOKEN`（登录 x.com 后浏览器 Cookie 里的 `auth_token` 值）后，bot 会仅在遇到 NSFW 推文时以登录态获取媒体；未设置则提示无媒体。
+NSFW 推文：公开的 syndication 接口不返回敏感内容。设置 `TWITTER_AUTH_TOKEN`（登录 x.com 后浏览器 Cookie 里的 `auth_token` 值）后，bot 会仅在遇到 NSFW 推文时以登录态获取媒体；未设置则回复该推文内容受限（需要配置 `TWITTER_AUTH_TOKEN`）。
 
 Bilibili 动态默认匿名抓取（无需登录，bot 会自动从 B 站的匿名指纹接口取 `buvid3`/`buvid4` 设备 cookie 以提高成功率）。若服务器出口 IP 被 B 站重度风控（日志里的 `risk control (-352)` 或 HTTP 412，且持续出现），设置 `BILIBILI_COOKIE`（登录后浏览器里整条 Cookie 串，如 `SESSDATA=…; bili_jct=…`）可恢复访问。当前只发送动态里的图片与动图，动态内嵌视频发送其封面。
 
@@ -83,10 +84,10 @@ Telegram 只接受 443/80/88/8443 端口。
 | 变量 | 说明 |
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token（必填） |
-| `PIXIV_REFRESH_TOKEN` | Pixiv 刷新令牌；未设置则禁用 Pixiv |
+| `PIXIV_REFRESH_TOKEN` | Pixiv 刷新令牌；未设置则禁用 Pixiv（此时收到 pixiv 链接会明确回复「站点未启用」，不会静默忽略） |
 | `BILIBILI_COOKIE` | 可选的 B 站 Cookie 串（`SESSDATA=…; bili_jct=…`），仅在出口 IP 被持续风控时才需要（设备 cookie 由 bot 自动获取） |
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
-| `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400 |
+| `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400；过期后提示消息会被就地改写为「已过期，未转发」（不额外发消息打扰） |
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
 | `CAPTION_QUOTE_TEXT_CHARS` | 正文（`{title}` + `{content}` 合计）达到该长度（字符）时，caption 的**正文部分**用可折叠引用块包裹，默认 200；`0` 关闭 |
 | `DATA_DIR` | 数据目录（SQLite 数据库 `task_queue.db` 所在目录），默认 `data`（相对工作目录，会自动创建） |
@@ -114,15 +115,15 @@ Telegram 只接受 443/80/88/8443 端口。
 | `/help` | 查看全部命令及用法（即本文档的命令表） |
 | `/set_forward_channel <频道>` | 设置转发频道，参数为 `@频道名` 或频道 ID；设置后发送的媒体消息会自动转发到该频道 |
 | `/remove_forward_channel` | 取消转发频道 |
-| `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板） |
+| `/edit_before_forward` | 开关「转发前编辑」：开启后，转发成功后 bot 会发一条提示消息，回复它可修改第一条转发消息的 caption（或点击模板按钮套用模板），再点 `↩️ Confirm` 才会真正转发，`🛑 Skip` 放弃本次转发；提示消息写明过期时间，过期后原地标记为已过期且不会转发 |
 | `/set_template <名称>` | 回复一条含 `[]` 的消息，将其保存为命名模板；转发时 `[]` 会被替换为原帖链接（配合「转发前编辑」使用） |
-| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}` |
+| `/set_format <站点> <格式>` | 自定义某站点的 caption 格式。站点：`twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`。占位符：`{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}`；未识别的占位符会被拒绝并列出可用项，格式填 `-` 恢复站点默认格式（可用 `/debug <链接>` 预览效果） |
 | `/clear_cache [链接]` | 清空链接缓存（仅管理员）；带链接只清该条，否则清空全部 |
 | `/bot_dict` | 查看当前聊天状态（调试用；仅管理员） |
 | `/test <链接>` | 解析链接并发送媒体；不转发到频道、不弹转发前编辑提示（仅发送） |
 | `/debug <链接>` | 调试：只解析链接并返回解析结果（站点、标题、作者、标签、媒体列表），不发送任何媒体 |
 
-链接处理仅限私聊；命令在任意聊天可用。
+链接处理仅限私聊；命令在任意聊天可用。在群聊里发受支持的链接会回复一条提示（改用私聊或内联查询），频道内保持静默。
 
 ## 备注
 

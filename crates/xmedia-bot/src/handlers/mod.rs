@@ -23,7 +23,9 @@ use crate::media_sender::MediaSender;
 use commands::{Command, execute_command};
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, ChatKind, Message, MessageId, ParseMode, ReplyParameters};
+use teloxide::types::{
+    ChatId, ChatKind, Message, MessageId, ParseMode, PublicChatKind, ReplyParameters,
+};
 use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
@@ -175,8 +177,36 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
                 break;
             }
         }
+    } else if is_group(&message.chat.kind)
+        && extract_urls(&message)
+            .iter()
+            .any(|url| x_media::site::cache_key(url).is_some())
+    {
+        // A supported link in a group used to be dropped in silence, which
+        // reads as a broken bot (the command menu is registered globally, so
+        // the expectation is there). Unsupported links stay ignored; the hint
+        // names the two paths that do work. Channels are excluded — the reply
+        // would be posted into the channel itself.
+        let _ = reply(&bot, message.chat.id.0, message.id, GROUP_LINK_HINT).await;
     }
     respond(())
+}
+
+/// Answer for a link posted where the pipeline does not run (a group): links
+/// are private-chat only, inline mode is the group path.
+const GROUP_LINK_HINT: &str =
+    "Links are handled in private chat only — send me this link there, or use inline mode here.";
+
+/// Groups and supergroups, as opposed to private chats and channels.
+fn is_group(kind: &ChatKind) -> bool {
+    matches!(
+        kind,
+        ChatKind::Public(chat)
+            if matches!(
+                chat.kind,
+                PublicChatKind::Group | PublicChatKind::Supergroup(_)
+            )
+    )
 }
 
 #[cfg(test)]
@@ -270,5 +300,38 @@ mod tests {
         // (URL/command) path instead.
         assert!(!edit_message_handler(&ctx, 1, PROMPT_ID, "hello").await);
         assert!(sender.calls().is_empty());
+    }
+
+    #[test]
+    fn the_link_hint_is_for_groups_only() {
+        use teloxide::types::{ChatPrivate, ChatPublic, PublicChatChannel, PublicChatSupergroup};
+
+        let group = ChatKind::Public(ChatPublic {
+            title: None,
+            kind: PublicChatKind::Group,
+        });
+        let supergroup = ChatKind::Public(ChatPublic {
+            title: None,
+            kind: PublicChatKind::Supergroup(PublicChatSupergroup {
+                username: None,
+                is_forum: false,
+            }),
+        });
+        // A channel must stay silent: the hint reply would be posted into the
+        // channel itself.
+        let channel = ChatKind::Public(ChatPublic {
+            title: None,
+            kind: PublicChatKind::Channel(PublicChatChannel { username: None }),
+        });
+        let private = ChatKind::Private(ChatPrivate {
+            username: None,
+            first_name: None,
+            last_name: None,
+        });
+
+        assert!(is_group(&group));
+        assert!(is_group(&supergroup));
+        assert!(!is_group(&channel));
+        assert!(!is_group(&private));
     }
 }

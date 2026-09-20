@@ -4,12 +4,13 @@ A Telegram bot that turns post links from X / Twitter, Pixiv, Bluesky, Misskey (
 
 ## Features
 
-- Sending a link in a private chat fetches and sends the images, videos and GIFs automatically; oversized media is split into batches
-- Text-only posts report "no media"; unsupported links are silently ignored
+- Sending a link in a private chat fetches and sends the images, videos and GIFs automatically; oversized media is split into batches (10 items per group)
+- Text-only posts report "no media"; unsupported links are silently ignored. Fetch failures name the reason (post gone / content withheld / source risk control / site not enabled)
 - Long posts (text ≥ `CAPTION_QUOTE_TEXT_CHARS`, default 200) show **the text part** of their caption inside a collapsible blockquote, with the link and author line left outside it
-- Inline queries (`@bot <link>`)
-- Bind a forward channel for automatic forwarding; edit the caption before forwarding and apply custom templates
+- Inline queries (`@bot <link>`); a supported link posted in a group gets a one-line hint to use the private chat or inline mode (channels stay silent)
+- Bind a forward channel for automatic forwarding; edit the caption before forwarding and apply custom templates (the prompt carries Confirm / Skip buttons, states its expiry, and is marked expired in place once it lapses)
 - Failed sends are retried automatically with persistence; the user is notified after retries are exhausted
+- The chat action stays on screen for the whole fetch, so long jobs (ugoira transcode, large uploads) do not look stalled
 - Pixiv ugoira animations are transcoded to MP4; Bluesky videos are remuxed (HLS stream → MP4)
 - Photos exceeding Telegram's size/dimension limits are compressed automatically (original format kept, JPEG fallback only when needed)
 - Link-result cache: after a successful send the Telegram file ids and caption fields are cached locally, so a repeated link is re-sent from local state — no source-site request, no media file stored (expiry controlled by `LINK_CACHE_TTL_SECONDS`, default 7 days)
@@ -33,7 +34,7 @@ docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
 
 Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `TELOXIDE_PROXY`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional), `BILIBILI_COOKIE` (optional).
 
-NSFW tweets: the public syndication endpoint does not return sensitive content. Setting `TWITTER_AUTH_TOKEN` (the `auth_token` cookie value of a logged-in x.com session) lets the bot fetch NSFW media in the logged-in state only when it hits a withheld tweet; without it, the bot reports no media.
+NSFW tweets: the public syndication endpoint does not return sensitive content. Setting `TWITTER_AUTH_TOKEN` (the `auth_token` cookie value of a logged-in x.com session) lets the bot fetch NSFW media in the logged-in state only when it hits a withheld tweet; without it the bot answers that the post's media is withheld and needs `TWITTER_AUTH_TOKEN`.
 
 Bilibili dynamics are fetched anonymously by default (no login; the bot fetches bilibili's anonymous `buvid3`/`buvid4` device cookies itself to raise the success rate). If the server's egress IP gets hard-flagged by bilibili (persistent `risk control (-352)` log lines or HTTP 412), set `BILIBILI_COOKIE` (the whole cookie string from a logged-in browser, e.g. `SESSDATA=…; bili_jct=…`) to restore access. Only a dynamic's images and animations are sent; an attached video degrades to its cover image.
 
@@ -83,10 +84,10 @@ Telegram only accepts ports 443/80/88/8443.
 | Variable | Description |
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token (required) |
-| `PIXIV_REFRESH_TOKEN` | Pixiv refresh token; Pixiv is disabled without it |
+| `PIXIV_REFRESH_TOKEN` | Pixiv refresh token; Pixiv is disabled without it (a pixiv link then gets an explicit "site not enabled" reply instead of silence) |
 | `BILIBILI_COOKIE` | Optional bilibili cookie string (`SESSDATA=…; bili_jct=…`); only needed when the egress IP stays risk-controlled (device cookies are fetched automatically) |
 | `BOT_ADMIN` | Admin chat IDs, comma-separated; receives start/stop notifications |
-| `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400 |
+| `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400; once lapsed the prompt is rewritten in place to "expired — nothing was forwarded" (no extra message) |
 | `LINK_CACHE_TTL_SECONDS` | Link-result cache expiry in seconds, default 604800 (7 days) |
 | `CAPTION_QUOTE_TEXT_CHARS` | **The text part** of the caption (the joined `{title}` + `{content}`) is wrapped in a collapsible blockquote once it reaches this many characters, default 200; `0` disables |
 | `DATA_DIR` | Data directory (where the SQLite `task_queue.db` lives), default `data` (relative to the working directory, created automatically) |
@@ -114,15 +115,15 @@ Telegram only accepts ports 443/80/88/8443.
 | `/help` | List all commands and usage (this command table) |
 | `/set_forward_channel <channel>` | Set the forward channel: `@channel` or channel ID; media messages are forwarded to it automatically afterwards |
 | `/remove_forward_channel` | Remove the forward channel |
-| `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or taps a template button to apply one) |
+| `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or tapping a template button applies one), then `↩️ Confirm` forwards and `🛑 Skip` drops this forward; the prompt states its expiry and is marked expired in place when it lapses (nothing is forwarded) |
 | `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward") |
-| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}` |
+| `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}`; unknown placeholders are rejected with the list of valid ones, and `-` restores the site's built-in format (preview with `/debug <link>`) |
 | `/clear_cache [link]` | Clear the link cache (admin only); with a link only that entry, otherwise everything |
 | `/bot_dict` | Show the current chat state (debugging; admin only) |
 | `/test <link>` | Parse a link and send its media; no channel forward, no edit-before-forward prompt (send only) |
 | `/debug <link>` | Debug: parse a link and report the parse result only (site, title, author, tags, media list) — no media is sent |
 
-Link processing works only in private chats; commands work in any chat.
+Link processing works only in private chats; commands work in any chat. A supported link posted in a group gets a one-line hint to use the private chat or inline mode; channels stay silent.
 
 ## Notes
 

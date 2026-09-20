@@ -14,6 +14,8 @@ use teloxide::types::{CallbackQuery, CallbackQueryId, MessageId};
 
 /// The `"forward"` button's data.
 const FORWARD: &str = "forward";
+/// The `"skip"` button's data: drop the prompt without forwarding.
+const SKIP: &str = "skip";
 /// Prefix of a template button's data: `"template|<name>"`.
 const TEMPLATE_PREFIX: &str = "template|";
 
@@ -70,6 +72,29 @@ async fn handle_callback(
     }
 
     log::info!("callback from {chat_id} on prompt {prompt_message_id}: {data}");
+    if data == SKIP {
+        // Skip works with or without a forward channel: it is the explicit
+        // "do not forward this" answer, and it drops the record so the forward
+        // can never happen later.
+        log::info!("edit-before-forward prompt {prompt_message_id} skipped");
+        ctx.chat_store
+            .update(chat_id, |data| {
+                data.edit_message.remove(&prompt_message_id);
+            })
+            .await;
+        let _ = ctx
+            .sender
+            .delete_message(ChatId(chat_id), MessageId(prompt_message_id as i32))
+            .await;
+        let _ = ctx
+            .sender
+            .answer_callback_query(
+                callback_query_id,
+                Some("Skipped — nothing was forwarded.".to_string()),
+            )
+            .await;
+        return;
+    }
     if data == FORWARD {
         match chat_data.forward_channel_id {
             Some(channel_id) => {
@@ -241,6 +266,31 @@ mod tests {
         assert!(
             ctx.chat_store.get(1).await.edit_message.is_empty(),
             "a settled prompt must drop its record"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_drops_the_prompt_without_forwarding() {
+        // "skip" needs no forward channel and no scripted outcomes: it deletes
+        // the prompt and drops the record, so no forward can ever happen.
+        let sender = MockSender::scripted(vec![], api_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, crate::db::unix_now()).await;
+
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "skip").await;
+
+        assert_eq!(
+            sender.calls(),
+            vec!["delete_message", "answer_callback_query"]
+        );
+        assert_eq!(
+            sender.answers(),
+            vec![Some("Skipped — nothing was forwarded.".to_string())]
+        );
+        assert!(
+            ctx.chat_store.get(1).await.edit_message.is_empty(),
+            "a skipped prompt must drop its record"
         );
     }
 

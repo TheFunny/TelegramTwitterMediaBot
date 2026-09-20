@@ -103,9 +103,38 @@ pub(crate) fn release_keep_alive(task: &Task) {
     });
 }
 
-/// One button per template name (column layout), then the confirm button.
-/// Sorted by name: the templates live in a `HashMap`, so an unsorted walk
-/// would reshuffle the buttons between prompts.
+/// The edit-before-forward prompt's text. It names both controls and the TTL,
+/// because the buttons alone left users waiting for a forward that never came
+/// (nothing is forwarded until Confirm).
+pub(super) fn edit_prompt_text(ttl: std::time::Duration) -> String {
+    format!(
+        "Reply to edit the caption, or tap a template, then ↩️ Confirm to forward. \
+         Expires in {}. Nothing is forwarded until you confirm.",
+        coarsest_unit(ttl)
+    )
+}
+
+/// Text the prompt is rewritten to once its record expires. The sweep edits
+/// the prompt in place (see `main`): announcing the expiry with a new message
+/// would wake the chat up to a full TTL later about a prompt nobody is
+/// waiting on.
+pub(crate) const EDIT_PROMPT_EXPIRED_TEXT: &str = "⌛ Expired — nothing was forwarded.";
+
+/// `24h` / `90m` / `45s`: the coarsest whole unit, so the prompt stays short.
+fn coarsest_unit(ttl: std::time::Duration) -> String {
+    let secs = ttl.as_secs();
+    if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Template buttons (one per row), then the confirm/skip pair. Sorted by name:
+/// the templates live in a `HashMap`, so an unsorted walk would reshuffle the
+/// buttons between prompts.
 pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardMarkup {
     let mut names: Vec<&String> = templates.keys().collect();
     names.sort();
@@ -116,10 +145,13 @@ pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKe
             format!("template|{name}"),
         )]);
     }
-    rows.push(vec![InlineKeyboardButton::callback(
-        "↩️ Confirm",
-        "forward",
-    )]);
+    // Skip exists because the prompt holds the forward hostage until Confirm:
+    // without it the only escape was deleting the message and waiting out the
+    // TTL for a forward that then never happens.
+    rows.push(vec![
+        InlineKeyboardButton::callback("↩️ Confirm", "forward"),
+        InlineKeyboardButton::callback("🛑 Skip", "skip"),
+    ]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -190,7 +222,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
             .sender
             .send_message(
                 ChatId(chat_id),
-                "Reply to edit message.".to_string(),
+                edit_prompt_text(ctx.config.edit_message_ttl),
                 Some(MessageId(reply_to as i32)),
                 Some(keyboard),
             )

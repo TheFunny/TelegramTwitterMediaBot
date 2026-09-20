@@ -28,8 +28,8 @@ use upload::{FallbackError, PreparedItem, prepare_upload_item, send_batch_via_up
 // The crate-facing API of this module lives in its submodules; re-export the
 // parts other modules use so call sites stay `send::x`.
 pub(crate) use post_send::{
-    KEEP_ALIVE, Settled, dead_letter_notify, enqueue_retry, handle_task, post_send_actions,
-    settle_task,
+    EDIT_PROMPT_EXPIRED_TEXT, KEEP_ALIVE, Settled, dead_letter_notify, enqueue_retry, handle_task,
+    post_send_actions, settle_task,
 };
 
 /// One process-wide Bot for queue workers. Building a fresh Bot (and its HTTP
@@ -230,7 +230,9 @@ fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut 
     }
 }
 
-pub const MAX_MEDIA_GROUP: usize = 9;
+/// Telegram's `sendMediaGroup` accepts 2–10 items per group; 10 (not the older
+/// 9) means a 10-image post arrives as one album instead of two messages.
+pub const MAX_MEDIA_GROUP: usize = 10;
 
 /// Splits media into batches of at most [`MAX_MEDIA_GROUP`] items, moving the
 /// items out (no per-item clone).
@@ -728,13 +730,14 @@ mod tests {
     fn chunk_media_items_sizes() {
         assert_eq!(chunk_media_items::<i32>(vec![]), Vec::<Vec<i32>>::new());
         assert_eq!(chunk_media_items((0..9).collect()).len(), 1);
-        assert_eq!(chunk_media_items((0..10).collect()).len(), 2);
+        assert_eq!(chunk_media_items((0..10).collect()).len(), 1);
+        assert_eq!(chunk_media_items((0..11).collect()).len(), 2);
         assert_eq!(chunk_media_items((0..25).collect()).len(), 3);
-        assert_eq!(chunk_media_items((0..25).collect())[2].len(), 7);
+        assert_eq!(chunk_media_items((0..25).collect())[2].len(), 5);
         assert!(
             chunk_media_items((0..25).collect())
                 .iter()
-                .all(|c| c.len() <= 9)
+                .all(|c| c.len() <= MAX_MEDIA_GROUP)
         );
     }
 
@@ -807,7 +810,28 @@ mod tests {
             .flatten()
             .map(|button| button.text.clone())
             .collect();
-        assert_eq!(labels, ["a", "b", "m", "q", "y", "z", "↩️ Confirm"]);
+        assert_eq!(
+            labels,
+            ["a", "b", "m", "q", "y", "z", "↩️ Confirm", "🛑 Skip"]
+        );
+    }
+
+    #[test]
+    fn edit_prompt_text_states_the_ttl_and_the_confirm_requirement() {
+        use std::time::Duration;
+
+        let text = super::post_send::edit_prompt_text(Duration::from_secs(24 * 3600));
+        assert!(text.contains("Expires in 24h"), "{text}");
+        assert!(text.contains("Confirm"), "{text}");
+        // The wording of the whole point: no Confirm, no forward.
+        assert!(text.contains("Nothing is forwarded"), "{text}");
+        // Sub-hour TTLs must not render "0h".
+        assert!(
+            super::post_send::edit_prompt_text(Duration::from_secs(90)).contains("Expires in 1m")
+        );
+        assert!(
+            super::post_send::edit_prompt_text(Duration::from_secs(30)).contains("Expires in 30s")
+        );
     }
 
     #[test]
@@ -1311,7 +1335,11 @@ mod tests {
         post_send_actions(&ctx, &task, vec![10, 11]).await;
 
         assert_eq!(sender.calls(), vec!["send_message"]);
-        assert_eq!(sender.messages(), vec!["Reply to edit message."]);
+        // The prompt explains the Confirm requirement and the TTL (see the
+        // pure `edit_prompt_text` test for the exact wording).
+        let prompt_text = sender.messages().first().cloned().unwrap_or_default();
+        assert!(prompt_text.contains("Expires in"), "{prompt_text}");
+        assert!(prompt_text.contains("Confirm"), "{prompt_text}");
         // The prompt's own message id keys the record the reply will edit.
         let data = stores.chat_store().get(1).await;
         let record = data
