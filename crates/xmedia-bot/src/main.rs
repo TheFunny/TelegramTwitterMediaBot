@@ -97,12 +97,15 @@ async fn main() {
     // with no logs; and at `debug` the HTTP client's own lines (hyper_util,
     // reqwest) outnumbered the bot's by two to one. The timed builder adds
     // the timestamp the plain `init` omitted, so a line can be compared with
-    // a user's report. An explicit RUST_LOG still wins outright.
+    // a user's report. An explicit RUST_LOG still wins outright — but a blank
+    // one (`RUST_LOG=` in `.env`, which is not "unset") must not silence the
+    // log the way its absence used to.
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "info,hyper_util=warn,reqwest=warn".to_string());
     pretty_env_logger::formatted_timed_builder()
-        .parse_filters(
-            &std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,hyper_util=warn,reqwest=warn".to_string()),
-        )
+        .parse_filters(&filter)
         .init();
     log::info!("Starting bot");
 

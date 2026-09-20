@@ -30,8 +30,11 @@ cargo run -p xmedia-bot
 Docker 部署（编排见仓库里的 `docker-compose.yml`，实例相关的值写在同目录的 `.env`，compose 会自动替换其中的 `${VAR}`）：
 
 ```bash
+cp .env.example .env   # 填 TELOXIDE_TOKEN 等，逐项都有注释
 docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
+# 或者用仓库里的编排（含 nginx-proxy + acme-companion）：
+docker compose up -d
 ```
 
 环境变量：`TELOXIDE_TOKEN`（必填）、`PIXIV_REFRESH_TOKEN`、`BOT_ADMIN`、`EDIT_MESSAGE_TTL_SECONDS`、`LINK_CACHE_TTL_SECONDS`、`RUST_LOG`、`TELOXIDE_PROXY`、`WEBHOOK*`、`TWITTER_AUTH_TOKEN`（可选）、`BILIBILI_COOKIE`（可选）。
@@ -87,6 +90,7 @@ Telegram 只接受 443/80/88/8443 端口。
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token（必填） |
 | `PIXIV_REFRESH_TOKEN` | Pixiv 刷新令牌；未设置则禁用 Pixiv（此时收到 pixiv 链接会明确回复「站点未启用」，不会静默忽略） |
+| `TWITTER_AUTH_TOKEN` | 可选；登录 x.com 后浏览器 Cookie 里的 `auth_token`，仅在遇到 NSFW 推文时以登录态获取媒体 |
 | `BILIBILI_COOKIE` | 可选的 B 站 Cookie 串（`SESSDATA=…; bili_jct=…`），仅在出口 IP 被持续风控时才需要（设备 cookie 由 bot 自动获取） |
 | `BOT_ADMIN` | 管理员聊天 ID，逗号分隔；接收启动/停止通知 |
 | `EDIT_MESSAGE_TTL_SECONDS` | 转发前编辑记录过期秒数，默认 86400；过期后提示消息会被就地改写为「已过期，未转发」（不额外发消息打扰） |

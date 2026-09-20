@@ -30,8 +30,11 @@ cargo run -p xmedia-bot
 Docker deployment (`docker-compose.yml` in this repo is the orchestration; instance values live in the `.env` next to it, and compose substitutes every `${VAR}` from there):
 
 ```bash
+cp .env.example .env   # fill in TELOXIDE_TOKEN and the rest; every line is commented
 docker build -t tgxmb .
 docker run --rm -d --name tgxmb --env-file .env -v ./data:/app/data tgxmb
+# or use the bundled orchestration (nginx-proxy + acme-companion):
+docker compose up -d
 ```
 
 Environment variables: `TELOXIDE_TOKEN` (required), `PIXIV_REFRESH_TOKEN`, `BOT_ADMIN`, `EDIT_MESSAGE_TTL_SECONDS`, `LINK_CACHE_TTL_SECONDS`, `RUST_LOG`, `TELOXIDE_PROXY`, `WEBHOOK*`, `TWITTER_AUTH_TOKEN` (optional), `BILIBILI_COOKIE` (optional).
@@ -87,6 +90,7 @@ Telegram only accepts ports 443/80/88/8443.
 |---|---|
 | `TELOXIDE_TOKEN` | Bot token (required) |
 | `PIXIV_REFRESH_TOKEN` | Pixiv refresh token; Pixiv is disabled without it (a pixiv link then gets an explicit "site not enabled" reply instead of silence) |
+| `TWITTER_AUTH_TOKEN` | Optional; the `auth_token` cookie of a logged-in x.com session, used only to fetch NSFW tweets' media |
 | `BILIBILI_COOKIE` | Optional bilibili cookie string (`SESSDATA=…; bili_jct=…`); only needed when the egress IP stays risk-controlled (device cookies are fetched automatically) |
 | `BOT_ADMIN` | Admin chat IDs, comma-separated; receives start/stop notifications |
 | `EDIT_MESSAGE_TTL_SECONDS` | Edit-before-forward record expiry in seconds, default 86400; once lapsed the prompt is rewritten in place to "expired — nothing was forwarded" (no extra message) |
