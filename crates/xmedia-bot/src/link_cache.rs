@@ -96,7 +96,7 @@ impl LinkCache {
         match result {
             Ok(v) => v,
             Err(e) => {
-                log::error!("link cache read failed: {e}");
+                log::warn!("link cache read failed: {e}");
                 None
             }
         }
@@ -116,7 +116,7 @@ impl LinkCache {
             })
             .await;
         if let Err(e) = result {
-            log::error!("link cache write failed: {e}");
+            log::warn!("link cache write failed: {e}");
         }
     }
 
@@ -131,7 +131,7 @@ impl LinkCache {
             })
             .await;
         if let Err(e) = result {
-            log::error!("link cache delete failed: {e}");
+            log::warn!("link cache delete failed: {e}");
         }
     }
 
@@ -150,7 +150,7 @@ impl LinkCache {
         match result {
             Ok(n) => n,
             Err(e) => {
-                log::error!("link cache prune failed: {e}");
+                log::warn!("link cache prune failed: {e}");
                 0
             }
         }
@@ -170,7 +170,7 @@ impl LinkCache {
         match result {
             Ok(n) => n,
             Err(e) => {
-                log::error!("link cache clear failed: {e}");
+                log::warn!("link cache clear failed: {e}");
                 0
             }
         }

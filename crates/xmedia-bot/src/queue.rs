@@ -192,6 +192,39 @@ impl PersistentTaskQueue {
         Ok(())
     }
 
+    /// Pending task count and the oldest `run_after`, for the periodic sweep's
+    /// health line. Deliberately separate from the worker's own
+    /// `earliest_run_after`: that one runs on every idle worker cycle and must
+    /// stay a single indexed `MIN`, while the count is only asked for once per
+    /// sweep.
+    pub async fn pending_backlog(&self) -> Option<(i64, f64)> {
+        let result = self
+            .pool
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT COUNT(*), MIN(run_after) FROM tasks WHERE status='pending'")?;
+                let mut rows = stmt.query([])?;
+                match rows.next()? {
+                    Some(row) => {
+                        let count = row.get::<_, i64>(0)?;
+                        match row.get::<_, Option<f64>>(1)? {
+                            Some(oldest) if count > 0 => Ok(Some((count, oldest))),
+                            _ => Ok(None),
+                        }
+                    }
+                    None => Ok(None),
+                }
+            })
+            .await;
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("queue backlog query failed: {e}");
+                None
+            }
+        }
+    }
+
     async fn recover_stale(&self) {
         self.recover_sweep().await;
     }
@@ -201,6 +234,30 @@ impl PersistentTaskQueue {
         if let Err(e) = result {
             log::error!("queue recovery failed: {e}");
         }
+    }
+}
+
+/// Which task a lease/retry/dead-letter line is about: the chat from the
+/// stored payload, plus the post's normalized cache key when the payload
+/// carries one (`ForwardMessages` has no source URL). Without these a queue
+/// line named only a row id, which is useless to whoever reads the log — the
+/// row id is assigned at insert time and appears nowhere else.
+///
+/// Built only when the line is actually logged (log arguments are lazy).
+fn row_fields(payload: &Value) -> String {
+    let chat = payload
+        .get("chat_id")
+        .or_else(|| payload.get("from_chat_id"))
+        .and_then(Value::as_i64);
+    let key = payload
+        .get("source_url")
+        .and_then(Value::as_str)
+        .map(crate::handlers::log_key);
+    match (chat, key) {
+        (Some(chat), Some(key)) => format!("chat={chat} [key={key}]"),
+        (Some(chat), None) => format!("chat={chat}"),
+        (None, Some(key)) => format!("[key={key}]"),
+        (None, None) => String::new(),
     }
 }
 
@@ -330,11 +387,18 @@ impl QueueWorker {
                 return;
             }
         };
-        log::debug!("processing {} (attempt {})", row.id, row.attempts + 1);
+        let fields = row_fields(&payload);
+        log::debug!(
+            "processing {} {fields} (attempt {})",
+            row.id,
+            row.attempts + 1
+        );
+        let attempt_started = std::time::Instant::now();
         let outcome = self.run_with_lease(&row.id, payload).await;
+        let attempt_ms = attempt_started.elapsed().as_millis();
         match outcome {
             Ok(()) => {
-                log::debug!("task {} completed", row.id);
+                log::debug!("task {} {fields} completed in {attempt_ms}ms", row.id);
                 self.delete_row(&row.id).await;
             }
             Err(QueueError::Retryable {
@@ -348,7 +412,7 @@ impl QueueWorker {
                     // not restate its own wrapper — see `failure_text`.)
                     let message = "retries exhausted".to_string();
                     log::error!(
-                        "dead-lettering {}: {message} after {} attempt(s)",
+                        "dead-lettering {} {fields}: {message} after {} attempt(s)",
                         row.id,
                         row.attempts + 1
                     );
@@ -357,7 +421,7 @@ impl QueueWorker {
                 } else {
                     let delay = scaled_retry_delay(delay_seconds, row.attempts);
                     log::debug!(
-                        "task {} rescheduled in {delay:.1}s (attempt {})",
+                        "task {} {fields} attempt {} took {attempt_ms}ms, rescheduled in {delay:.1}s",
                         row.id,
                         row.attempts + 1
                     );
@@ -366,7 +430,7 @@ impl QueueWorker {
                 }
             }
             Err(QueueError::Permanent { message, payload }) => {
-                log::error!("dead-lettering {}: {message}", row.id);
+                log::error!("dead-lettering {} {fields}: {message}", row.id);
                 self.delete_row(&row.id).await;
                 (self.dead_letter)(payload, message).await;
             }
@@ -486,6 +550,72 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        queue.stop().await;
+    }
+
+    #[test]
+    fn row_fields_name_the_chat_and_the_post() {
+        // The payload shapes the three task variants store.
+        assert_eq!(
+            row_fields(&serde_json::json!({
+                "chat_id": 111,
+                "source_url": "https://x.com/u/status/1"
+            })),
+            "chat=111 [key=twitter:1]"
+        );
+        // A forward has no source URL; a chat id alone must still name the line.
+        assert_eq!(
+            row_fields(&serde_json::json!({"from_chat_id": 111, "to_chat_id": 222})),
+            "chat=111"
+        );
+        // Garbage in the payload must not panic a log line.
+        assert_eq!(row_fields(&serde_json::json!({"chat_id": "111"})), "");
+        assert_eq!(row_fields(&serde_json::Value::Null), "");
+    }
+
+    #[tokio::test]
+    async fn pending_backlog_counts_only_unleased_rows() {
+        let (queue, _dir) = new_queue().await;
+        assert_eq!(queue.pending_backlog().await, None, "empty queue");
+
+        let due = now_f64();
+        queue
+            .enqueue(serde_json::json!({"chat_id": 1}), due)
+            .await
+            .unwrap();
+        queue
+            .enqueue(serde_json::json!({"chat_id": 2}), due + 600.0)
+            .await
+            .unwrap();
+        // Hold the first row in the handler so it is leased, not pending: a
+        // health line that reported work already in flight as backlog would be
+        // lying about the queue.
+        let release = Arc::new(tokio::sync::Notify::new());
+        let held = release.clone();
+        queue
+            .start(
+                move |_payload| {
+                    let held = held.clone();
+                    async move {
+                        held.notified().await;
+                        Ok(())
+                    }
+                },
+                |_payload, _message| async {},
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            queue.pending_backlog().await.map(|(n, _)| n),
+            Some(1),
+            "the leased row is not pending"
+        );
+        let (_, oldest) = queue.pending_backlog().await.unwrap();
+        assert!(
+            (oldest - (due + 600.0)).abs() < 1.0,
+            "oldest is the earliest run_after: {oldest}"
+        );
+        release.notify_one();
         queue.stop().await;
     }
 

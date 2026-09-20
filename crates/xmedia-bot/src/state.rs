@@ -73,7 +73,7 @@ impl ChatStore {
             })
             .await
             .unwrap_or_else(|e| {
-                log::error!("chat_state read failed: {e}");
+                log::warn!("chat_state read failed: {e}");
                 None
             })
             .unwrap_or_default();
@@ -98,7 +98,7 @@ impl ChatStore {
             })
             .await;
         if let Err(e) = result {
-            log::error!("chat_state write failed: {e}");
+            log::warn!("chat_state write failed: {e}");
         }
     }
 

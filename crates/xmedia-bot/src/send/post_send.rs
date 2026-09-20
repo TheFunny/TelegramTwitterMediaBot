@@ -257,8 +257,9 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
         match prompt {
             Ok(prompt_id) => {
                 log::info!(
-                    "edit-before-forward prompt {prompt_id} opened for {} message(s)",
-                    message_ids.len()
+                    "edit-before-forward prompt {prompt_id} opened for {} message(s) [key={}] chat={chat_id}",
+                    message_ids.len(),
+                    log_key(&source_url)
                 );
                 let source_url = source_url.clone();
                 ctx.chat_store
@@ -283,8 +284,9 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
 
     if let Some(channel_id) = forward_channel_id {
         log::info!(
-            "forwarding {} message(s) to channel {channel_id}",
-            message_ids.len()
+            "forwarding {} message(s) to channel {channel_id} from chat {chat_id} [key={}]",
+            message_ids.len(),
+            log_key(&source_url)
         );
         let forward_task = Task::ForwardMessages {
             from_chat_id: chat_id,

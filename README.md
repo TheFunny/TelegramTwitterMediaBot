@@ -93,7 +93,7 @@ Telegram 只接受 443/80/88/8443 端口。
 | `LINK_CACHE_TTL_SECONDS` | 链接结果缓存过期秒数，默认 604800（7 天） |
 | `CAPTION_QUOTE_TEXT_CHARS` | 正文（`{title}` + `{content}` 合计）达到该长度（字符）时，caption 的**正文部分**用可折叠引用块包裹，默认 200；`0` 关闭 |
 | `DATA_DIR` | 数据目录（SQLite 数据库 `task_queue.db` 所在目录），默认 `data`（相对工作目录，会自动创建） |
-| `RUST_LOG` | 日志级别 |
+| `RUST_LOG` | 日志级别，默认 `info,hyper_util=warn,reqwest=warn`（未设置也**不会**哑掉）。排障配方：`info,xmedia_bot=debug,x_media=debug`（应用细节，无依赖噪音）/ `debug,hyper_util=off`（全量）/ `trace`（额外打印完整链接与消息原文，**含用户数据**） |
 | `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需 |
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |
 | `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由 |

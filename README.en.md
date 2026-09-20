@@ -93,7 +93,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `LINK_CACHE_TTL_SECONDS` | Link-result cache expiry in seconds, default 604800 (7 days) |
 | `CAPTION_QUOTE_TEXT_CHARS` | **The text part** of the caption (the joined `{title}` + `{content}`) is wrapped in a collapsible blockquote once it reaches this many characters, default 200; `0` disables |
 | `DATA_DIR` | Data directory (where the SQLite `task_queue.db` lives), default `data` (relative to the working directory, created automatically) |
-| `RUST_LOG` | Log level |
+| `RUST_LOG` | Log level, default `info,hyper_util=warn,reqwest=warn` (an unset variable no longer silences the log). Recipes: `info,xmedia_bot=debug,x_media=debug` (app detail, no dependency noise) / `debug,hyper_util=off` (everything) / `trace` (also prints full links and message text — **user data**) |
 | `TELOXIDE_PROXY` | HTTP proxy (e.g. `http://127.0.0.1:10808`); applies to both the Telegram Bot API and site fetches — required on restricted networks (e.g. behind the GFW) |
 | `LOCAL_USER_ID` | UID the container runs as, default 9001 |
 | `VIRTUAL_HOST` | Public domain or IP; nginx-proxy routes by this |

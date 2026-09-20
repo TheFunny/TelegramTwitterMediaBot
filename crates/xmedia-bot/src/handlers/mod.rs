@@ -130,11 +130,14 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
             &t[..end]
         })
         .unwrap_or("<no text>");
-    // Per-request detail: debug only (message text is user data).
+    // Per-request detail: who and where at `debug`; the message text itself is
+    // user data and only ever appears at `trace`, so a `debug` log can be
+    // shared without leaking what people pasted.
     log::debug!(
-        "message from {sender} in {} (private={is_private}): {text_preview}",
+        "message from {sender} in {} (private={is_private})",
         message.chat.id
     );
+    log::trace!("message text: {text_preview}");
     // URL/edit flows only run in private chats; commands run in any chat.
     if is_private
         && let Some(reply) = message.reply_to_message()
@@ -152,7 +155,14 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
     if let Some(text) = message.text()
         && let Ok(command) = Command::parse(text, "")
     {
-        log::debug!("command from {}: {text_preview}", message.chat.id);
+        // The command name is what the operator needs at `debug`; its argument
+        // may be a user-supplied URL, which stays at `trace`.
+        log::debug!(
+            "command from {}: {}",
+            message.chat.id,
+            text.split_whitespace().next().unwrap_or("<empty>")
+        );
+        log::trace!("command text: {text_preview}");
         execute_command(&bot, &message, command).await?;
         return respond(());
     }

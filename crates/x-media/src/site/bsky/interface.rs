@@ -51,6 +51,10 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     // encode path — the temp file stays alive via `_keep_alive`). On any
     // failure the video item is dropped and the post degrades to its text.
     let mut media = Vec::with_capacity(fetched.media.len());
+    // The remux warnings below name the post, not the CDN URL they were
+    // working on: the media URL is derived from what the user pasted, and
+    // `warn` is a level operators share.
+    let key = cache_key(url).unwrap_or_else(|| "?".into());
     for item in fetched.media {
         let is_hls = matches!(&item, Media::Video { url, .. }
             if url.contains("playlist") || url.ends_with(".m3u8"));
@@ -72,8 +76,8 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                 });
                 fetched._keep_alive = Some(keep_alive);
             }
-            Ok(None) => log::warn!("bsky video remux unavailable for {url}"),
-            Err(e) => log::warn!("bsky video remux failed for {url}: {e}"),
+            Ok(None) => log::warn!("bsky video remux unavailable for [key={key}]"),
+            Err(e) => log::warn!("bsky video remux failed for [key={key}]: {e}"),
         }
     }
     fetched.media = media;

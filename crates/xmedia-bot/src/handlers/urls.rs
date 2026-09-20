@@ -48,20 +48,34 @@ pub async fn start_url_workers() {
     for _ in 0..URL_WORKERS {
         let rx = std::sync::Arc::clone(&rx);
         handles.push(tokio::spawn(async move {
+            // Supervised like the queue workers: a panic inside a worker
+            // (a handler, a poisoned lock) used to kill it for good and
+            // silently shrink the pool — the remaining workers keep the
+            // channel drained, so nothing else surfaces the loss. The job the
+            // panicking worker held is lost; the panic is not.
             while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
-                let job = rx.lock().await.recv().await;
-                match job {
-                    Some((message, url)) => {
-                        url_media(
-                            &CONTEXT,
-                            message.chat.id.0,
-                            message.id.0 as i64,
-                            &url,
-                            PostSend::FromChat,
-                        )
-                        .await
+                let rx = std::sync::Arc::clone(&rx);
+                if let Err(e) = tokio::spawn(async move {
+                    while !URL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                        let job = rx.lock().await.recv().await;
+                        match job {
+                            Some((message, url)) => {
+                                url_media(
+                                    &CONTEXT,
+                                    message.chat.id.0,
+                                    message.id.0 as i64,
+                                    &url,
+                                    PostSend::FromChat,
+                                )
+                                .await;
+                            }
+                            None => break,
+                        }
                     }
-                    None => break,
+                })
+                .await
+                {
+                    log::error!("url worker panicked, restarting: {e}");
                 }
             }
         }));
@@ -83,7 +97,9 @@ pub async fn stop_url_workers() {
     let handles = URL_WORKER_HANDLES.lock().take();
     if let Some(handles) = handles {
         for handle in handles {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                log::error!("url worker panicked at shutdown: {e}");
+            }
         }
     }
 }
@@ -167,16 +183,19 @@ async fn dispatch_send(
     reply_to: MessageId,
     task: &Task,
     url: &str,
+    started: std::time::Instant,
 ) {
     let result = match task {
         Task::SendAnimation { .. } => send::send_animation(ctx, task).await,
         Task::SendMediaSequence { .. } => send::send_media_sequence(ctx, task).await,
         Task::ForwardMessages { .. } => unreachable!(),
     };
+    // Fetch + cache lookup + upload: the whole wait the user sat through.
+    let ms = started.elapsed().as_millis();
     match result {
         Ok(message_ids) => {
             log::info!(
-                "sent {} message(s) for [key={}]",
+                "sent {} message(s) for [key={}] chat={chat_id} in {ms}ms",
                 message_ids.len(),
                 log_key(url)
             );
@@ -188,7 +207,7 @@ async fn dispatch_send(
             task,
         }) => {
             log::info!(
-                "send for [key={}] failed, queued for retry in {delay_seconds:.1}s",
+                "send for [key={}] chat={chat_id} failed after {ms}ms, queued for retry in {delay_seconds:.1}s",
                 log_key(url)
             );
             send::enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
@@ -210,7 +229,10 @@ async fn dispatch_send(
             task,
         }) => {
             send::settle_task(ctx, &task, send::Settled::Failed).await;
-            log::error!("send for {url} failed permanently: {err_message}");
+            log::error!(
+                "send for [key={}] chat={chat_id} failed permanently after {ms}ms: {err_message}",
+                log_key(url)
+            );
             let _ = reply(
                 ctx.sender,
                 chat_id,
@@ -330,7 +352,9 @@ async fn run_with_chat_action<F: Future<Output = ()>>(
     // it makes the future !Send, and the URL workers spawn these.
     let action = hint.lock().action();
     if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
-        log::error!("send_chat_action failed: {e}");
+        // Cosmetic indicator: a failure degrades the experience, it does not
+        // break the send (a group where the bot cannot send actions).
+        log::warn!("send_chat_action failed for chat {chat_id}: {e}");
     }
     tokio::pin!(pipeline);
     loop {
@@ -342,7 +366,9 @@ async fn run_with_chat_action<F: Future<Output = ()>>(
             () = tokio::time::sleep(ACTION_REFRESH) => {
                 let action = hint.lock().action();
                 if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
-                    log::error!("send_chat_action failed: {e}");
+                    // Cosmetic indicator: a failure degrades the experience, it does not
+        // break the send (a group where the bot cannot send actions).
+        log::warn!("send_chat_action failed for chat {chat_id}: {e}");
                 }
             }
         }
@@ -434,6 +460,9 @@ async fn url_media_inner(
     hint: &parking_lot::Mutex<ActionHint>,
 ) {
     let reply_to = MessageId(reply_to_message_id as i32);
+    // Whole-link timer for the result lines: fetch (ugoira encode, HLS remux
+    // included) + cache lookup + upload — the wait the user actually had.
+    let started = std::time::Instant::now();
 
     // Link cache: a post sent before is re-sent from Telegram file ids —
     // no source-site request, no download, no upload. Keyed by the
@@ -502,19 +531,23 @@ async fn url_media_inner(
             Some(cached),
             post_send,
         );
-        dispatch_send(ctx, chat_id, reply_to, &task, url).await;
+        dispatch_send(ctx, chat_id, reply_to, &task, url, started).await;
         return;
     }
 
-    log::debug!("fetching {url} [key={}]", log_key(url));
+    log::debug!("fetching [key={}]", log_key(url));
+    log::trace!("fetching {url}");
     match x_media::site::fetch(url).await {
         // Unsupported links are ignored silently (Python parity).
         Ok(None) => {
-            log::debug!("no site pattern matches {url}; ignoring");
+            // The URL itself is user data, so only `trace` names the link;
+            // `debug` just records that the message was looked at.
+            log::debug!("no site pattern matches the link; ignoring");
+            log::trace!("no site pattern matches {url}");
         }
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
-            log::error!("fetch {url}: {e}");
+            log::error!("fetch [key={}]: {e}", log_key(url));
             let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(&e)).await;
         }
         Ok(Some(mut fetched)) => {
@@ -577,7 +610,7 @@ async fn url_media_inner(
             if let Some(dir) = fetched.take_keep_alive() {
                 send::KEEP_ALIVE.lock().push(dir);
             }
-            dispatch_send(ctx, chat_id, reply_to, &task, url).await;
+            dispatch_send(ctx, chat_id, reply_to, &task, url, started).await;
         }
     }
 }

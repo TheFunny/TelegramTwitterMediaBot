@@ -43,7 +43,18 @@ fn spawn_sigterm_handler(_stop_token: StopToken) {}
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    pretty_env_logger::init();
+    // Without RUST_LOG nothing at all was logged (env_logger falls back to
+    // `error`), so a deployment that forgot the variable looked like a bot
+    // with no logs; and at `debug` the HTTP client's own lines (hyper_util,
+    // reqwest) outnumbered the bot's by two to one. The timed builder adds
+    // the timestamp the plain `init` omitted, so a line can be compared with
+    // a user's report. An explicit RUST_LOG still wins outright.
+    pretty_env_logger::formatted_timed_builder()
+        .parse_filters(
+            &std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,hyper_util=warn,reqwest=warn".to_string()),
+        )
+        .init();
     log::info!("Starting bot");
 
     let bot = Bot::from_env();
@@ -117,6 +128,22 @@ async fn main() {
                 let idle_limiters = crate::rate_limit::prune_idle();
                 if idle_limiters > 0 {
                     log::debug!("rate limiter: dropped {idle_limiters} idle bucket(s)");
+                }
+                // Only speaks up when the queue is not empty: a healthy bot
+                // has nothing to report, and a periodic "0 pending" line is
+                // noise that hides the lines that matter.
+                if let Some((pending, oldest_run_after)) = TASK_QUEUE.pending_backlog().await {
+                    let overdue = crate::db::now_f64() - oldest_run_after;
+                    if overdue >= 0.0 {
+                        log::info!(
+                            "queue: {pending} pending task(s), oldest {overdue:.0}s overdue"
+                        );
+                    } else {
+                        log::info!(
+                            "queue: {pending} pending task(s), oldest retry in {:.0}s",
+                            -overdue
+                        );
+                    }
                 }
                 for (chat_id, prompt_message_id) in removed {
                     // Rewritten in place, not announced: the sweep is a

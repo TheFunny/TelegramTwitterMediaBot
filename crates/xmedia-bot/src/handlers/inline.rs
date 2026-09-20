@@ -116,11 +116,10 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
 /// Fetches the post behind an inline query and answers it. The caller has
 /// already applied the debounce. Returns `true` when an answer was sent.
 async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, RequestError> {
-    log::debug!(
-        "inline query: {} [key={}]",
-        query.query,
-        log_key(&query.query)
-    );
+    // The query is user input: `debug` keeps only its normalized key, the
+    // text itself is `trace` (same split as the message handler).
+    log::debug!("inline query [key={}]", log_key(&query.query));
+    log::trace!("inline query: {}", query.query);
     // No retries: the debounce plus a 1s/2s backoff would outlast the inline
     // query the answer belongs to.
     match x_media::site::fetch_once(&query.query).await {
@@ -206,7 +205,7 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
             }
         }
         Ok(None) => {}
-        Err(e) => log::error!("inline fetch {}: {e}", query.query),
+        Err(e) => log::error!("inline fetch [key={}]: {e}", log_key(&query.query)),
     }
     Ok(false)
 }

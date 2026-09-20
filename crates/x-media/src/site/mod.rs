@@ -450,6 +450,9 @@ pub async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 
 async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>, FetchError> {
+    // Wall time of the whole fetch, retry backoff included: the ugoira encode
+    // and the HLS remux live inside it, so this is where a slow fetch shows.
+    let started = std::time::Instant::now();
     let Some(site) = find_site(url) else {
         // A registered-but-disabled site (pixiv without a token) is not an
         // unsupported link: report it, so the bot answers the user instead of
@@ -464,10 +467,11 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
             Ok(fetched) => {
                 // Per-request detail: debug only, keyed by the post id.
                 log::debug!(
-                    "fetched [key={}]: site {} returned {} media",
+                    "fetched [key={}]: site {} returned {} media in {}ms",
                     cache_key(url).unwrap_or_else(|| "?".into()),
                     fetched.site_name(),
-                    fetched.media.len()
+                    fetched.media.len(),
+                    started.elapsed().as_millis()
                 );
                 return Ok(Some(fetched));
             }
