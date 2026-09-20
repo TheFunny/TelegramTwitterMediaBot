@@ -3,7 +3,7 @@ use std::time::Duration;
 use teloxide::dptree::endpoint;
 use teloxide::prelude::*;
 use teloxide::stop::StopToken;
-use teloxide::types::{ChatId, InlineKeyboardMarkup, InputFile, MessageId};
+use teloxide::types::{ChatId, InputFile, MessageId};
 use teloxide::update_listeners::{self, UpdateListener, webhooks};
 use tokio::sync::watch;
 use x_media::site;
@@ -183,67 +183,25 @@ async fn main() {
         }
     }
 
-    // Edit-expiry sweep: clears the prompt's buttons once the record expires.
+    // Background sweep: expires the edit prompts and prunes what has aged out.
     log::info!(
-        "edit-expiry sweep: every 300s, ttl {}",
+        "edit-expiry sweep: every {}s, ttl {}",
+        SWEEP_INTERVAL.as_secs(),
         CONFIG.edit_message_ttl.as_secs()
     );
     let (stop_tx, stop_rx) = watch::channel(false);
     {
         let bot = bot.clone();
-        let mut stop_rx = stop_rx;
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = stop_rx.changed() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {}
-                }
-                let ttl = CONFIG.edit_message_ttl;
-                let removed = CHAT_STORE.prune_expired(ttl).await;
-                let pruned = LINK_CACHE.prune(CONFIG.link_cache_ttl).await;
-                if pruned > 0 {
-                    log::info!("link cache: pruned {pruned} expired entr(ies)");
-                }
-                let idle_limiters = crate::rate_limit::prune_idle();
-                if idle_limiters > 0 {
-                    log::debug!("rate limiter: dropped {idle_limiters} idle bucket(s)");
-                }
-                // Only speaks up when the queue is not empty: a healthy bot
-                // has nothing to report, and a periodic "0 pending" line is
-                // noise that hides the lines that matter.
-                if let Some((pending, oldest_run_after)) = TASK_QUEUE.pending_backlog().await {
-                    let overdue = crate::db::now_f64() - oldest_run_after;
-                    if overdue >= 0.0 {
-                        log::info!(
-                            "queue: {pending} pending task(s), oldest {overdue:.0}s overdue"
-                        );
-                    } else {
-                        log::info!(
-                            "queue: {pending} pending task(s), oldest retry in {:.0}s",
-                            -overdue
-                        );
-                    }
-                }
-                for (chat_id, prompt_message_id) in removed {
-                    // Rewritten in place, not announced: the sweep is a
-                    // background timer, and a fresh message would wake the chat
-                    // up to a full TTL later about a prompt the user already
-                    // walked away from. The edit drops the buttons too. If the
-                    // prompt was already deleted this fails with a 400
-                    // "message to edit not found" — log and ignore.
-                    if let Err(e) = bot
-                        .edit_message_text(
-                            ChatId(chat_id),
-                            MessageId(prompt_message_id as i32),
-                            send::EDIT_PROMPT_EXPIRED_TEXT,
-                        )
-                        .reply_markup(InlineKeyboardMarkup::default())
-                        .await
-                    {
-                        log::info!("edit-expiry sweep: prompt message gone: {e}");
-                    }
-                }
-            }
+            periodic_sweep(
+                &bot,
+                &CHAT_STORE,
+                &LINK_CACHE,
+                &TASK_QUEUE,
+                &CONFIG,
+                stop_rx,
+            )
+            .await;
         });
     }
 
@@ -324,6 +282,79 @@ async fn main() {
     }
 }
 
+/// How often [`periodic_sweep`] runs.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// The background sweep: rewrites the expired edit prompts in place, prunes the
+/// link cache, the idle rate-limit buckets and the idle inline-query entries,
+/// and reports the queue only when it is not empty.
+///
+/// Takes its collaborators instead of reaching for the statics so a test can
+/// drive a tick with a paused clock: a sleeping task nothing drives is how the
+/// queue's own sweep kept a missing worker wake-up.
+async fn periodic_sweep(
+    sender: &dyn crate::media_sender::MediaSender,
+    chat_store: &crate::state::ChatStore,
+    link_cache: &crate::link_cache::LinkCache,
+    task_queue: &crate::queue::PersistentTaskQueue,
+    config: &crate::config::Config,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = stop.changed() => break,
+            _ = tokio::time::sleep(SWEEP_INTERVAL) => {}
+        }
+        let removed = chat_store.prune_expired(config.edit_message_ttl).await;
+        let pruned = link_cache.prune(config.link_cache_ttl).await;
+        if pruned > 0 {
+            log::info!("link cache: pruned {pruned} expired entr(ies)");
+        }
+        let idle_limiters = crate::rate_limit::prune_idle();
+        if idle_limiters > 0 {
+            log::debug!("rate limiter: dropped {idle_limiters} idle bucket(s)");
+        }
+        // Entries past Telegram's own inline cache window: a repeat is sent to
+        // the bot again anyway, so keeping them would suppress a fetch the user
+        // is waiting for (and the map grew one entry per user, forever).
+        let idle_inline = handlers::prune_idle_states();
+        if idle_inline > 0 {
+            log::debug!("inline queries: dropped {idle_inline} idle entry(ies)");
+        }
+        // Only speaks up when the queue is not empty: a healthy bot has nothing
+        // to report, and a periodic "0 pending" line is noise that hides the
+        // lines that matter.
+        if let Some((pending, oldest_run_after)) = task_queue.pending_backlog().await {
+            let overdue = crate::db::now_f64() - oldest_run_after;
+            if overdue >= 0.0 {
+                log::info!("queue: {pending} pending task(s), oldest {overdue:.0}s overdue");
+            } else {
+                log::info!(
+                    "queue: {pending} pending task(s), oldest retry in {:.0}s",
+                    -overdue
+                );
+            }
+        }
+        for (chat_id, prompt_message_id) in removed {
+            // Rewritten in place, not announced: the sweep is a background
+            // timer, and a fresh message would wake the chat up to a full TTL
+            // later about a prompt the user already walked away from. The edit
+            // drops the buttons too. If the prompt was already deleted this
+            // fails with a 400 "message to edit not found" — log and ignore.
+            if let Err(e) = sender
+                .edit_message_text(
+                    ChatId(chat_id),
+                    MessageId(prompt_message_id as i32),
+                    send::EDIT_PROMPT_EXPIRED_TEXT.to_string(),
+                )
+                .await
+            {
+                log::info!("edit-expiry sweep: prompt message gone: {e}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +402,103 @@ mod tests {
         );
         assert!(!ours_fresh.exists(), "no age gate: ours, however fresh");
         assert!(theirs.exists());
+    }
+
+    /// The sweep's tick: an expired prompt is rewritten in place (buttons
+    /// dropped) while a live one is left alone. Driven through the loop's own
+    /// timer on a paused clock — the loop is what a hand-called helper would
+    /// leave untested, which is how the queue's sweep kept a missing wake-up.
+    #[tokio::test(start_paused = true)]
+    async fn the_sweep_expires_only_the_prompts_past_their_ttl() {
+        use crate::ctx::test_support::{
+            FORWARDED_ID, PROMPT_ID, TestStores, api_error, seed_prompt,
+        };
+        use crate::media_sender::test_support::MockSender;
+        use crate::state::EditMessage;
+
+        // The interval is pinned here because no assertion on the edits can see
+        // it: a shorter interval produces the same single edit (the record is
+        // gone after the first tick), and the paused clock can jump past the
+        // boundary while a tick's DB work is in flight.
+        assert_eq!(SWEEP_INTERVAL, Duration::from_secs(300));
+
+        let config = crate::config::Config::load();
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![], || {
+            api_error("Bad Request: message to edit not found")
+        });
+        let ctx = stores.ctx(&sender);
+        // Chat 1 holds a prompt past its ttl; chat 2 a live one.
+        let stale = crate::db::unix_now() - config.edit_message_ttl.as_secs() as i64 - 1;
+        seed_prompt(&ctx, "", stale).await;
+        stores
+            .chat_store()
+            .update(2, |data| {
+                data.edit_message.insert(
+                    PROMPT_ID,
+                    EditMessage {
+                        url: "https://x.com/u/status/1".into(),
+                        chat_id: 2,
+                        forward_message_ids: vec![FORWARDED_ID],
+                        template: String::new(),
+                        created_at: crate::db::unix_now(),
+                    },
+                );
+            })
+            .await;
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let sweep = periodic_sweep(
+            &sender,
+            stores.chat_store(),
+            stores.link_cache(),
+            stores.task_queue(),
+            &config,
+            stop_rx,
+        );
+        tokio::pin!(sweep);
+
+        // One second short of the interval: nothing has been touched. The
+        // select is what polls the loop (a pinned future nobody awaits never
+        // runs), and the paused clock makes this the loop's own timer.
+        tokio::select! {
+            _ = &mut sweep => unreachable!("the sweep only returns on stop"),
+            _ = tokio::time::sleep(SWEEP_INTERVAL - Duration::from_secs(1)) => {}
+        }
+        assert!(
+            sender.edited_texts().is_empty(),
+            "the sweep ran before its interval"
+        );
+
+        // The second that crosses the interval: the tick fires.
+        tokio::select! {
+            _ = &mut sweep => unreachable!("the sweep only returns on stop"),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+
+        assert_eq!(
+            sender.edited_texts(),
+            vec![(1, PROMPT_ID, send::EDIT_PROMPT_EXPIRED_TEXT.to_string())],
+            "exactly the expired prompt, rewritten in place"
+        );
+        assert!(
+            !ctx.chat_store
+                .get(1)
+                .await
+                .edit_message
+                .contains_key(&PROMPT_ID),
+            "the expired record is gone"
+        );
+        assert!(
+            ctx.chat_store
+                .get(2)
+                .await
+                .edit_message
+                .contains_key(&PROMPT_ID),
+            "a live prompt keeps its record and its buttons"
+        );
+
+        stop_tx.send(true).unwrap();
+        sweep.await;
     }
 }

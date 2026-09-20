@@ -20,6 +20,12 @@ use x_media::media::Media;
 /// post id. Only answer once the query has been stable for this long.
 const INLINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
 
+/// How long a debounce entry is worth keeping: the window Telegram caches an
+/// inline answer for (`answer_inline_query` asks for `cache_time(300)`). Past
+/// it a repeat is sent to the bot again and has to be answered fresh, so the
+/// entry would only suppress a fetch the user is waiting for.
+const INLINE_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Last seen inline query per user and whether it was already answered.
 /// Guards the debounce timer: a repeat of an answered query is served by
 /// Telegram's inline cache (see `cache_time`), not by another fetch. Keyed by
@@ -28,6 +34,10 @@ const INLINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80
 struct InlineDebounceState {
     query: String,
     answered: bool,
+    /// When a query last touched this entry, so the periodic sweep can drop
+    /// one per user who ever used inline mode (the map had no eviction at all,
+    /// unlike the rate limiter's buckets and the chat store).
+    last_seen: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -49,9 +59,19 @@ impl DebounceStates {
             InlineDebounceState {
                 query: query.to_string(),
                 answered: false,
+                last_seen: std::time::Instant::now(),
             },
         );
         true
+    }
+
+    /// Drops entries no query has touched for `idle_for`. Split from the clock
+    /// so the boundary is testable without ageing a monotonic instant.
+    fn prune_idle_at(&mut self, now: std::time::Instant, idle_for: std::time::Duration) -> usize {
+        let before = self.0.len();
+        self.0
+            .retain(|_, state| now.saturating_duration_since(state.last_seen) < idle_for);
+        before - self.0.len()
     }
 
     /// Claims the answer for the user's newest query; false when a newer query
@@ -64,6 +84,7 @@ impl DebounceStates {
             return false;
         }
         state.answered = true;
+        state.last_seen = std::time::Instant::now();
         true
     }
 
@@ -73,8 +94,17 @@ impl DebounceStates {
             && state.query == query
         {
             state.answered = false;
+            state.last_seen = std::time::Instant::now();
         }
     }
+}
+
+/// Drops debounce entries idle for [`INLINE_STATE_TTL`]; the 300 s sweep calls
+/// this next to the rate limiter's prune. Returns how many were dropped.
+pub(crate) fn prune_idle_states() -> usize {
+    INLINE_DEBOUNCE_STATE
+        .lock()
+        .prune_idle_at(std::time::Instant::now(), INLINE_STATE_TTL)
 }
 
 static INLINE_DEBOUNCE_STATE: LazyLock<parking_lot::Mutex<DebounceStates>> =
@@ -212,7 +242,7 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
 
 #[cfg(test)]
 mod tests {
-    use super::DebounceStates;
+    use super::{DebounceStates, INLINE_STATE_TTL};
 
     const URL_A: &str = "https://x.com/a/status/1";
     const URL_B: &str = "https://x.com/b/status/2";
@@ -239,6 +269,29 @@ mod tests {
         // Another user pasting the same link still gets an answer.
         assert!(states.note(2, URL_A));
         assert!(states.claim(2, URL_A));
+    }
+
+    #[test]
+    fn idle_states_are_pruned_and_live_ones_kept() {
+        let mut states = DebounceStates::default();
+        assert!(states.note(1, URL_A));
+        let first = states.0[&1].last_seen;
+        // Entry 2 is strictly newer, so one timestamp can sit exactly on the
+        // window's edge for one and comfortably inside it for the other.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(states.note(2, URL_B));
+
+        assert_eq!(
+            states.prune_idle_at(first + INLINE_STATE_TTL, INLINE_STATE_TTL),
+            1
+        );
+        assert!(
+            !states.0.contains_key(&1),
+            "the entry past the window must go"
+        );
+        assert!(states.0.contains_key(&2), "the live entry must stay");
+        // A pruned user's repeat is answered fresh instead of suppressed.
+        assert!(states.note(1, URL_A));
     }
 
     #[test]

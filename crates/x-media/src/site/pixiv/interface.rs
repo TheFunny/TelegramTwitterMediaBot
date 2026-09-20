@@ -46,23 +46,25 @@ impl Site for PixivSite {
     }
 
     fn validate(&self) -> SiteFuture<'static, (), String> {
-        Box::pin(async {
-            match super::api::validate().await {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    // A rejected credential disables pixiv for the rest of
-                    // this process (it will not fix itself). A bad *moment* —
-                    // a 5xx or a network error while the container comes up —
-                    // must not: disabling on any error turned every later
-                    // pixiv link into "pixiv support is disabled".
-                    if pixiv_error_is_retryable(&e) {
-                        return Err(format!("{e} (transient — pixiv stays enabled)"));
-                    }
-                    super::api::disable();
-                    Err(format!("{e}"))
-                }
-            }
-        })
+        Box::pin(async { startup_validation(super::api::validate().await) })
+    }
+}
+
+/// Turns the startup token exchange's outcome into what the bot reports, and
+/// disables pixiv only for a rejected credential. A bad *moment* — a 5xx or a
+/// network error while the container comes up — must not disable it: disabling
+/// on any error turned every later pixiv link into "support is disabled".
+/// Separate from the network call so the decision is testable.
+fn startup_validation(result: Result<(), PixivError>) -> Result<(), String> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if pixiv_error_is_retryable(&e) => {
+            Err(format!("{e} (transient — pixiv stays enabled)"))
+        }
+        Err(e) => {
+            super::api::disable();
+            Err(format!("{e}"))
+        }
     }
 }
 
@@ -420,6 +422,29 @@ mod tests {
         ] {
             assert!(!PATTERN.is_match(url), "{url}");
         }
+    }
+
+    #[test]
+    fn startup_validation_keeps_the_site_enabled_on_a_bad_moment() {
+        use super::super::api;
+
+        // The startup decision, not the retry policy: a 5xx/429 while the
+        // container comes up must leave pixiv enabled and say so in the message
+        // the admin gets. The rejected-credential half is not exercised here —
+        // it calls `disable()`, a process-wide flag with no reset, so a test
+        // touching it would order-couple every other pixiv test (the predicate
+        // it keys on is covered by the table below).
+        for err in [PixivError::Status(429), PixivError::Status(503)] {
+            let enabled_before = api::enabled();
+            let message = startup_validation(Err(err)).unwrap_err();
+            assert!(message.contains("stays enabled"), "{message}");
+            assert_eq!(
+                api::enabled(),
+                enabled_before,
+                "a bad moment must not disable the site"
+            );
+        }
+        assert!(startup_validation(Ok(())).is_ok());
     }
 
     #[test]

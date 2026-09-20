@@ -15,6 +15,7 @@ mod urls;
 pub use callback::callback_query_handler;
 pub use commands::register_commands;
 pub use inline::inline_query_handler;
+pub(crate) use inline::prune_idle_states;
 /// The resolved `$DATA_DIR/task_queue.db` path, for the startup config line.
 pub(crate) use statics::db_path;
 pub use statics::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};

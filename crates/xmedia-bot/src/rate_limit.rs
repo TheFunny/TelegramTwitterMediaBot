@@ -1,12 +1,13 @@
 //! Per-chat token-bucket rate limiting.
 //!
-//! Telegram throttles bots that burst past a chat's message budget
-//! (roughly 20 messages/min for channels/groups); today the bot absorbs
-//! those 429s with queue retries. This limiter smooths the burst *before*
-//! it reaches the API: media sends to a chat consume one token per
-//! message, refilled at [`REFILL_PER_SEC`], so a batch forward paces itself
-//! instead of tripping flood control. The queue retry stays as the safety
-//! net for limits this bucket does not model (global per-bot limits etc.).
+//! Telegram throttles bots on two budgets: one per chat (roughly 20
+//! messages/min for channels/groups) and a bot-wide one (~30 messages per
+//! second). Both are smoothed here *before* the burst reaches the API — the
+//! per-chat bucket charges one token per message, and [`acquire_global`]
+//! charges the same spend against the bot-wide budget, which no per-chat
+//! bucket can see (a forward fanned out over many chats spends one token in
+//! each and nothing anywhere). The queue retry stays as the safety net for
+//! whatever neither bucket models.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -18,6 +19,12 @@ use std::time::Duration;
 const CAPACITY: f64 = 20.0;
 /// Sustained refill: ~20 messages per minute.
 const REFILL_PER_SEC: f64 = 20.0 / 60.0;
+
+/// The bot-wide budget: Telegram allows roughly 30 messages per second for a
+/// bot in total, independently of the per-chat limits. Set to the documented
+/// ceiling, so it only ever binds on a cross-chat burst.
+const GLOBAL_CAPACITY: f64 = 30.0;
+const GLOBAL_REFILL_PER_SEC: f64 = 30.0;
 
 struct State {
     /// Current token balance; may go negative (debt from an acquire larger
@@ -107,6 +114,17 @@ pub fn limiter_for(chat_id: i64) -> Arc<TokenBucket> {
         .clone()
 }
 
+/// The one bucket every chat shares: Telegram's bot-wide budget.
+static GLOBAL_LIMITER: LazyLock<TokenBucket> =
+    LazyLock::new(|| TokenBucket::new(GLOBAL_CAPACITY, GLOBAL_REFILL_PER_SEC));
+
+/// Waits for `n` messages' worth of the bot-wide budget. Called by the send
+/// paths next to their per-chat [`limiter_for`]: at ~30/s it does not bind on
+/// a single chat, but a batch fanned out over many chats has no other guard.
+pub async fn acquire_global(n: f64) {
+    GLOBAL_LIMITER.acquire(n).await;
+}
+
 /// Drops limiters that are idle (refilled to capacity, so the chat has not
 /// sent recently) and are not still held by an in-flight sender. The map
 /// would otherwise keep one bucket per chat that ever sent media, forever.
@@ -156,6 +174,21 @@ mod tests {
         assert!(
             start.elapsed() >= Duration::from_secs(3),
             "elapsed {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_global_budget_is_paced_and_shared() {
+        // Drain the process-wide budget (no other test touches it: the send
+        // paths that use it are mocked), then prove the next message waits for
+        // the refill instead of going out instantly.
+        acquire_global(GLOBAL_CAPACITY).await;
+        let start = tokio::time::Instant::now();
+        acquire_global(1.0).await;
+        assert!(
+            start.elapsed() >= Duration::from_secs_f64(1.0 / GLOBAL_REFILL_PER_SEC),
+            "a fanned-out burst must be paced: elapsed {:?}",
             start.elapsed()
         );
     }

@@ -157,6 +157,10 @@ pub(crate) mod test_support {
             &self.link_cache
         }
 
+        pub(crate) fn task_queue(&self) -> &PersistentTaskQueue {
+            &self.task_queue
+        }
+
         /// Rows persisted in the task queue: what "queued for retry" looks like
         /// from the outside.
         pub(crate) async fn queued_tasks(&self) -> i64 {

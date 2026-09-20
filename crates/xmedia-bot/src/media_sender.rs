@@ -68,6 +68,16 @@ pub trait MediaSender: Send + Sync {
         text: Option<String>,
     ) -> BoxFuture<'_, Result<(), RequestError>>;
 
+    /// Rewrites a message's text and drops its inline keyboard: the
+    /// edit-expiry sweep rewriting a prompt whose record expired (a button left
+    /// behind could only answer "Expired").
+    fn edit_message_text(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: String,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
+
     /// Rewrites a message's caption, always with HTML parse mode (every caller
     /// in this bot renders escaped HTML: templates and edit-before-forward
     /// links).
@@ -106,6 +116,9 @@ impl MediaSender for Bot {
             crate::rate_limit::limiter_for(chat_id.0)
                 .acquire(items.len() as f64)
                 .await;
+            // Same spend against the bot-wide budget: a fan-out over chats is
+            // invisible to the per-chat buckets.
+            crate::rate_limit::acquire_global(items.len() as f64).await;
             // `<Bot as Requester>::` disambiguates from this trait's same-named
             // method (teloxide's API lives in the `Requester` trait).
             <Bot as Requester>::send_media_group(self, chat_id, items)
@@ -124,6 +137,7 @@ impl MediaSender for Bot {
     ) -> BoxFuture<'a, Result<Message, RequestError>> {
         Box::pin(async move {
             crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
+            crate::rate_limit::acquire_global(1.0).await;
             let mut request = <Bot as Requester>::send_animation(self, chat_id, file)
                 .caption(caption)
                 .parse_mode(ParseMode::Html)
@@ -147,6 +161,7 @@ impl MediaSender for Bot {
             crate::rate_limit::limiter_for(to.0)
                 .acquire(ids.len() as f64)
                 .await;
+            crate::rate_limit::acquire_global(ids.len() as f64).await;
             <Bot as Requester>::copy_messages(self, to, from, ids).await
         })
     }
@@ -182,6 +197,20 @@ impl MediaSender for Bot {
                 request = request.text(text);
             }
             request.await.map(|_| ())
+        })
+    }
+
+    fn edit_message_text(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: String,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            <Bot as Requester>::edit_message_text(self, chat_id, message_id, text)
+                .reply_markup(InlineKeyboardMarkup::default())
+                .await
+                .map(|_| ())
         })
     }
 
@@ -260,6 +289,8 @@ pub(crate) mod test_support {
         messages: Mutex<Vec<String>>,
         captions: Mutex<Vec<String>>,
         answers: Mutex<Vec<Option<String>>>,
+        /// `(chat, message, text)` of every text rewrite, in order.
+        edited_texts: Mutex<Vec<(i64, i64, String)>>,
         /// Builds the error every `*Err` outcome returns (RequestError is not
         /// cloneable, so the factory recreates it per call).
         error: Box<dyn Fn() -> RequestError + Send + Sync>,
@@ -280,6 +311,7 @@ pub(crate) mod test_support {
                 messages: Mutex::new(Vec::new()),
                 captions: Mutex::new(Vec::new()),
                 answers: Mutex::new(Vec::new()),
+                edited_texts: Mutex::new(Vec::new()),
                 error: Box::new(error),
             }
         }
@@ -303,6 +335,11 @@ pub(crate) mod test_support {
         /// Toast texts of the answered callback queries, in order.
         pub(crate) fn answers(&self) -> Vec<Option<String>> {
             self.answers.lock().clone()
+        }
+
+        /// `(chat, message, text)` of every `edit_message_text`, in order.
+        pub(crate) fn edited_texts(&self) -> Vec<(i64, i64, String)> {
+            self.edited_texts.lock().clone()
         }
 
         fn next(&self, kind: &'static str) -> Outcome {
@@ -407,6 +444,24 @@ pub(crate) mod test_support {
             Box::pin(async move {
                 self.calls.lock().push("answer_callback_query");
                 self.answers.lock().push(text);
+                Ok(())
+            })
+        }
+
+        fn edit_message_text(
+            &self,
+            chat_id: ChatId,
+            message_id: MessageId,
+            text: String,
+        ) -> BoxFuture<'_, Result<(), RequestError>> {
+            // Always succeeds: the only caller is the expiry sweep, which
+            // tolerates a failure (a prompt the user already deleted), so the
+            // script stays free for the call the test is about.
+            Box::pin(async move {
+                self.calls.lock().push("edit_message_text");
+                self.edited_texts
+                    .lock()
+                    .push((chat_id.0, message_id.0 as i64, text));
                 Ok(())
             })
         }
