@@ -1396,6 +1396,50 @@ mod tests {
         assert_eq!(sender.calls(), vec!["send_animation", "send_animation"]);
     }
 
+    /// A media group through a **real** `Bot` — its request building, the
+    /// per-chat limiter, the bot-wide budget — against a stand-in API. The
+    /// scripted mock bypasses `media_sender`'s implementation entirely, so a
+    /// call site that stops charging the limiters (or a broken request shape)
+    /// is invisible to every other test.
+    #[tokio::test]
+    async fn a_media_group_reaches_the_api_through_a_real_bot() {
+        use crate::media_sender::test_support::fake_api::FakeApi;
+        use teloxide::Bot;
+
+        let api = FakeApi::start().await;
+        let bot = Bot::new("42:TEST").set_api_url(api.url());
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&bot);
+        // A chat of its own: the limiter buckets are process-wide.
+        let mut task = sequence_task("https://cdn.example/1.jpg");
+        if let Task::SendMediaSequence { chat_id, .. } = &mut task {
+            *chat_id = 987_654;
+        }
+        let bucket = crate::rate_limit::limiter_for(987_654);
+        let before = bucket.tokens();
+
+        let outcome = send_media_sequence(&ctx, &task).await;
+        eprintln!(
+            "SCRATCH send methods={:?} outcome={outcome:?}",
+            api.methods()
+        );
+        assert!(outcome.is_ok());
+
+        // The request teloxide built: one group, the URL, the caption on the
+        // first item.
+        assert_eq!(api.methods(), vec!["SendMediaGroup"]);
+        let body = api.body("SendMediaGroup");
+        assert_eq!(body["chat_id"], 987_654);
+        assert_eq!(body["media"][0]["media"], "https://cdn.example/1.jpg");
+        assert_eq!(body["media"][0]["caption"], "cap");
+        // …and the send charged the pace limiter before it went out.
+        let after = bucket.tokens();
+        assert!(
+            after < before,
+            "a send must charge the chat's budget ({before} -> {after})"
+        );
+    }
+
     #[tokio::test]
     async fn forward_classifies_retry_after_and_permanent() {
         use teloxide::types::Seconds;

@@ -956,6 +956,21 @@ mod tests {
         }
     }
 
+    /// The redirect-hop guard, against a public redirector: the initial URL is
+    /// checked by [`media_request`], but a redirect is the part of the path a
+    /// third-party response actually controls.
+    #[tokio::test]
+    #[ignore = "live network: requires outbound HTTPS to httpbin.org"]
+    async fn a_redirect_into_the_hosts_network_is_refused() {
+        let url = "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/";
+        match download_media(url).await.unwrap_err() {
+            // A policy refusal reaches the caller wrapped by reqwest.
+            FetchError::Http(e) => assert!(e.is_redirect(), "got {e}"),
+            FetchError::Blocked => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_download_into_the_hosts_network_is_refused() {
         // Refused on the URL alone: nothing has to be listening (or leaking) at

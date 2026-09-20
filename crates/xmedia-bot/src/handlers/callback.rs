@@ -216,7 +216,7 @@ async fn handle_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::{PROMPT_ID, TestStores, api_error, seed_prompt};
+    use crate::ctx::test_support::{FORWARDED_ID, PROMPT_ID, TestStores, api_error, seed_prompt};
     use crate::media_sender::test_support::{MockSender, Outcome};
 
     /// The Telegram wording the mocks answer with: a chat the bot cannot reach.
@@ -313,6 +313,33 @@ mod tests {
             ctx.chat_store.get(1).await.edit_message.is_empty(),
             "a skipped prompt must drop its record"
         );
+    }
+
+    /// The whole callback path against a stand-in API through a real `Bot`:
+    /// copy, delete, toast, carrying the ids the prompt held. The scripted
+    /// mock records that a call happened; this records what the API received.
+    #[tokio::test]
+    async fn the_forward_button_talks_to_the_api_through_a_real_bot() {
+        use crate::media_sender::test_support::fake_api::FakeApi;
+        use teloxide::Bot;
+
+        let api = FakeApi::start().await;
+        let bot = Bot::new("42:TEST").set_api_url(api.url());
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&bot);
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
+
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
+
+        assert_eq!(
+            api.methods(),
+            vec!["CopyMessages", "DeleteMessage", "AnswerCallbackQuery"]
+        );
+        let copy = api.body("CopyMessages");
+        assert_eq!(copy["chat_id"], 2, "the prompt's channel");
+        assert_eq!(copy["from_chat_id"], 1);
+        assert_eq!(copy["message_ids"], serde_json::json!([FORWARDED_ID]));
+        assert_eq!(api.body("AnswerCallbackQuery")["text"], "✅ Forwarded");
     }
 
     #[tokio::test]

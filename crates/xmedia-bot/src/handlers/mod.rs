@@ -181,7 +181,21 @@ async fn edit_message_handler(
     true
 }
 
+/// The `dptree` entry point: the process-wide context, plus the bot the
+/// dispatcher handed us (used for the replies this module sends itself).
 pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestError> {
+    handle_message(&AppContext::from_statics(&bot), &bot, message).await
+}
+
+/// Body of [`message_handler`], taking its context. Every branch here — the
+/// edit-reply interception, the command path, the private-chat link enqueue and
+/// the group hint — is otherwise reachable only through the process-wide
+/// statics, which is why none of them had a test.
+pub(crate) async fn handle_message(
+    ctx: &AppContext<'_>,
+    bot: &Bot,
+    message: Message,
+) -> Result<(), RequestError> {
     let is_private = matches!(message.chat.kind, ChatKind::Private(_));
     let sender = message
         .from
@@ -207,13 +221,7 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
     if is_private
         && let Some(reply) = message.reply_to_message()
         && let Some(text) = message.text()
-        && edit_message_handler(
-            &AppContext::from_statics(&bot),
-            message.chat.id.0,
-            reply.id.0 as i64,
-            text,
-        )
-        .await
+        && edit_message_handler(ctx, message.chat.id.0, reply.id.0 as i64, text).await
     {
         return respond(());
     }
@@ -228,7 +236,7 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
             text.split_whitespace().next().unwrap_or("<empty>")
         );
         log::trace!("command text: {text_preview}");
-        execute_command(&bot, &message, command).await?;
+        execute_command(bot, &message, command).await?;
         return respond(());
     }
     if is_private {
@@ -262,7 +270,7 @@ pub async fn message_handler(bot: Bot, message: Message) -> Result<(), RequestEr
         // the expectation is there). Unsupported links stay ignored; the hint
         // names the two paths that do work. Channels are excluded — the reply
         // would be posted into the channel itself.
-        let _ = reply(&bot, message.chat.id.0, message.id, GROUP_LINK_HINT).await;
+        let _ = reply(ctx.sender, message.chat.id.0, message.id, GROUP_LINK_HINT).await;
     }
     respond(())
 }
@@ -287,7 +295,7 @@ fn is_group(kind: &ChatKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::{PROMPT_ID, TestStores, api_error, seed_prompt};
+    use crate::ctx::test_support::{FORWARDED_ID, PROMPT_ID, TestStores, api_error, seed_prompt};
     use crate::media_sender::test_support::{MockSender, Outcome};
     use teloxide::RequestError;
 
@@ -391,6 +399,64 @@ mod tests {
         // (URL/command) path instead.
         assert!(!edit_message_handler(&ctx, 1, PROMPT_ID, "hello").await);
         assert!(sender.calls().is_empty());
+    }
+
+    /// A reply driven through the real message entry point into a real `Bot`:
+    /// the routing (reply-to-prompt → caption swap, before the command and URL
+    /// branches) and the request teloxide builds.
+    #[tokio::test]
+    async fn a_prompt_reply_reaches_the_api_as_a_caption_edit() {
+        use crate::media_sender::test_support::fake_api::FakeApi;
+        use teloxide::Bot;
+
+        let api = FakeApi::start().await;
+        let bot = Bot::new("42:TEST").set_api_url(api.url());
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&bot);
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "message_id": PROMPT_ID + 1,
+            "date": 0,
+            "chat": { "id": 1, "type": "private" },
+            "from": { "id": 5, "is_bot": false, "first_name": "u" },
+            "reply_to_message": {
+                "message_id": PROMPT_ID,
+                "date": 0,
+                "chat": { "id": 1, "type": "private" },
+                "text": "prompt",
+            },
+            "text": "new caption",
+        }))
+        .expect("a minimal message deserializes");
+
+        handle_message(&ctx, &bot, message).await.unwrap();
+
+        assert_eq!(api.methods(), vec!["EditMessageCaption"]);
+        let body = api.body("EditMessageCaption");
+        assert_eq!(body["chat_id"], 1);
+        assert_eq!(body["message_id"], FORWARDED_ID);
+        assert_eq!(
+            body["caption"],
+            "<a href=\"https://x.com/u/status/1\">new caption</a>"
+        );
+
+        // The other branch of the same entry point: a supported link in a group
+        // gets the one explanatory reply (the link pipeline is private-chat only,
+        // and dropping it in silence reads as a broken bot).
+        let group: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 2,
+            "date": 0,
+            "chat": { "id": -100, "type": "group", "title": "g" },
+            "from": { "id": 5, "is_bot": false, "first_name": "u" },
+            "text": "https://x.com/u/status/1",
+            "entities": [{ "type": "url", "offset": 0, "length": 24 }],
+        }))
+        .expect("a minimal group message deserializes");
+
+        handle_message(&ctx, &bot, group).await.unwrap();
+
+        assert_eq!(api.methods(), vec!["EditMessageCaption", "SendMessage"]);
+        assert_eq!(api.body("SendMessage")["text"], GROUP_LINK_HINT);
     }
 
     #[test]
