@@ -173,30 +173,42 @@ async fn handle_callback(
     }
 
     if let Some(name) = data.strip_prefix(TEMPLATE_PREFIX) {
+        let mut answer = None;
         if let Some(template_html) = chat_data.template.get(name).cloned()
             && let Some(first_forward_id) = edit.forward_message_ids.first().copied()
         {
             // Raw template including the [] placeholder (Python parity).
-            let _ = ctx
-                .sender
-                .edit_message_caption(
-                    ChatId(chat_id),
-                    MessageId(first_forward_id as i32),
-                    template_html,
-                )
-                .await;
-            ctx.chat_store
-                .update(chat_id, |data| {
-                    if let Some(entry) = data.edit_message.get_mut(&prompt_message_id) {
-                        entry.template = name.to_string();
-                    }
-                })
-                .await;
-            log::info!("template '{name}' applied to prompt {prompt_message_id}");
+            match super::apply_caption_edit(
+                ctx.sender,
+                ChatId(chat_id),
+                MessageId(first_forward_id as i32),
+                template_html,
+            )
+            .await
+            {
+                super::EditOutcome::Applied => {
+                    ctx.chat_store
+                        .update(chat_id, |data| {
+                            if let Some(entry) = data.edit_message.get_mut(&prompt_message_id) {
+                                entry.template = name.to_string();
+                            }
+                        })
+                        .await;
+                    log::info!("template '{name}' applied to prompt {prompt_message_id}");
+                }
+                // Nothing was applied, so nothing is recorded either: the
+                // prompt keeps rendering through whatever it used before, and
+                // the toast says why (a silently "successful" press left the
+                // caption unchanged).
+                super::EditOutcome::Failed(reason) => {
+                    log::error!("template '{name}' could not be applied: {reason}");
+                    answer = Some(format!("Could not apply the template: {reason}"));
+                }
+            }
         }
         let _ = ctx
             .sender
-            .answer_callback_query(callback_query_id, None)
+            .answer_callback_query(callback_query_id, answer)
             .await;
     }
 }
@@ -232,6 +244,30 @@ mod tests {
         assert_eq!(sender.answers(), vec![None]);
         let data = ctx.chat_store.get(1).await;
         assert_eq!(data.edit_message[&PROMPT_ID].template, "tpl");
+    }
+
+    #[tokio::test]
+    async fn a_failed_template_swap_is_reported_in_the_toast() {
+        let sender = MockSender::scripted(vec![Outcome::EditErr], || api_error(API_ERROR));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
+
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "template|tpl").await;
+
+        // The caption never changed, so the toast says so and the record does
+        // not claim the template was applied.
+        let toast = sender.answers().last().cloned().flatten();
+        assert!(
+            toast
+                .as_deref()
+                .is_some_and(|t| t.contains("Could not apply the template")),
+            "{toast:?}"
+        );
+        assert_eq!(
+            ctx.chat_store.get(1).await.edit_message[&PROMPT_ID].template,
+            ""
+        );
     }
 
     #[tokio::test]

@@ -72,6 +72,57 @@ pub fn log_key(url: &str) -> String {
     x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
 }
 
+/// How long a caption edit may sleep before it gives up on retrying: the reply
+/// (or button press) that carried the text is already consumed, so the update
+/// must not stall the chat's queue behind a long flood-control wait — the user
+/// is told to send it again instead.
+const CAPTION_EDIT_MAX_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a caption edit landed.
+enum EditOutcome {
+    Applied,
+    /// The API's reason, for the message the user gets.
+    Failed(String),
+}
+
+/// Applies a caption edit, retrying once when the API names a short retryable
+/// delay (`RetryAfter`/network/5xx). A failed edit used to be logged and
+/// swallowed while the record was updated anyway: the user saw nothing, the
+/// caption never changed, and the text they typed was gone. Callers report
+/// [`EditOutcome::Failed`] instead.
+async fn apply_caption_edit(
+    sender: &dyn MediaSender,
+    chat_id: ChatId,
+    message_id: MessageId,
+    caption: String,
+) -> EditOutcome {
+    let mut attempt = 0;
+    loop {
+        match sender
+            .edit_message_caption(chat_id, message_id, caption.clone())
+            .await
+        {
+            Ok(()) => return EditOutcome::Applied,
+            Err(e) => {
+                let reason = e.to_string();
+                if attempt == 0
+                    && let crate::send::Classification::Retryable { delay_seconds } =
+                        crate::send::classify_request_error(&e)
+                    && std::time::Duration::from_secs_f64(delay_seconds)
+                        <= CAPTION_EDIT_MAX_RETRY_WAIT
+                {
+                    attempt = 1;
+                    log::debug!("caption edit failed ({reason}), retrying once");
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(delay_seconds)).await;
+                    continue;
+                }
+                log::error!("edit_message_caption failed: {reason}");
+                return EditOutcome::Failed(reason);
+            }
+        }
+    }
+}
+
 /// Edit-before-forward: a reply to the prompt swaps the caption of the first
 /// forwarded message. Returns true when the message was consumed as an edit.
 /// Body of [`message_handler`]'s edit branch, without teloxide update types so
@@ -103,19 +154,29 @@ async fn edit_message_handler(
             .map(|template| template.replace("[]", &link))
             .unwrap_or(link)
     };
-    match ctx
-        .sender
-        .edit_message_caption(
-            ChatId(chat_id),
-            MessageId(*first_forward_id as i32),
-            new_text,
-        )
-        .await
+    match apply_caption_edit(
+        ctx.sender,
+        ChatId(chat_id),
+        MessageId(*first_forward_id as i32),
+        new_text,
+    )
+    .await
     {
-        Ok(()) => log::info!(
+        EditOutcome::Applied => log::info!(
             "edit-before-forward: caption swapped on message {first_forward_id} for prompt {reply_to_message_id}"
         ),
-        Err(e) => log::error!("edit_message_caption failed: {e}"),
+        // The reply was a caption for this prompt, so it stays consumed either
+        // way — but the user is told the swap failed instead of losing it
+        // silently (and can send it again).
+        EditOutcome::Failed(reason) => {
+            let _ = reply(
+                ctx.sender,
+                chat_id,
+                MessageId(reply_to_message_id as i32),
+                format!("Could not update the caption ({reason}). Send it again to retry."),
+            )
+            .await;
+        }
     }
     true
 }
@@ -228,6 +289,7 @@ mod tests {
     use super::*;
     use crate::ctx::test_support::{PROMPT_ID, TestStores, api_error, seed_prompt};
     use crate::media_sender::test_support::{MockSender, Outcome};
+    use teloxide::RequestError;
 
     /// The Telegram wording the mocks answer with: a message the bot cannot
     /// edit (the prompt was deleted).
@@ -266,16 +328,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_caption_swap_still_consumes_the_reply() {
-        let sender = MockSender::scripted(vec![Outcome::EditErr], || api_error(API_ERROR));
+    async fn a_failed_caption_swap_is_reported_and_consumed() {
+        // The script is per call, in order: the edit fails, the notice follows.
+        let sender = MockSender::scripted(vec![Outcome::EditErr, Outcome::MessageOk], || {
+            api_error(API_ERROR)
+        });
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
         seed_prompt(&ctx, "tpl", crate::db::unix_now()).await;
 
         // The edit failed (message deleted etc.); the reply must still be
-        // swallowed instead of being treated as a link to fetch.
+        // swallowed instead of being treated as a link to fetch — and the user
+        // must be told, because the text they sent is gone either way.
         assert!(edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await);
-        assert_eq!(sender.calls(), vec!["edit_message_caption"]);
+        assert_eq!(sender.calls(), vec!["edit_message_caption", "send_message"]);
+        let notice = sender.messages().join(" ");
+        assert!(notice.contains("Could not update the caption"), "{notice}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_short_retryable_caption_failure_is_retried_once() {
+        use teloxide::types::Seconds;
+        // A one-second flood-control wait is worth honouring: the retry lands
+        // and the user never hears about it.
+        let sender = MockSender::scripted(vec![Outcome::EditErr, Outcome::EditOk], || {
+            RequestError::RetryAfter(Seconds::from_seconds(1))
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "tpl", crate::db::unix_now()).await;
+
+        assert!(edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await);
+        assert_eq!(
+            sender.calls(),
+            vec!["edit_message_caption", "edit_message_caption"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_retryable_caption_failure_is_not_retried() {
+        use teloxide::types::Seconds;
+        // A minute-long wait must not stall the chat's update queue behind it:
+        // the user is told to send the caption again instead.
+        let sender = MockSender::scripted(vec![Outcome::EditErr, Outcome::MessageOk], || {
+            RequestError::RetryAfter(Seconds::from_seconds(60))
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "tpl", crate::db::unix_now()).await;
+
+        assert!(edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await);
+        assert_eq!(sender.calls(), vec!["edit_message_caption", "send_message"]);
     }
 
     #[tokio::test]
