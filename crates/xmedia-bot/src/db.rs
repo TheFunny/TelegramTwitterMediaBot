@@ -196,3 +196,131 @@ pub fn now_f64() -> f64 {
 pub fn unix_now() -> i64 {
     now_f64() as i64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The schema as it shipped *before* the first migration: what an existing
+    /// deployment has on disk when it starts on the new binary. Written out
+    /// literally rather than derived from `schema_init`, so an edit to the
+    /// baseline shows up here instead of being followed silently.
+    const V0_SCHEMA: &str = "CREATE TABLE tasks (id TEXT PRIMARY KEY, payload TEXT NOT NULL, \
+         run_after REAL NOT NULL, attempts INTEGER NOT NULL, status TEXT NOT NULL, \
+         locked_until REAL NOT NULL, created_at REAL NOT NULL); \
+         CREATE INDEX idx_tasks_pending ON tasks(status, run_after); \
+         CREATE TABLE chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL); \
+         CREATE TABLE link_cache (url TEXT PRIMARY KEY, payload TEXT NOT NULL, \
+         created_at REAL NOT NULL);";
+
+    /// The migrations that have already shipped, verbatim. Appending is the only
+    /// allowed change: editing one that a database has already applied leaves
+    /// deployments on different schemas with nothing to notice it — the version
+    /// counter says "done" and skips the new text.
+    const SHIPPED_MIGRATIONS: &[&str] = &["ALTER TABLE tasks ADD COLUMN lease_token TEXT"];
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let mut names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pre_migration_database_upgrades_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(V0_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, payload, run_after, attempts, status, locked_until, created_at) \
+                 VALUES ('task_old', '{\"chat_id\":1}', 0, 0, 'pending', 0, 0)",
+                [],
+            )
+            .unwrap();
+            assert_eq!(user_version(&conn), 0, "the fixture starts un-migrated");
+            assert!(
+                !columns(&conn, "tasks").contains(&"lease_token".to_string()),
+                "the fixture is the pre-migration shape"
+            );
+        }
+
+        let pool = open_store(path.to_str().unwrap()).unwrap();
+        pool.with_conn(|conn| {
+            assert_eq!(user_version(conn), MIGRATIONS.len() as i64);
+            let mut expected = vec![
+                "id",
+                "payload",
+                "run_after",
+                "attempts",
+                "status",
+                "locked_until",
+                "created_at",
+                "lease_token",
+            ];
+            expected.sort();
+            assert_eq!(
+                columns(conn, "tasks"),
+                expected,
+                "an upgrade must add the migration's column and nothing else"
+            );
+            let payload: String = conn
+                .query_row(
+                    "SELECT payload FROM tasks WHERE id = 'task_old'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(payload, "{\"chat_id\":1}", "rows survive the upgrade");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn shipped_migrations_are_frozen() {
+        assert!(
+            MIGRATIONS.len() >= SHIPPED_MIGRATIONS.len(),
+            "migrations were removed or reordered, not appended"
+        );
+        for (index, (shipped, current)) in SHIPPED_MIGRATIONS.iter().zip(MIGRATIONS).enumerate() {
+            assert_eq!(
+                shipped,
+                current,
+                "migration {} already shipped: append a new one instead of editing it",
+                index + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_database_lands_at_the_latest_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.db");
+        let pool = open_store(path.to_str().unwrap()).unwrap();
+        // Every migration is applied on creation, so a deployment that only ever
+        // saw fresh databases is on the same schema as an upgraded one.
+        pool.with_conn(|conn| {
+            assert_eq!(user_version(conn), MIGRATIONS.len() as i64);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // Opening the same file again is a no-op (the version gate skips it).
+        open_store(path.to_str().unwrap()).unwrap();
+    }
+}

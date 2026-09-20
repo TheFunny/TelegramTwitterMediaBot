@@ -1152,7 +1152,7 @@ mod tests {
     /// rewritten in place, so the retry can still deliver it.
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to public.api.bsky.app"]
-    async fn a_lost_local_media_row_is_refetched_from_its_post() {
+    async fn live_repair_refetches_a_lost_local_media_row() {
         let stores = TestStores::new();
         // An empty script: the repair must not need to tell the user anything.
         let sender = MockSender::scripted(vec![], permanent_error);
