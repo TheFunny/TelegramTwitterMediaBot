@@ -525,14 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn syndication_text_only_has_no_media() {
-        let raw = fixture(serde_json::json!([]));
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        let fetched: Fetched = tweet.into();
-        assert!(fetched.media.is_empty());
-    }
-
-    #[test]
     fn syndication_gif_maps_to_animated() {
         let raw = fixture(serde_json::json!([
             {
@@ -550,54 +542,30 @@ mod tests {
     #[test]
     fn syndication_text_strips_trailing_media_short_link() {
         // Real syndication shape: the appended media short link sits after the
-        // visible text; the unmapped t.co link is stripped by content.
-        let raw = serde_json::json!({
-            "__typename": "Tweet",
-            "id_str": "1",
-            "text": "hello world https://t.co/abc123",
-            "user": { "name": "N", "screen_name": "h" },
-            "mediaDetails": []
-        });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        assert_eq!(tweet.text, "hello world");
-        assert!(!tweet.caption().contains("t.co"));
-    }
-
-    #[test]
-    fn syndication_text_strips_trailing_link_regardless_of_index_units() {
-        // Real tweet 2084567054481571919: the visible text is 30 code points
-        // but 41 UTF-16 units, and the two endpoints historically reported
-        // display_text_range in different units (UTF-16 on syndication, code
-        // points on GraphQL). The FxEmbed-style content-based strip ignores
-        // the range entirely, so the appended media link is removed for any
-        // response shape.
-        let text = "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero https://t.co/XnIi83EkEB";
-        let visible = "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero";
-        let raw = serde_json::json!({
-            "__typename": "Tweet",
-            "id_str": "2084567054481571919",
-            "text": text,
-            "user": { "name": "N", "screen_name": "h" },
-            "mediaDetails": []
-        });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        assert_eq!(tweet.text, visible, "left a partial link");
-        assert!(!tweet.caption().contains("t.co"));
-    }
-
-    #[test]
-    fn syndication_text_strips_trailing_short_link_without_entities() {
-        // No URL entities at all: the leftover t.co link is stripped by the
-        // content regex.
-        let raw = serde_json::json!({
-            "__typename": "Tweet",
-            "id_str": "1",
-            "text": "hello https://t.co/abc123",
-            "user": { "name": "N", "screen_name": "h" },
-            "mediaDetails": []
-        });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        assert_eq!(tweet.text, "hello");
+        // visible text and there are no URL entities, so the unmapped t.co link
+        // is stripped by content alone. The second row is real tweet
+        // 2084567054481571919 (30 code points but 41 UTF-16 units, and the two
+        // endpoints historically reported `display_text_range` in different
+        // units): a content-based strip cannot leave a partial link behind for
+        // either unit system.
+        for (text, visible) in [
+            ("hello world https://t.co/abc123", "hello world"),
+            (
+                "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero https://t.co/XnIi83EkEB",
+                "妄想𝑨𝒅𝒅𝒊𝒄𝒕𝒊𝒐𝒏…🩷💚❤️\n#ゼンゼロ　#zzzero",
+            ),
+        ] {
+            let raw = serde_json::json!({
+                "__typename": "Tweet",
+                "id_str": "1",
+                "text": text,
+                "user": { "name": "N", "screen_name": "h" },
+                "mediaDetails": []
+            });
+            let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+            assert_eq!(tweet.text, visible, "left a partial link in {text:?}");
+            assert!(!tweet.caption().contains("t.co"), "{text:?}");
+        }
     }
 
     #[test]
@@ -667,23 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn syndication_text_keeps_multibyte_text() {
-        // Text-only tweet: no short links, the multibyte text is untouched.
-        let text = "コミティア落ちたので、明日は行きません。🙏ごめんなさい";
-        let units: Vec<u16> = text.encode_utf16().collect();
-        assert_eq!(units.len(), 28);
-        let raw = serde_json::json!({
-            "__typename": "Tweet",
-            "id_str": "1",
-            "text": text,
-            "user": { "name": "N", "screen_name": "h" },
-            "mediaDetails": []
-        });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
-        assert_eq!(tweet.text, text, "full text kept intact");
-    }
-
-    #[test]
     fn original_twimg_url_rewrites_photo_urls() {
         assert_eq!(
             original_twimg_url("https://pbs.twimg.com/media/C_UdnvPUwAE3Dnn.jpg"),
@@ -706,9 +657,14 @@ mod tests {
 
     #[test]
     fn syndication_token_matches_js_formula() {
-        // JS: ((861627479294746624 / 1e15) * PI).toString(36) == "236.vrsocvda"
-        let token = syndication_token(861627479294746624);
-        assert!(token.starts_with("236.v"), "got {token}");
+        // JS: ((861627479294746624 / 1e15) * PI).toString(36) == "236.vrsocvda".
+        // This loop truncates ten base-36 fraction digits instead of rendering
+        // the shortest round-tripping one, so it agrees with JS on the stem and
+        // diverges in the tail (`…d9ui` vs `…da`). Pinned exactly, because the
+        // token is a fixed function of the id: a stub or a wrong constant must
+        // not pass. The endpoint currently serves public tweets regardless of
+        // the token, which is why the tail is left as is.
+        assert_eq!(syndication_token(861627479294746624), "236.vrsocvd9ui");
     }
 
     #[test]

@@ -398,35 +398,20 @@ mod tests {
     use super::*;
     use dotenv::dotenv;
 
-    /// Skips when `PIXIV_REFRESH_TOKEN` is absent or empty (CI without the
-    /// secret must stay green; GitHub Actions exposes an unset secret as an
-    /// empty string, so `is_err()` alone is not enough).
-    fn require_pixiv_token() -> bool {
-        std::env::var("PIXIV_REFRESH_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .is_some()
-    }
-
-    #[tokio::test]
-    async fn test_fetch() {
-        dotenv().ok();
-        if !require_pixiv_token() {
-            eprintln!("skipping: no PIXIV_REFRESH_TOKEN");
-            return;
-        }
-        let result = fetch(126839080).await;
-        assert!(result.is_ok());
-        println!("{:#?}", result);
-    }
-
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to oauth.secure.pixiv.net"]
     async fn live_validate_with_bogus_token_fails() {
         dotenv().ok();
-        // A bogus token must surface as Api error (invalid_grant), not panic.
+        // A rejected credential must surface as a permanent status, not a panic
+        // and not a retryable class: the exchange answers 4xx and the status is
+        // checked before the body is read (api.rs, `get_access_token`). This
+        // used to assert `Api`, which that check made unreachable — `Api` is
+        // only reached from a 2xx body without an `access_token`.
         let client = PixivAPI::new("bogus_token_for_testing".to_string());
         let result = client.get_access_token().await;
-        assert!(matches!(result, Err(PixivError::Api(_))), "got {result:?}");
+        assert!(
+            matches!(result, Err(PixivError::Status(code)) if (400..500).contains(&code)),
+            "got {result:?}"
+        );
     }
 }

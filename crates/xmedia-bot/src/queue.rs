@@ -92,13 +92,30 @@ struct QueueWorker {
 }
 
 /// Resets rows left `in_progress` with an expired lock TTL back to `pending`
-/// so they can be leased again (crash/panic recovery).
-fn recover_update(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+/// so they can be leased again (crash/panic recovery). Returns how many rows
+/// came back, which is what decides whether a worker needs waking.
+fn recover_update(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE tasks SET status='pending', locked_until=0 WHERE status='in_progress' AND locked_until < ?1",
         params![now_f64()],
-    )?;
-    Ok(())
+    )
+}
+
+/// Runs [`recover_update`] and wakes a worker when something actually came
+/// back. A recovered row is due immediately, but every worker may be parked on
+/// `notify` — with no pending row there is no `earliest_run_after` to sleep on
+/// — so without this the recovered task waits for the next unrelated enqueue.
+/// Same permit semantics as `enqueue`: `notify_one` stores a permit when no
+/// worker is registered.
+async fn recover_expired(pool: &std::sync::Arc<crate::db::DbPool>, notify: &Notify) {
+    match pool.with_conn(move |conn| recover_update(conn)).await {
+        Ok(recovered) if recovered > 0 => {
+            log::warn!("queue: recovered {recovered} row(s) from an expired lease");
+            notify.notify_one();
+        }
+        Ok(_) => {}
+        Err(e) => log::error!("queue recovery failed: {e}"),
+    }
 }
 
 /// Base delay × 2^attempts (attempts = retries already done), capped at 300s.
@@ -136,7 +153,7 @@ impl PersistentTaskQueue {
         let handler: Arc<Handler> = Arc::new(move |payload| Box::pin(handler(payload)));
         let dead_letter: Arc<DeadLetter> =
             Arc::new(move |payload, message| Box::pin(dead_letter(payload, message)));
-        self.recover_stale().await;
+        recover_expired(&self.pool, &self.notify).await;
         let mut handles = Vec::with_capacity(QUEUE_WORKERS + 1);
         for _ in 0..QUEUE_WORKERS {
             let worker = QueueWorker {
@@ -156,6 +173,7 @@ impl PersistentTaskQueue {
         let sweep_pool = std::sync::Arc::clone(&self.pool);
         let sweep_notify = Arc::clone(&self.sweep_notify);
         let sweep_stop = Arc::clone(&self.stop);
+        let sweep_workers = Arc::clone(&self.notify);
         handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -168,10 +186,7 @@ impl PersistentTaskQueue {
                 if sweep_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let result = sweep_pool.with_conn(move |conn| recover_update(conn)).await;
-                if let Err(e) = result {
-                    log::error!("queue sweep failed: {e}");
-                }
+                recover_expired(&sweep_pool, &sweep_workers).await;
             }
         }));
         *self.worker.lock() = handles;
@@ -245,17 +260,6 @@ impl PersistentTaskQueue {
                 log::error!("queue backlog query failed: {e}");
                 None
             }
-        }
-    }
-
-    async fn recover_stale(&self) {
-        self.recover_sweep().await;
-    }
-
-    async fn recover_sweep(&self) {
-        let result = self.pool.with_conn(move |conn| recover_update(conn)).await;
-        if let Err(e) = result {
-            log::error!("queue recovery failed: {e}");
         }
     }
 }
@@ -960,7 +964,12 @@ mod tests {
         queue.stop().await;
     }
 
-    #[tokio::test]
+    /// A row that goes stale *after* startup is picked up by the periodic
+    /// sweep — the spawned task, its 30 s interval included — and the worker
+    /// that sweeps it gets woken. The paused clock is what makes this the real
+    /// test: this used to call the recovery by hand, which proved the SQL but
+    /// left the wiring free to be deleted.
+    #[tokio::test(start_paused = true)]
     async fn runtime_sweep_recovers_expired_lease() {
         let (queue, _dir) = new_queue().await;
         let calls = Arc::new(AtomicUsize::new(0));
@@ -975,8 +984,12 @@ mod tests {
                 |_payload, _message| async {},
             )
             .await;
-        // Insert a stale leased row AFTER startup: without a runtime sweep it
-        // would stay `in_progress` forever (only start() used to recover).
+        // Let every worker park and the sweep consume its immediate first tick,
+        // so only a later tick can see the row. The clock is paused: yields do
+        // not advance it, and the sleep below does.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
         {
             let conn = rusqlite::Connection::open(queue.pool.path()).unwrap();
             conn.execute(
@@ -986,12 +999,18 @@ mod tests {
             )
             .unwrap();
         }
-        queue.recover_sweep().await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "the row is stale but no sweep has run since it appeared"
+        );
+
+        tokio::time::sleep(Duration::from_secs(31)).await;
+
         assert_eq!(
             calls.load(AtomicOrdering::SeqCst),
             1,
-            "expired lease must be recovered and processed exactly once"
+            "the periodic sweep must recover the row and wake a worker"
         );
         queue.stop().await;
     }

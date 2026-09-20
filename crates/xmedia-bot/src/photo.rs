@@ -460,7 +460,10 @@ mod tests {
 
     #[test]
     fn pipeline_resizes_oversized_jpeg() {
-        // Build a small over-dimension JPEG with jpeg-encoder.
+        // Build a small over-dimension JPEG with jpeg-encoder: 9999x2 sums to
+        // one over the cap. The output's own headers are what must show the
+        // resize — a copy-through is a perfectly valid JPEG, so magic bytes
+        // and a non-empty buffer used to pass for nothing.
         let (w, h) = (9999u16, 2u16);
         let rgb = vec![90u8; (w as usize) * (h as usize) * 3];
         let mut bytes = Vec::new();
@@ -476,8 +479,15 @@ mod tests {
             PhotoPrep::Upload(file) => {
                 let out = std::fs::read(file.path()).unwrap();
                 assert!(out.starts_with(&[0xFF, 0xD8]), "output must stay jpeg");
-                // 9999x2 downscaled: the buffer length tells the new dims.
-                assert!(out.len() > 100);
+                let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(out.as_slice()));
+                decoder.decode_headers().unwrap();
+                let info = decoder.info().unwrap();
+                let (nw, nh) = (info.width as u32, info.height as u32);
+                assert!(
+                    nw + nh <= PHOTO_MAX_DIMENSION_SUM,
+                    "still over the cap: {nw}x{nh}"
+                );
+                assert_ne!((nw, nh), (w as u32, h as u32), "output was not resized");
             }
             PhotoPrep::UseFallback => panic!("over-dimension JPEG should have been resized"),
         }

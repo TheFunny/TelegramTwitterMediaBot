@@ -563,7 +563,8 @@ mod tests {
     /// bot keeps ignoring them instead of answering with a failure.
     #[test]
     fn pattern_ignores_short_links() {
-        assert!(!PATTERN.is_match("https://b23.tv/abc123"));
+        // Short links usually point at videos, so they stay unmatched: no cache
+        // key, and the fetch dispatcher answers `Ok(None)` (silence).
         assert_eq!(cache_key("https://b23.tv/abc123"), None);
     }
 
@@ -583,6 +584,8 @@ mod tests {
         }
     }
 
+    /// The legacy `major.draw` shape stays supported alongside the
+    /// `itemOpusStyle` serialization that moves pictures to `major.opus.pics`.
     #[test]
     fn from_item_maps_draw_images_and_topic() {
         let fetched = parse(item_json(
@@ -744,24 +747,6 @@ mod tests {
             let fetched = parse(json);
             assert_eq!((fetched.title.as_str(), fetched.content.as_str()), expected);
         }
-    }
-
-    /// The legacy shape stays supported: bilibili's `itemOpusStyle` flag is
-    /// what moves the pictures to `major.opus.pics`, but `major.draw` items
-    /// and a text-only `desc` must keep working if it is retired.
-    #[test]
-    fn from_item_legacy_draw_shape_still_parses() {
-        let fetched = parse(item_json(
-            draw_item("http://i0.hdslb.com/bfs/new_dyn/l.jpg"),
-            "legacy 正文",
-        ));
-        assert_eq!(fetched.title, "");
-        assert_eq!(fetched.content, "legacy 正文");
-        assert_eq!(fetched.media.len(), 1);
-        assert_eq!(
-            fetched.media[0].url(),
-            "https://i0.hdslb.com/bfs/new_dyn/l.jpg"
-        );
     }
 
     /// The video stream is out of scope; an AV dynamic still yields its cover.

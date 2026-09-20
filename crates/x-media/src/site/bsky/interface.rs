@@ -490,31 +490,18 @@ mod tests {
         ));
     }
 
+    /// The one live bsky check: a labelled post with photos — source URL,
+    /// caption, media and the sensitive label all survive the parse. This
+    /// replaced a second byte-identical live test whose URL is a *text-only*
+    /// post, so neither copy pinned any media.
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to public.api.bsky.app"]
     async fn live_fetch_with_photos() {
-        let fetched =
-            fetch_from_url("https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m")
-                .await
-                .unwrap();
-        assert_eq!(
-            fetched.source_url,
-            "https://bsky.app/profile/asagi0398.bsky.social/post/3mqkhrq5w6k2m"
-        );
+        let url = "https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224";
+        let fetched = fetch_from_url(url).await.unwrap();
+        assert_eq!(fetched.source_url, url);
         assert!(!fetched.caption.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore = "live network: requires outbound HTTPS to public.api.bsky.app"]
-    async fn live_fetch_smoke() {
-        let fetched =
-            fetch_from_url("https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224")
-                .await
-                .unwrap();
-        assert_eq!(
-            fetched.source_url,
-            "https://bsky.app/profile/fu-futa.bsky.social/post/3laoveufjv224"
-        );
-        assert!(!fetched.caption.is_empty());
+        assert!(!fetched.media.is_empty(), "expected photos in {url}");
+        assert!(fetched.sensitive, "expected a label on {url}");
     }
 }

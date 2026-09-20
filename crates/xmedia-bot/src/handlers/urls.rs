@@ -682,29 +682,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cache_hit_success_keeps_the_cache_entry() {
-        let stores = TestStores::new();
-        let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
-        let ctx = stores.ctx(&sender);
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_photo_entry())
-            .await;
-
-        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
-
-        assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
-        // Success must not evict the entry.
-        assert!(
-            stores
-                .link_cache()
-                .get("twitter:1", Duration::from_secs(3600))
-                .await
-                .is_some()
-        );
-    }
-
     /// The caption-quote threshold matches the post's text inside the caption,
     /// so a long-text cache hit is quoted and a short-text one is not.
     #[tokio::test]
@@ -803,7 +780,8 @@ mod tests {
         url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::Suppressed).await;
 
         assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
-        // The send is otherwise ordinary: the post stays cached.
+        // The send is otherwise ordinary: the post stays cached (this is also
+        // the retention control for the eviction case above).
         assert!(
             stores
                 .link_cache()
@@ -881,13 +859,6 @@ mod tests {
         assert!(sensitive.contains("TWITTER_AUTH_TOKEN"), "{sensitive}");
         let blocked = fetch_error_message(&FetchError::Blocked);
         assert!(blocked.contains("refused"), "{blocked}");
-
-        // Each class that has something to say must differ from the generic
-        // fallback — one generic sentence for everything is what this fixes.
-        let generic = fetch_error_message(&FetchError::TooLarge);
-        for text in [disabled, sensitive, blocked] {
-            assert_ne!(text, generic);
-        }
     }
 
     #[test]

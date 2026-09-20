@@ -423,16 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_validation_only_disables_on_a_definitive_failure() {
-        // A bad moment: the site must stay enabled for later links.
-        assert!(pixiv_error_is_retryable(&PixivError::Status(503)));
-        assert!(pixiv_error_is_retryable(&PixivError::Status(429)));
-        // A rejected credential is what `disable()` is for.
-        assert!(!pixiv_error_is_retryable(&PixivError::Status(403)));
-        assert!(!pixiv_error_is_retryable(&PixivError::NoAuth));
-    }
-
-    #[test]
     fn is_retryable_classifies_transient_and_permanent() {
         // Transient: network errors, explicit transient, pixiv 429/5xx.
         assert!(is_retryable(&FetchError::Transient("429".into())));

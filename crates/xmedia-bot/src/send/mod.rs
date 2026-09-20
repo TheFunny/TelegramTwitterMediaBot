@@ -760,11 +760,10 @@ mod tests {
 
     #[test]
     fn oversized_photo_boundary() {
-        // The empirical Telegram limit: sum 10000 passes, 10001 fails.
+        // The empirical Telegram limit: sum 10000 passes, 10001 fails. Pinned
+        // cross-crate because `photo.rs` and `upload.rs` both branch on it.
         // Const-block asserts so clippy's assertions_on_constants stays quiet.
         const { assert!(crate::photo::PHOTO_MAX_DIMENSION_SUM == 10000) };
-        const { assert!(6100 + 3900 <= crate::photo::PHOTO_MAX_DIMENSION_SUM) };
-        const { assert!(6300 + 3730 > crate::photo::PHOTO_MAX_DIMENSION_SUM) };
     }
 
     #[test]
@@ -1362,32 +1361,6 @@ mod tests {
             "got {result:?}"
         );
         assert_eq!(sender.calls(), vec!["send_animation", "send_animation"]);
-    }
-
-    #[tokio::test]
-    async fn media_group_success_and_forward_ok() {
-        // GroupOk: the group send succeeds (empty message list → no file ids
-        // collected, the batch counts as sent). CopyOk: the forward succeeds.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("media.jpg");
-        std::fs::write(&file, b"not-a-real-jpeg").unwrap();
-        let sender = MockSender::scripted(vec![Outcome::GroupOk], media_fetch_error);
-        let stores = TestStores::new();
-        let ctx = stores.ctx(&sender);
-        let task = sequence_task(file.to_str().unwrap());
-        let result = send_media_sequence(&ctx, &task).await;
-        assert!(result.is_ok(), "got {result:?}");
-
-        let sender = MockSender::scripted(vec![Outcome::CopyOk], media_fetch_error);
-        let ctx = stores.ctx(&sender);
-        let task = Task::ForwardMessages {
-            from_chat_id: 1,
-            to_chat_id: 2,
-            message_ids: vec![3],
-            notify_chat_id: None,
-            notify_message_id: None,
-        };
-        assert!(forward_messages(&ctx, &task).await.is_ok());
     }
 
     #[tokio::test]

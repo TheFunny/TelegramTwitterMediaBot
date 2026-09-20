@@ -778,13 +778,25 @@ mod tests {
 
     #[test]
     fn truncate_caption_does_not_split_an_html_entity() {
-        // An entity crossing the cut must not be left half-open (&amp without ;).
-        let mut long = "a".repeat(MAX_CAPTION_CHARS - 4);
-        long.push_str("&amp;bbbb");
-        let out = truncate_caption(&long);
-        assert!(out.chars().count() <= MAX_CAPTION_CHARS);
-        assert!(!out.contains("&amp"), "half entity left: {out:?}");
-        assert!(!out.ends_with('&'));
+        // The exact output is what pins the guard: a cut that keeps `&am` (no
+        // `;`) leaves a half-open entity that `!contains("&amp")` cannot see,
+        // so the old assertions stayed green with the guard deleted. Both
+        // directions matter — an entity the cut falls inside is dropped whole,
+        // one the cut falls after is kept whole.
+        for (long, expected) in [
+            (
+                "a".repeat(MAX_CAPTION_CHARS - 4) + "&amp;bbbb",
+                "a".repeat(MAX_CAPTION_CHARS - 4) + "…",
+            ),
+            (
+                "a".repeat(MAX_CAPTION_CHARS - 6) + "&amp;bbbb",
+                "a".repeat(MAX_CAPTION_CHARS - 6) + "&amp;…",
+            ),
+        ] {
+            let out = truncate_caption(&long);
+            assert_eq!(out, expected);
+            assert!(out.chars().count() <= MAX_CAPTION_CHARS, "{out:?}");
+        }
     }
 
     #[test]
@@ -796,15 +808,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_url_returns_none() {
-        let result = fetch("https://example.com/some/article").await;
-        assert!(matches!(result, Ok(None)), "got {result:?}");
-    }
-
-    #[tokio::test]
-    async fn unknown_scheme_returns_none() {
-        let result = fetch("not a url at all").await;
-        assert!(matches!(result, Ok(None)), "got {result:?}");
+    async fn unsupported_urls_return_none() {
+        // Neither a URL no site pattern matches nor a string that is no URL at
+        // all is an error: both answer `Ok(None)`, which is what keeps the bot
+        // silent on links it cannot handle (only a registered-but-disabled site
+        // gets a reply).
+        for url in ["https://example.com/some/article", "not a url at all"] {
+            let result = fetch(url).await;
+            assert!(matches!(result, Ok(None)), "{url}: got {result:?}");
+        }
     }
 
     #[test]
