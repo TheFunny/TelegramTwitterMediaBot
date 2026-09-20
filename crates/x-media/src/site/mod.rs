@@ -961,7 +961,7 @@ mod tests {
     /// third-party response actually controls.
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to httpbin.org"]
-    async fn a_redirect_into_the_hosts_network_is_refused() {
+    async fn live_redirect_into_the_hosts_network_is_refused() {
         let url = "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/";
         match download_media(url).await.unwrap_err() {
             // A policy refusal reaches the caller wrapped by reqwest.
