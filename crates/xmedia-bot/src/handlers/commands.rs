@@ -4,6 +4,7 @@
 use super::urls::{PostSend, url_media};
 use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply, reply_html};
 use crate::ctx::AppContext;
+use crate::state::ChatData;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, Message, Recipient};
@@ -33,6 +34,10 @@ pub(crate) enum Command {
         parse_with = "split"
     )]
     SetTemplate(String),
+    #[command(description = "Remove a saved template", parse_with = "split")]
+    RemoveTemplate(String),
+    #[command(description = "Show this chat's settings")]
+    Settings,
     #[command(description = "Show chat state (debug; admin only)")]
     BotDict,
     #[command(
@@ -68,6 +73,95 @@ fn parse_arg_remainder(s: String) -> Result<(String,), ParseError> {
 /// Placeholders `/set_format` accepts, mirroring what
 /// `x_media::site::caption_from_fields` substitutes.
 const FORMAT_PLACEHOLDERS: [&str; 6] = ["url", "author", "author_url", "title", "content", "tags"];
+
+/// `/start`'s welcome: what the bot is for, where links work, where to look
+/// next. The old "Hello!" left a first-time user with nothing.
+const START_TEXT: &str = "\
+Send me a post link and I'll send back its images, videos and GIFs with the title, author and tags.
+
+Supported: X/Twitter, Pixiv, Bluesky, Misskey (misskey.io), Bilibili.
+In a private chat just paste the link. In a group, use inline mode (type @, pick me, then the link).
+
+/help lists every command.";
+
+/// Appended to `/help`'s command list: argument syntax, caption
+/// placeholders and the private-chat rule — none of which teloxide's
+/// `descriptions()` renders (it prints `/command — description` only).
+const HELP_FOOTER: &str = "\
+Arguments
+  /set_forward_channel <@channel or channel id>
+  /set_template <name> — reply to a message containing [] to save it
+  /remove_template <name> — see /settings for the saved names
+  /set_format <site> <format> — '-' restores the built-in format
+  /test <link> / /debug <link>
+
+Caption placeholders (for /set_format)
+  {url} {author} {author_url} {title} {content} {tags}
+  A template's [] is replaced by the post link when forwarding.
+
+Links are handled in private chats only; in a group use inline mode.";
+
+/// Cap on template names echoed by `/settings`: a chat with hundreds of
+/// templates must not produce a message Telegram rejects for length.
+const MAX_SETTINGS_TEMPLATE_NAMES: usize = 30;
+
+/// Sorted template names: the order `/settings`, `/remove_template` and the
+/// prompt's buttons all show.
+fn sorted_template_names(data: &ChatData) -> Vec<String> {
+    let mut names: Vec<String> = data.template.keys().cloned().collect();
+    names.sort();
+    names
+}
+
+/// `/settings`: what this chat is configured to do, readable by anyone in it
+/// (unlike `/bot_dict`, which dumps the raw state and is admin-only).
+fn settings_text(data: &ChatData) -> String {
+    let mut lines = Vec::new();
+    match data.forward_channel_id {
+        Some(id) => lines.push(format!("Forward channel: {id}")),
+        None => lines.push(
+            "Forward channel: not set (use /set_forward_channel <@channel or id>)".to_string(),
+        ),
+    }
+    lines.push(format!(
+        "Edit before forward: {}",
+        if data.edit_before_forward {
+            "on"
+        } else {
+            "off"
+        }
+    ));
+    let mut formats: Vec<String> = data
+        .message_format
+        .iter()
+        .map(|(site, format)| format!("{site} => {format}"))
+        .collect();
+    formats.sort();
+    lines.push(if formats.is_empty() {
+        "Caption formats: built-in for every site".to_string()
+    } else {
+        format!("Caption formats:\n  {}", formats.join("\n  "))
+    });
+    let names = sorted_template_names(data);
+    lines.push(match names.len() {
+        0 => "Templates: none".to_string(),
+        n => format!(
+            "Templates ({n}): {}{}",
+            names
+                .iter()
+                .take(MAX_SETTINGS_TEMPLATE_NAMES)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            if n > MAX_SETTINGS_TEMPLATE_NAMES {
+                format!(", +{} more", n - MAX_SETTINGS_TEMPLATE_NAMES)
+            } else {
+                String::new()
+            }
+        ),
+    });
+    lines.join("\n")
+}
 
 /// The first `{…}` token in a caption format that is not a known placeholder
 /// (`None` when all of them are). The renderer replaces exact keys only, so an
@@ -166,11 +260,17 @@ pub(crate) async fn execute_command(
 ) -> Result<(), RequestError> {
     match command {
         Command::Start => {
-            bot.send_message(message.chat.id, "Hello!").await?;
+            bot.send_message(message.chat.id, START_TEXT).await?;
         }
         Command::Help => {
-            bot.send_message(message.chat.id, Command::descriptions().to_string())
-                .await?;
+            // The command list plus the parts teloxide's `descriptions()`
+            // cannot show: argument syntax, caption placeholders, and where a
+            // link actually works.
+            bot.send_message(
+                message.chat.id,
+                format!("{}\n\n{}", Command::descriptions(), HELP_FOOTER),
+            )
+            .await?;
         }
         Command::SetForwardChannel(channel) => {
             let result = match set_forward_channel_handler(bot, message, channel).await {
@@ -257,6 +357,41 @@ pub(crate) async fn execute_command(
                 }
             };
             reply(bot, message.chat.id.0, message.id, text).await?;
+        }
+        Command::RemoveTemplate(name) => {
+            let chat_id = message.chat.id.0;
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                reply(
+                    bot,
+                    chat_id,
+                    message.id,
+                    "Usage: /remove_template <name> (see /settings for the saved names)",
+                )
+                .await?;
+                return Ok(());
+            }
+            let removed = CHAT_STORE
+                .update(chat_id, |data| data.template.remove(&name).is_some())
+                .await;
+            let text = if removed {
+                format!("Template '{name}' removed.")
+            } else {
+                // Name the live templates: a typo would otherwise look like a
+                // successful delete.
+                let names = sorted_template_names(&CHAT_STORE.get(chat_id).await);
+                if names.is_empty() {
+                    format!("No template named '{name}'. None are saved yet.")
+                } else {
+                    format!("No template named '{name}'. Saved: {}", names.join(", "))
+                }
+            };
+            reply(bot, chat_id, message.id, text).await?;
+        }
+        Command::Settings => {
+            let chat_id = message.chat.id.0;
+            let data = CHAT_STORE.get(chat_id).await;
+            reply(bot, chat_id, message.id, settings_text(&data)).await?;
         }
         Command::BotDict => {
             // Debug dump of the chat's persisted state: admin only (it echoes
@@ -510,12 +645,32 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "y" } else { "ies" }
 }
 
+/// Bot profile texts (Bot API `setMyDescription` / `setMyShortDescription`):
+/// shown on the bot's profile page and in the share sheet. Without them a
+/// shared link says nothing about what the bot does.
+const BOT_DESCRIPTION: &str = "\
+Send a post link from X/Twitter, Pixiv, Bluesky, Misskey (misskey.io) or Bilibili and get its images, videos and GIFs back with the title, author and tags.
+Links are handled in private chats; a group can use inline mode. /help lists every command.";
+const BOT_SHORT_DESCRIPTION: &str =
+    "Post links (X, Pixiv, Bluesky, Misskey, Bilibili) -> media messages";
+
 /// Registers the bot's command list with Telegram so clients show it in the
-/// `/` menu (Bot API `setMyCommands`).
+/// `/` menu (Bot API `setMyCommands`), plus its profile description texts.
 pub async fn register_commands(bot: &Bot) -> Result<(), RequestError> {
     let commands = Command::bot_commands();
     bot.set_my_commands(commands.clone()).await?;
     log::info!("registered {} commands", commands.len());
+    // Profile texts are cosmetic: a failure (rare) must not abort startup.
+    if let Err(e) = bot.set_my_description().description(BOT_DESCRIPTION).await {
+        log::warn!("failed to set the bot description: {e}");
+    }
+    if let Err(e) = bot
+        .set_my_short_description()
+        .short_description(BOT_SHORT_DESCRIPTION)
+        .await
+    {
+        log::warn!("failed to set the bot short description: {e}");
+    }
     Ok(())
 }
 
@@ -609,7 +764,7 @@ fn debug_report(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DEBUG_REPORT_CHARS, debug_report, unknown_placeholder};
+    use super::{MAX_DEBUG_REPORT_CHARS, debug_report, settings_text, unknown_placeholder};
     use x_media::media::Media;
 
     #[test]
@@ -726,6 +881,110 @@ mod tests {
         let report = debug_report("u", "twitter", "s", "t", "c", None, false, "p", &media);
         assert!(report.chars().count() <= MAX_DEBUG_REPORT_CHARS, "{report}");
         assert!(report.ends_with('…'), "{report}");
+    }
+
+    #[test]
+    fn settings_text_reports_the_chat_configuration() {
+        use crate::state::ChatData;
+
+        // A fresh chat: the defaults must be spelled out, including how to set
+        // the channel (an empty field is not a status).
+        let empty = settings_text(&ChatData::default());
+        assert!(empty.contains("Forward channel: not set"), "{empty}");
+        assert!(empty.contains("/set_forward_channel"), "{empty}");
+        assert!(empty.contains("Edit before forward: off"), "{empty}");
+        assert!(empty.contains("built-in for every site"), "{empty}");
+        assert!(empty.contains("Templates: none"), "{empty}");
+
+        let configured = ChatData {
+            forward_channel_id: Some(-100123),
+            edit_before_forward: true,
+            template: [("b", "[]"), ("a", "[]")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            message_format: [("twitter", "{author}: {content}")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..ChatData::default()
+        };
+        let text = settings_text(&configured);
+        assert!(text.contains("Forward channel: -100123"), "{text}");
+        assert!(text.contains("Edit before forward: on"), "{text}");
+        assert!(text.contains("twitter => {author}: {content}"), "{text}");
+        // Sorted, so the same chat always reports the same thing.
+        assert!(text.contains("Templates (2): a, b"), "{text}");
+    }
+
+    #[test]
+    fn help_and_start_cover_what_the_command_list_cannot() {
+        // The placeholders the renderer substitutes must be the ones the help
+        // lists: a stale list is worse than none.
+        for placeholder in super::FORMAT_PLACEHOLDERS {
+            assert!(
+                super::HELP_FOOTER.contains(&format!("{{{placeholder}}}")),
+                "help does not document {{{placeholder}}}"
+            );
+        }
+        // The private-chat rule and the template placeholder semantics are the
+        // two things users got wrong most often.
+        assert!(super::HELP_FOOTER.contains("private chats only"));
+        assert!(super::HELP_FOOTER.contains("[]"));
+        assert!(super::START_TEXT.contains("inline mode"));
+        assert!(super::START_TEXT.contains("/help"));
+        // Both must stay inside Telegram's message limit.
+        assert!(super::HELP_FOOTER.chars().count() < 2000);
+        assert!(super::START_TEXT.chars().count() < 2000);
+    }
+
+    #[test]
+    fn every_command_is_registered_and_parses() {
+        use teloxide::utils::command::BotCommands;
+
+        use super::Command;
+
+        let registered: Vec<String> = Command::bot_commands()
+            .into_iter()
+            .map(|command| command.command.trim_start_matches('/').to_string())
+            .collect();
+        for expected in [
+            "start",
+            "help",
+            "settings",
+            "set_forward_channel",
+            "remove_template",
+            "set_format",
+            "test",
+            "debug",
+        ] {
+            assert!(
+                registered.iter().any(|name| name == expected),
+                "{expected} missing from {registered:?}"
+            );
+        }
+        // Telegram caps a command description at 256 chars.
+        for command in Command::bot_commands() {
+            assert!(
+                command.description.chars().count() <= 256,
+                "{}: description too long",
+                command.command
+            );
+        }
+
+        // A command with a `String` argument must parse with its whole
+        // argument: without `parse_with`, teloxide's default parser rejects
+        // `/remove_template x` and the command silently falls through to the
+        // URL flow.
+        assert!(matches!(
+            Command::parse("/settings", ""),
+            Ok(Command::Settings)
+        ));
+        match Command::parse("/remove_template tpl", "") {
+            Ok(Command::RemoveTemplate(name)) => assert_eq!(name, "tpl"),
+            Ok(_) => panic!("/remove_template parsed as another command"),
+            Err(e) => panic!("parse error: {e}"),
+        }
     }
 
     #[test]

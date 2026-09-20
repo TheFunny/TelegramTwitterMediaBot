@@ -132,18 +132,31 @@ fn coarsest_unit(ttl: std::time::Duration) -> String {
     }
 }
 
-/// Template buttons (one per row), then the confirm/skip pair. Sorted by name:
-/// the templates live in a `HashMap`, so an unsorted walk would reshuffle the
+/// Templates per keyboard row. Telegram rejects a keyboard with more than 100
+/// buttons *outright*, which would silently drop the whole prompt, so the
+/// names are folded and capped rather than listed one per row.
+pub(super) const TEMPLATE_BUTTONS_PER_ROW: usize = 3;
+/// Hard cap on template buttons; the prompt text names the ones not shown.
+pub(super) const MAX_TEMPLATE_BUTTONS: usize = 60;
+
+/// Template buttons ([`TEMPLATE_BUTTONS_PER_ROW`] per row, at most
+/// [`MAX_TEMPLATE_BUTTONS`]), then the confirm/skip pair. Sorted by name: the
+/// templates live in a `HashMap`, so an unsorted walk would reshuffle the
 /// buttons between prompts.
 pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardMarkup {
     let mut names: Vec<&String> = templates.keys().collect();
     names.sort();
-    let mut rows = Vec::with_capacity(names.len() + 1);
-    for name in names {
-        rows.push(vec![InlineKeyboardButton::callback(
-            name.clone(),
-            format!("template|{name}"),
-        )]);
+    let shown = names.len().min(MAX_TEMPLATE_BUTTONS);
+    let mut rows = Vec::with_capacity(shown / TEMPLATE_BUTTONS_PER_ROW + 2);
+    for chunk in names[..shown].chunks(TEMPLATE_BUTTONS_PER_ROW) {
+        rows.push(
+            chunk
+                .iter()
+                .map(|name| {
+                    InlineKeyboardButton::callback(name.as_str(), format!("template|{name}"))
+                })
+                .collect(),
+        );
     }
     // Skip exists because the prompt holds the forward hostage until Confirm:
     // without it the only escape was deleting the message and waiting out the
@@ -153,6 +166,11 @@ pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKe
         InlineKeyboardButton::callback("🛑 Skip", "skip"),
     ]);
     InlineKeyboardMarkup::new(rows)
+}
+
+/// How many templates the markup could not fit, for the prompt text.
+pub(super) fn hidden_template_count(templates: &HashMap<String, String>) -> usize {
+    templates.len().saturating_sub(MAX_TEMPLATE_BUTTONS)
 }
 
 /// Notifies a chat about a dead-lettered task (skips when `notify_chat_id` is
@@ -217,12 +235,21 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
     };
 
     if edit_before_forward {
-        let keyboard = build_edit_markup(&ctx.chat_store.get(chat_id).await.template);
+        let templates = ctx.chat_store.get(chat_id).await.template;
+        let keyboard = build_edit_markup(&templates);
+        let mut text = edit_prompt_text(ctx.config.edit_message_ttl);
+        let hidden = hidden_template_count(&templates);
+        if hidden > 0 {
+            // The keyboard is capped; say so instead of silently hiding them.
+            text.push_str(&format!(
+                "\n({hidden} more templates not shown — /remove_template to prune.)"
+            ));
+        }
         let prompt = ctx
             .sender
             .send_message(
                 ChatId(chat_id),
-                edit_prompt_text(ctx.config.edit_message_ttl),
+                text,
                 Some(MessageId(reply_to as i32)),
                 Some(keyboard),
             )
@@ -279,7 +306,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                     ctx.sender,
                     notify_chat_id,
                     notify_message_id,
-                    &format!("Task failed after retries: {message}"),
+                    &failure_text(None, &message),
                 )
                 .await;
             }
@@ -373,6 +400,17 @@ async fn send_media_or_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
     }
 }
 
+/// User-facing text for a task that will never run again: which link died and
+/// why. The raw error alone left the user guessing which post it was about.
+pub(super) fn failure_text(task: Option<&Task>, message: &str) -> String {
+    match task.and_then(|task| task.source_url()).map(log_key) {
+        Some(key) => format!("Send failed permanently for {key}: {message}"),
+        // `ForwardMessages` carries no source URL: that failure is about the
+        // channel copy, not about a post.
+        None => format!("Forward failed permanently: {message}"),
+    }
+}
+
 /// Dead-letter callback wired to the queue in main: settles the task and
 /// notifies its chat.
 pub(crate) async fn dead_letter_notify(
@@ -383,8 +421,9 @@ pub(crate) async fn dead_letter_notify(
     // A dead-lettered task never runs again, and the queue dead-letters retry
     // exhaustion itself (the handler is not called again), so this is the only
     // place that sees the final payload.
-    if let Ok(task) = serde_json::from_value::<Task>(payload.clone()) {
-        settle_task(ctx, &task, Settled::Failed).await;
+    let task = serde_json::from_value::<Task>(payload.clone()).ok();
+    if let Some(task) = &task {
+        settle_task(ctx, task, Settled::Failed).await;
     }
     let notify_chat_id = payload.get("notify_chat_id").and_then(|v| v.as_i64());
     let notify_message_id = payload.get("notify_message_id").and_then(|v| v.as_i64());
@@ -392,7 +431,7 @@ pub(crate) async fn dead_letter_notify(
         ctx.sender,
         notify_chat_id,
         notify_message_id,
-        &format!("Task failed after retries: {message}"),
+        &failure_text(task.as_ref(), &message),
     )
     .await;
 }

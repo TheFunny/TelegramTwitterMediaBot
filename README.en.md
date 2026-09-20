@@ -7,9 +7,11 @@ A Telegram bot that turns post links from X / Twitter, Pixiv, Bluesky, Misskey (
 - Sending a link in a private chat fetches and sends the images, videos and GIFs automatically; oversized media is split into batches (10 items per group)
 - Text-only posts report "no media"; unsupported links are silently ignored. Fetch failures name the reason (post gone / content withheld / source risk control / site not enabled)
 - Long posts (text ≥ `CAPTION_QUOTE_TEXT_CHARS`, default 200) show **the text part** of their caption inside a collapsible blockquote, with the link and author line left outside it
-- Inline queries (`@bot <link>`); a supported link posted in a group gets a one-line hint to use the private chat or inline mode (channels stay silent)
+- Inline queries (`@bot <link>`) — except Pixiv images and locally transcoded animations, which Telegram cannot fetch (no Referer) and would show broken, so they are skipped; a supported link posted in a group gets a one-line hint to use the private chat or inline mode (channels stay silent)
+- `/start` explains the supported sites and how to use it; `/help` lists the commands plus argument syntax, the caption placeholders and the private-chat rule; the bot's profile description texts are set at startup
+- `/settings` shows this chat's configuration (forward channel, edit-before-forward, per-site caption formats, saved templates); templates are added with `/set_template` and removed with `/remove_template`
 - Bind a forward channel for automatic forwarding; edit the caption before forwarding and apply custom templates (the prompt carries Confirm / Skip buttons, states its expiry, and is marked expired in place once it lapses)
-- Failed sends are retried automatically with persistence; the user is notified after retries are exhausted
+- Failed sends are retried automatically with persistence; the notice names which link failed, how long the retry waits, or the final cause
 - The chat action stays on screen for the whole fetch, so long jobs (ugoira transcode, large uploads) do not look stalled
 - Pixiv ugoira animations are transcoded to MP4; Bluesky videos are remuxed (HLS stream → MP4)
 - Photos exceeding Telegram's size/dimension limits are compressed automatically (original format kept, JPEG fallback only when needed)
@@ -117,6 +119,8 @@ Telegram only accepts ports 443/80/88/8443.
 | `/remove_forward_channel` | Remove the forward channel |
 | `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or tapping a template button applies one), then `↩️ Confirm` forwards and `🛑 Skip` drops this forward; the prompt states its expiry and is marked expired in place when it lapses (nothing is forwarded) |
 | `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward") |
+| `/remove_template <name>` | Remove a template (names are listed by `/settings`; the prompt's keyboard shows at most 60) |
+| `/settings` | Show this chat's configuration: forward channel, edit-before-forward, per-site caption formats, saved templates |
 | `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}`; unknown placeholders are rejected with the list of valid ones, and `-` restores the site's built-in format (preview with `/debug <link>`) |
 | `/clear_cache [link]` | Clear the link cache (admin only); with a link only that entry, otherwise everything |
 | `/bot_dict` | Show the current chat state (debugging; admin only) |

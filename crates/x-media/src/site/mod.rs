@@ -483,6 +483,15 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
     unreachable!("retry loop always returns")
 }
 
+/// Whether fetching `url` requires site-specific headers (pixiv's `Referer`
+/// for `pximg.net` hotlink protection, see [`Site::media_headers`]). Telegram's
+/// own fetch of a media URL sends none of them, so a URL that needs them fails
+/// there — callers that hand a URL to Telegram (inline query results) must
+/// skip such media instead of shipping a broken item.
+pub fn needs_media_headers(url: &str) -> bool {
+    SITES.iter().any(|site| site.media_headers(url).is_some())
+}
+
 /// Applies every site's media-header rule to a download request (pixiv's
 /// `Referer` for pximg.net hotlink protection). Sites contribute via their
 /// `media_headers(url)` — the central download code carries no per-site logic.
@@ -731,6 +740,24 @@ mod tests {
     async fn unknown_scheme_returns_none() {
         let result = fetch("not a url at all").await;
         assert!(matches!(result, Ok(None)), "got {result:?}");
+    }
+
+    #[test]
+    fn media_headers_are_reported_only_where_telegram_would_fail() {
+        // pixiv's CDN needs a Referer, which only the bot can send: an inline
+        // result pointing at it renders broken, so callers skip it.
+        assert!(needs_media_headers(
+            "https://i.pximg.net/img-original/img/2024/01/01/00/00/00/1_p0.jpg"
+        ));
+        // The rest serve direct requests (verified per site in their modules).
+        for url in [
+            "https://pbs.twimg.com/media/1.jpg",
+            "https://cdn.bsky.app/img/1.jpg",
+            "https://media.misskeyusercontent.jp/io/1.webp",
+            "https://i0.hdslb.com/bfs/1.jpg",
+        ] {
+            assert!(!needs_media_headers(url), "{url}");
+        }
     }
 
     #[tokio::test]

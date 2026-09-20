@@ -146,6 +146,15 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
             );
             for (i, media) in fetched.media.iter().enumerate() {
                 let id = format!("{i}");
+                // Telegram fetches an inline result's URL itself and cannot
+                // send site-specific headers, so hotlink-protected media
+                // (pixiv's pximg.net) would render as a broken file there.
+                // Locally produced media (ugoira MP4, bsky remux) is a local
+                // path and does not parse as a URL at all — same skip.
+                if x_media::site::needs_media_headers(media.url()) {
+                    log::debug!("inline: skipping hotlink-protected media {id}");
+                    continue;
+                }
                 let Some(url) = url::Url::parse(media.url()).ok() else {
                     continue;
                 };

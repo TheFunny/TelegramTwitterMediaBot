@@ -342,8 +342,16 @@ impl QueueWorker {
                 payload,
             }) => {
                 if row.attempts as u32 >= MAX_RETRIES {
-                    let message = format!("task failed after {MAX_RETRIES} retries");
-                    log::error!("dead-lettering {}: {message}", row.id);
+                    // The queue keeps only the payload, not the last error, so
+                    // the cause of an exhausted retry is just that: exhausted.
+                    // (The dead-letter message is read by the user, so it must
+                    // not restate its own wrapper — see `failure_text`.)
+                    let message = "retries exhausted".to_string();
+                    log::error!(
+                        "dead-lettering {}: {message} after {} attempt(s)",
+                        row.id,
+                        row.attempts + 1
+                    );
                     self.delete_row(&row.id).await;
                     (self.dead_letter)(payload, message).await;
                 } else {

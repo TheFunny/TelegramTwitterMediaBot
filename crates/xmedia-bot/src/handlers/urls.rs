@@ -192,11 +192,16 @@ async fn dispatch_send(
                 log_key(url)
             );
             send::enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
+            // Name the post and the wait: "queued for retry" alone left the
+            // user guessing which link it was and how long the wait is.
             let _ = reply(
                 ctx.sender,
                 chat_id,
                 reply_to,
-                "Send failed. Task queued for retry.",
+                format!(
+                    "Send failed for {} — retrying in {delay_seconds:.0}s.",
+                    log_key(url)
+                ),
             )
             .await;
         }

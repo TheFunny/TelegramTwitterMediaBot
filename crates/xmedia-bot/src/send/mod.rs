@@ -817,6 +817,66 @@ mod tests {
     }
 
     #[test]
+    fn edit_markup_folds_and_caps_the_template_buttons() {
+        // Telegram rejects a keyboard over 100 buttons, which would drop the
+        // whole prompt; the cap keeps it well under that.
+        let templates: HashMap<String, String> = (0..200)
+            .map(|i| (format!("t{i:03}"), "[]".to_string()))
+            .collect();
+        let keyboard = build_edit_markup(&templates);
+        let buttons: usize = keyboard.inline_keyboard.iter().map(Vec::len).sum();
+        assert!(
+            buttons <= 100,
+            "a keyboard Telegram rejects would lose the prompt: {buttons}"
+        );
+        assert_eq!(
+            buttons,
+            super::post_send::MAX_TEMPLATE_BUTTONS + 2,
+            "the cap plus the confirm/skip pair"
+        );
+        // Names are folded, not one per row.
+        assert_eq!(keyboard.inline_keyboard[0].len(), 3);
+        assert_eq!(keyboard.inline_keyboard.last().unwrap().len(), 2);
+        assert_eq!(super::post_send::hidden_template_count(&templates), 140);
+        // Under the cap nothing is hidden and every name gets a button.
+        let few: HashMap<String, String> = (0..4)
+            .map(|i| (format!("t{i}"), "[]".to_string()))
+            .collect();
+        assert_eq!(super::post_send::hidden_template_count(&few), 0);
+        assert_eq!(
+            build_edit_markup(&few)
+                .inline_keyboard
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+            6
+        );
+    }
+
+    #[test]
+    fn failure_text_names_the_post_and_the_cause() {
+        // A send failure names the post (the cache key) and the cause, so the
+        // user knows which of their links died.
+        let task = sequence_task("https://x.com/u/status/1");
+        let text = super::post_send::failure_text(Some(&task), "retries exhausted");
+        assert!(text.contains("twitter:1"), "{text}");
+        assert!(text.contains("retries exhausted"), "{text}");
+
+        // A channel-forward failure has no source URL: it must not claim a
+        // post failed.
+        let forward = Task::ForwardMessages {
+            from_chat_id: 1,
+            to_chat_id: 2,
+            message_ids: vec![1],
+            notify_chat_id: None,
+            notify_message_id: None,
+        };
+        let text = super::post_send::failure_text(Some(&forward), "chat not found");
+        assert!(text.starts_with("Forward failed permanently"), "{text}");
+        assert!(text.contains("chat not found"), "{text}");
+    }
+
+    #[test]
     fn edit_prompt_text_states_the_ttl_and_the_confirm_requirement() {
         use std::time::Duration;
 
