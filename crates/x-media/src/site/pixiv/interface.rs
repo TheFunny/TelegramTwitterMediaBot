@@ -50,8 +50,14 @@ impl Site for PixivSite {
             match super::api::validate().await {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    // Keep the old behavior: a failed login disables pixiv
-                    // for the rest of this process.
+                    // A rejected credential disables pixiv for the rest of
+                    // this process (it will not fix itself). A bad *moment* —
+                    // a 5xx or a network error while the container comes up —
+                    // must not: disabling on any error turned every later
+                    // pixiv link into "pixiv support is disabled".
+                    if pixiv_error_is_retryable(&e) {
+                        return Err(format!("{e} (transient — pixiv stays enabled)"));
+                    }
                     super::api::disable();
                     Err(format!("{e}"))
                 }
@@ -84,15 +90,21 @@ pub fn cache_key(url: &str) -> Option<String> {
 pub fn is_retryable(err: &FetchError) -> bool {
     match err {
         FetchError::Http(_) | FetchError::Transient(_) => true,
-        FetchError::Pixiv(e) => match e {
-            PixivError::Http(_) => true,
-            PixivError::Status(code) if *code == 429 || *code >= 500 => true,
-            PixivError::Status(_)
-            | PixivError::Api(_)
-            | PixivError::Json(_)
-            | PixivError::NoAuth => false,
-        },
+        FetchError::Pixiv(e) => pixiv_error_is_retryable(e),
         _ => false,
+    }
+}
+
+/// The pixiv-specific half of the retry policy, shared with startup
+/// validation: a bad moment (429/5xx, a network error) is retryable, a
+/// rejected credential is not.
+fn pixiv_error_is_retryable(err: &PixivError) -> bool {
+    match err {
+        PixivError::Http(_) => true,
+        PixivError::Status(code) if *code == 429 || *code >= 500 => true,
+        PixivError::Status(_) | PixivError::Api(_) | PixivError::Json(_) | PixivError::NoAuth => {
+            false
+        }
     }
 }
 
@@ -408,6 +420,16 @@ mod tests {
         ] {
             assert!(!PATTERN.is_match(url), "{url}");
         }
+    }
+
+    #[test]
+    fn startup_validation_only_disables_on_a_definitive_failure() {
+        // A bad moment: the site must stay enabled for later links.
+        assert!(pixiv_error_is_retryable(&PixivError::Status(503)));
+        assert!(pixiv_error_is_retryable(&PixivError::Status(429)));
+        // A rejected credential is what `disable()` is for.
+        assert!(!pixiv_error_is_retryable(&PixivError::Status(403)));
+        assert!(!pixiv_error_is_retryable(&PixivError::NoAuth));
     }
 
     #[test]

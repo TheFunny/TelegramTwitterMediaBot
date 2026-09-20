@@ -76,6 +76,13 @@ impl PixivAPI {
             .header("User-Agent", AUTH_USER_AGENT)
             .send()
             .await?;
+        // Check the status *before* reading the body: a 429/5xx from the
+        // token endpoint is worth retrying (the class comes from
+        // `is_retryable`), while parsing a maintenance page as JSON turned it
+        // into a permanent `Api`/`Json` error with no retry at all.
+        if !response.status().is_success() {
+            return Err(PixivError::Status(response.status().as_u16()));
+        }
         let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
         let access_token = json
             .get("access_token")
@@ -134,8 +141,11 @@ impl PixivAPI {
         let mut illustration = Illustration::from_model(&model);
         if matches!(&model.r#type, TypeModel::Ugoira) {
             // Real ugoira support: download the frame zip and encode an MP4.
-            // Without ffmpeg (or on encode failure) the post stays
-            // unsupported (empty media, like Python).
+            // Without ffmpeg the post stays unsupported (empty media, like
+            // Python) — but a *failed* download/encode is reported instead:
+            // a ugoira post has no static image to fall back to, so
+            // swallowing it would present a transient zip-download error as
+            // "this post has no media", with the retries skipped.
             match self.ugoira_video(illust_id).await {
                 Ok(Some((mp4_path, _keep_alive))) => {
                     illustration.media.push(Media::Video {
@@ -146,7 +156,10 @@ impl PixivAPI {
                     illustration._keep_alive = Some(_keep_alive);
                 }
                 Ok(None) => {}
-                Err(e) => log::error!("ugoira encode failed for {illust_id}: {e}"),
+                Err(e) => {
+                    log::error!("ugoira encode failed for {illust_id}: {e}");
+                    return Err(FetchError::Pixiv(e));
+                }
             }
         }
         Ok(illustration)

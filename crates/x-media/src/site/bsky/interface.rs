@@ -55,6 +55,10 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     // working on: the media URL is derived from what the user pasted, and
     // `warn` is a level operators share.
     let key = cache_key(url).unwrap_or_else(|| "?".into());
+    // A failed remux is remembered: if it leaves the post with no media at
+    // all, returning `Ok` would read as "this post has no media" and skip the
+    // retry that a transient segment-download failure deserves.
+    let mut remux_failure: Option<String> = None;
     for item in fetched.media {
         let is_hls = matches!(&item, Media::Video { url, .. }
             if url.contains("playlist") || url.ends_with(".m3u8"));
@@ -76,9 +80,22 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                 });
                 fetched._keep_alive = Some(keep_alive);
             }
+            // No ffmpeg: a deployment gap, not a bad moment — retrying it
+            // would only waste the fetch budget, so the post degrades (and an
+            // all-video post reports the media type as unsupported).
             Ok(None) => log::warn!("bsky video remux unavailable for [key={key}]"),
-            Err(e) => log::warn!("bsky video remux failed for [key={key}]: {e}"),
+            Err(e) => {
+                log::warn!("bsky video remux failed for [key={key}]: {e}");
+                remux_failure = Some(e);
+            }
         }
+    }
+    if media.is_empty()
+        && let Some(reason) = remux_failure
+    {
+        return Err(FetchError::Transient(format!(
+            "bsky video remux failed: {reason}"
+        )));
     }
     fetched.media = media;
     Ok(fetched)

@@ -17,6 +17,17 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub const MAX_RETRIES: u32 = 2;
+
+/// Attempts for a *terminal* row write (delete / reschedule). These are not
+/// like a task retry: failing them leaves the row in `in_progress`, where the
+/// expiry sweep can re-run a task that already ran, so a contended DB gets a
+/// few quick chances before the caller falls back to a terminal state.
+const TERMINAL_WRITE_ATTEMPTS: u32 = 3;
+
+/// 100ms, 200ms, … between terminal write attempts.
+fn terminal_write_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(100 * (1u64 << attempt.min(4)))
+}
 pub const LOCK_TTL_SECONDS: f64 = 120.0;
 
 /// Number of concurrent worker loops. Tasks are independent (retries and
@@ -236,6 +247,22 @@ impl PersistentTaskQueue {
             log::error!("queue recovery failed: {e}");
         }
     }
+}
+
+/// Last-resort terminal state for a row whose `DELETE` would not go through:
+/// `done` is invisible to `lease_next` (`status='pending'`), to the expiry
+/// sweep (`status='in_progress'`) and to the backlog line, so a task that
+/// already ran cannot be leased and run again.
+async fn mark_done(pool: &std::sync::Arc<crate::db::DbPool>, id: &str) -> rusqlite::Result<()> {
+    let id = id.to_string();
+    pool.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE tasks SET status='done', locked_until=0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    })
+    .await
 }
 
 /// Which task a lease/retry/dead-letter line is about: the chat from the
@@ -474,36 +501,88 @@ impl QueueWorker {
         }
     }
 
+    /// Deletes a finished row. A failure here is not cosmetic: the row would
+    /// stay `in_progress` with a live lease, the next sweep would flip it back
+    /// to `pending`, and the *completed* task would run again — a second album,
+    /// a second edit prompt, a second channel copy. So the delete is retried
+    /// (a busy/contended DB is the usual cause and clears), and if the DB still
+    /// refuses, the row is marked `done` — a status neither the lease query
+    /// (`pending`) nor the sweep (`in_progress`) looks at — so a task that
+    /// already ran can never be re-leased. Both writes failing is logged at
+    /// error level with the row id, since that is the one case where a
+    /// duplicate send stays possible.
     async fn delete_row(&self, id: &str) {
+        for attempt in 0..TERMINAL_WRITE_ATTEMPTS {
+            match self.try_delete_row(id).await {
+                Ok(()) => return,
+                Err(e) => {
+                    log::error!("queue delete failed (attempt {}): {e}", attempt + 1);
+                    tokio::time::sleep(terminal_write_backoff(attempt)).await;
+                }
+            }
+        }
+        match mark_done(&self.pool, id).await {
+            Ok(()) => log::warn!("queue: row {id} marked done instead of deleted"),
+            Err(e) => log::error!(
+                "queue: row {id} could not be deleted or marked done ({e}); \
+                 the expiry sweep may run this finished task again"
+            ),
+        }
+    }
+
+    async fn try_delete_row(&self, id: &str) -> rusqlite::Result<()> {
         let id = id.to_string();
-        let result = self
-            .pool
+        self.pool
             .with_conn(move |conn| {
                 conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
                 Ok(())
             })
-            .await;
-        if let Err(e) = result {
-            log::error!("queue delete failed: {e}");
-        }
+            .await
     }
 
+    /// Writes back a retryable attempt's state. A failure is retried: the row
+    /// would otherwise stay `in_progress`, and the expiry sweep would re-run
+    /// the attempt from its *previous* payload — re-sending batches the last
+    /// attempt had already delivered. Unlike [`Self::delete_row`] there is no
+    /// safe terminal fallback here (marking it done would drop the retry
+    /// without telling anyone), so a persistent failure is logged loudly and
+    /// the sweep's re-run — at-least-once, the documented trade — is named.
     async fn reschedule(&self, id: &str, payload: Value, delay_seconds: f64, attempts: i32) {
         let id = id.to_string();
         let payload = payload.to_string();
-        let result = self.pool.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
-                params![payload, now_f64() + delay_seconds, attempts, id],
-            )?;
-            Ok(())
-        })
-        .await;
-        if let Err(e) = result {
-            log::error!("queue reschedule failed: {e}");
+        let run_after = now_f64() + delay_seconds;
+        let mut last_error = None;
+        for attempt in 0..TERMINAL_WRITE_ATTEMPTS {
+            let id = id.clone();
+            let payload = payload.clone();
+            let result = self
+                .pool
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET payload=?1, run_after=?2, attempts=?3, status='pending', locked_until=0 WHERE id=?4",
+                        params![payload, run_after, attempts, id],
+                    )?;
+                    Ok(())
+                })
+                .await;
+            match result {
+                Ok(()) => {
+                    // Same permit semantics as enqueue: never lose the wakeup.
+                    self.notify.notify_one();
+                    return;
+                }
+                Err(e) => {
+                    log::error!("queue reschedule failed (attempt {}): {e}", attempt + 1);
+                    last_error = Some(e.to_string());
+                    tokio::time::sleep(terminal_write_backoff(attempt)).await;
+                }
+            }
         }
-        // Same permit semantics as enqueue: never lose the wakeup.
-        self.notify.notify_one();
+        log::error!(
+            "queue: row {id} could not be rescheduled ({}); the expiry sweep will \
+             re-run this attempt from its previous state",
+            last_error.unwrap_or_default()
+        );
     }
 }
 
@@ -576,6 +655,47 @@ mod tests {
         // Garbage in the payload must not panic a log line.
         assert_eq!(row_fields(&serde_json::json!({"chat_id": "111"})), "");
         assert_eq!(row_fields(&serde_json::Value::Null), "");
+    }
+
+    /// The row a leaked deletion would resurrect: `done` is invisible to the
+    /// lease query, so a task that already ran cannot be run again.
+    #[tokio::test]
+    async fn done_rows_are_never_leased() {
+        let (queue, _dir) = new_queue().await;
+        let runs = Arc::new(AtomicUsize::new(0));
+        queue
+            .enqueue(serde_json::json!({"chat_id": 1}), now_f64())
+            .await
+            .unwrap();
+        let id: String = queue
+            .pool
+            .with_conn(|conn| conn.query_row("SELECT id FROM tasks", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        mark_done(&queue.pool, &id).await.unwrap();
+
+        assert_eq!(
+            queue.pending_backlog().await,
+            None,
+            "a done row is not pending work"
+        );
+        let runs_worker = runs.clone();
+        queue
+            .start(
+                move |_payload| {
+                    runs_worker.fetch_add(1, AtomicOrdering::SeqCst);
+                    async { Ok(()) }
+                },
+                |_payload, _message| async {},
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            runs.load(AtomicOrdering::SeqCst),
+            0,
+            "the finished row must not run again"
+        );
+        queue.stop().await;
     }
 
     #[tokio::test]

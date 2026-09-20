@@ -269,15 +269,23 @@ pub enum FetchError {
     Io(std::io::Error),
 }
 
-/// Shared HTTP client (browser User-Agent) for twitter/bsky fetches and
-/// [`download_media`].
-pub(crate) static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// How long a download may make no progress: the response head, and then each
+/// individual chunk, must arrive within this window. Deliberately *not* a
+/// total timeout — see [`MEDIA_CLIENT`].
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Builds a client with the shared configuration (browser User-Agent, the
+/// Bot API's proxy, per-runtime pools under test). `total_timeout` is what
+/// differs between the two clients below.
+fn build_client(total_timeout: Option<Duration>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
+        .connect_timeout(Duration::from_secs(10));
+    if let Some(total) = total_timeout {
         // reqwest has no total timeout by default; a stalled connection
         // would otherwise pin a fetch/handler forever.
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10));
+        builder = builder.timeout(total);
+    }
     // Route site fetches through the same proxy the Bot API uses, so a
     // network that needs TELOXIDE_PROXY (e.g. behind the GFW) does not
     // leave site fetches dead while the bot itself works.
@@ -295,7 +303,53 @@ pub(crate) static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     #[cfg(test)]
     let builder = builder.pool_max_idle_per_host(0);
     builder.build().expect("failed to build HTTP client")
-});
+}
+
+/// Shared HTTP client (browser User-Agent) for the site fetches — metadata
+/// requests, where 30s is generous.
+pub(crate) static CLIENT: LazyLock<reqwest::Client> =
+    LazyLock::new(|| build_client(Some(Duration::from_secs(30))));
+
+/// Client for media *downloads*, with no total timeout: a 10 MiB fallback
+/// download, or an ugoira frame zip that may be hundreds of MB, legitimately
+/// takes minutes on a slow link — a 30s total cap made those posts impossible
+/// to deliver at all (the size cap said 512 MiB, the clock said 30s). What a
+/// stalled connection cannot do is hang a worker: the head and every chunk are
+/// bounded by [`DOWNLOAD_IDLE_TIMEOUT`] instead (see [`next_chunk`]).
+static MEDIA_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| build_client(None));
+
+/// The error a download reports when it stops making progress.
+fn download_stalled() -> FetchError {
+    FetchError::Transient(format!(
+        "download stalled for {}s",
+        DOWNLOAD_IDLE_TIMEOUT.as_secs()
+    ))
+}
+
+/// Sends a media-download request: the response head must arrive within the
+/// idle window, and a non-2xx status is classified by [`download_status_error`].
+async fn send_download(request: reqwest::RequestBuilder) -> Result<reqwest::Response, FetchError> {
+    let response = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => return Err(download_stalled()),
+    };
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(download_status_error(response.status()))
+    }
+}
+
+/// One body chunk, or `None` at the end. A body that stops delivering is a
+/// transient download error rather than a hang.
+async fn next_chunk(response: &mut reqwest::Response) -> Result<Option<bytes::Bytes>, FetchError> {
+    match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, response.chunk()).await {
+        Ok(Ok(chunk)) => Ok(chunk),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(download_stalled()),
+    }
+}
 
 /// Whether a usable `ffmpeg` binary is on PATH (probed once). Shared by the
 /// pixiv ugoira encoder and the bsky HLS remuxer.
@@ -543,12 +597,7 @@ fn download_status_error(status: reqwest::StatusCode) -> FetchError {
 /// crossed (or when a declared Content-Length already exceeds it). Keeps the
 /// bot from buffering arbitrarily large bodies into memory.
 pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
-    let response = apply_media_headers(CLIENT.get(url), url).send().await?;
-    let response = if response.status().is_success() {
-        response
-    } else {
-        return Err(download_status_error(response.status()));
-    };
+    let response = send_download(apply_media_headers(MEDIA_CLIENT.get(url), url)).await?;
     if let Some(len) = response.content_length()
         && len > max_bytes
     {
@@ -556,7 +605,7 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
     }
     let mut response = response;
     let mut buf = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = next_chunk(&mut response).await? {
         buf.extend_from_slice(&chunk);
         if buf.len() as u64 > max_bytes {
             return Err(FetchError::TooLarge);
@@ -581,12 +630,7 @@ pub async fn download_media_to_file(
     out: &mut std::fs::File,
 ) -> Result<u64, FetchError> {
     use std::io::Write;
-    let response = apply_media_headers(CLIENT.get(url), url).send().await?;
-    let response = if response.status().is_success() {
-        response
-    } else {
-        return Err(download_status_error(response.status()));
-    };
+    let response = send_download(apply_media_headers(MEDIA_CLIENT.get(url), url)).await?;
     if let Some(len) = response.content_length()
         && len > max_bytes
     {
@@ -594,7 +638,7 @@ pub async fn download_media_to_file(
     }
     let mut response = response;
     let mut total: u64 = 0;
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = next_chunk(&mut response).await? {
         total += chunk.len() as u64;
         if total > max_bytes {
             return Err(FetchError::TooLarge);
