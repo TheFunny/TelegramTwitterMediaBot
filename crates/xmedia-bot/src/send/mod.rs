@@ -29,7 +29,7 @@ use upload::{FallbackError, PreparedItem, prepare_upload_item, send_batch_via_up
 // parts other modules use so call sites stay `send::x`.
 pub(crate) use post_send::{
     EDIT_PROMPT_EXPIRED_TEXT, KEEP_ALIVE, Settled, dead_letter_notify, enqueue_retry, handle_task,
-    post_send_actions, settle_task,
+    notify_failure, post_send_actions, settle_task,
 };
 
 /// One process-wide Bot for queue workers. Building a fresh Bot (and its HTTP
@@ -143,7 +143,7 @@ impl Task {
         }
     }
 
-    fn source_url(&self) -> Option<&str> {
+    pub(crate) fn source_url(&self) -> Option<&str> {
         match self {
             Task::SendMediaSequence { source_url, .. } | Task::SendAnimation { source_url, .. } => {
                 Some(source_url)
@@ -173,9 +173,42 @@ impl Task {
         }
     }
 
+    /// The chat this task delivers media to (`None` for a channel copy, which
+    /// names two chats instead).
+    pub(crate) fn chat_id(&self) -> Option<i64> {
+        match self {
+            Task::SendMediaSequence { chat_id, .. } | Task::SendAnimation { chat_id, .. } => {
+                Some(*chat_id)
+            }
+            Task::ForwardMessages { .. } => None,
+        }
+    }
+
+    /// Where a failure notice for this task goes (both `None` for a copy with
+    /// nothing to notify).
+    pub(crate) fn notify_target(&self) -> (Option<i64>, Option<i64>) {
+        match self {
+            Task::SendMediaSequence {
+                notify_chat_id,
+                notify_message_id,
+                ..
+            }
+            | Task::SendAnimation {
+                notify_chat_id,
+                notify_message_id,
+                ..
+            }
+            | Task::ForwardMessages {
+                notify_chat_id,
+                notify_message_id,
+                ..
+            } => (*notify_chat_id, *notify_message_id),
+        }
+    }
+
     /// Local file paths referenced by this task's media (ugoira / bsky remux
     /// MP4 and the like); empty for URL or Telegram file-id sends.
-    fn local_media_paths(&self) -> Vec<std::path::PathBuf> {
+    pub(crate) fn local_media_paths(&self) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
         for item in self.media_items() {
             let is_file_id = match item {

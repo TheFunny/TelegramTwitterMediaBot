@@ -175,7 +175,7 @@ pub(super) fn hidden_template_count(templates: &HashMap<String, String>) -> usiz
 
 /// Notifies a chat about a dead-lettered task (skips when `notify_chat_id` is
 /// absent).
-pub(super) async fn notify_failure(
+pub(crate) async fn notify_failure(
     sender: &dyn MediaSender,
     chat_id: Option<i64>,
     message_id: Option<i64>,

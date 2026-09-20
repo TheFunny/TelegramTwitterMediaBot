@@ -19,6 +19,7 @@ pub(crate) use inline::prune_idle_states;
 /// The resolved `$DATA_DIR/task_queue.db` path, for the startup config line.
 pub(crate) use statics::db_path;
 pub use statics::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
+pub(crate) use urls::repair_lost_local_media;
 pub use urls::{start_url_workers, stop_url_workers};
 
 use crate::ctx::AppContext;

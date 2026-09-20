@@ -235,6 +235,61 @@ impl PersistentTaskQueue {
     /// `earliest_run_after`: that one runs on every idle worker cycle and must
     /// stay a single indexed `MIN`, while the count is only asked for once per
     /// sweep.
+    /// `(id, payload)` of every row that can still run (`pending`,
+    /// `in_progress`). The startup repair reads these before the workers start:
+    /// with no worker running, no row can be leased while it writes.
+    pub async fn runnable_rows(&self) -> Vec<(String, String)> {
+        let result = self
+            .pool
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, payload FROM tasks WHERE status IN ('pending', 'in_progress') ORDER BY run_after",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+            })
+            .await;
+        match result {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::error!("queue row scan failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Replaces a runnable row's payload and restarts its attempt budget: the
+    /// new payload is a fresh delivery of the same task, so the retries it has
+    /// already spent do not carry over. Startup repair only — a worker's
+    /// write-back is lease-token guarded instead (`replace_payload` cannot race
+    /// one: it runs before any worker does).
+    pub async fn replace_payload(&self, id: &str, payload: &Value) -> bool {
+        let logged_id = id.to_string();
+        let (id, payload) = (id.to_string(), payload.to_string());
+        let result = self
+            .pool
+            .with_conn(move |conn| {
+                let affected = conn.execute(
+                    "UPDATE tasks SET payload=?1, attempts=0, run_after=?2, status='pending', locked_until=0 \
+                     WHERE id=?3 AND status IN ('pending', 'in_progress')",
+                    params![payload, now_f64(), id],
+                )?;
+                Ok(affected == 1)
+            })
+            .await;
+        match result {
+            Ok(true) => true,
+            Ok(false) => {
+                log::warn!("queue: row {logged_id} vanished before its payload could be replaced");
+                false
+            }
+            Err(e) => {
+                log::error!("queue payload replace failed for {logged_id}: {e}");
+                false
+            }
+        }
+    }
+
     pub async fn pending_backlog(&self) -> Option<(i64, f64)> {
         let result = self
             .pool
@@ -892,6 +947,51 @@ mod tests {
         );
         assert_eq!(dead_calls.load(AtomicOrdering::SeqCst), 1);
         queue.stop().await;
+    }
+
+    #[tokio::test]
+    async fn runnable_rows_and_payload_replacement() {
+        let (queue, _dir) = new_queue().await;
+        queue
+            .enqueue(serde_json::json!({"s": 1}), now_f64())
+            .await
+            .unwrap();
+        let rows = queue.runnable_rows().await;
+        assert_eq!(rows.len(), 1);
+        let (id, payload) = rows[0].clone();
+        assert_eq!(payload, "{\"s\":1}");
+
+        // A replacement restarts the attempt budget (the new payload is a fresh
+        // delivery, not the continuation of the old one).
+        {
+            let id_owned = id.clone();
+            queue
+                .pool
+                .with_conn(move |conn| {
+                    conn.execute("UPDATE tasks SET attempts=2 WHERE id=?1", params![id_owned])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        assert!(
+            queue
+                .replace_payload(&id, &serde_json::json!({"s": 2}))
+                .await
+        );
+        let rows = queue.runnable_rows().await;
+        assert_eq!(rows[0].1, "{\"s\":2}");
+        assert_eq!(
+            queue.pending_backlog().await.map(|(n, _)| n),
+            Some(1),
+            "a repaired row is pending work again"
+        );
+        // A row that is gone (or done) is not rewritten.
+        assert!(
+            !queue
+                .replace_payload("task_missing", &serde_json::json!({}))
+                .await
+        );
     }
 
     #[tokio::test]

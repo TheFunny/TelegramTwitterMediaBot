@@ -152,6 +152,16 @@ async fn main() {
     );
     log::debug!("config: admin ids {:?}", CONFIG.admin_ids);
 
+    // Startup repair, before any worker runs: a queued retry whose media was a
+    // local file (ugoira MP4, bsky remux, a downloaded temp file) can never
+    // succeed after a restart — the registry that kept those files alive is in
+    // memory — so those rows are re-fetched from their post instead of
+    // dead-lettering the user's link.
+    let repaired = handlers::repair_lost_local_media(&CONTEXT).await;
+    if repaired > 0 {
+        log::info!("startup repair: re-fetched {repaired} queued task(s)");
+    }
+
     // Queue worker: handles typed tasks, dead-letters failed sends to the
     // task's chat. Both closures use the shared context (the queue requires
     // 'static handlers, and the statics are process-wide anyway).
