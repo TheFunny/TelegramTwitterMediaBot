@@ -525,15 +525,30 @@ pub async fn media_size(url: &str) -> Result<Option<u64>, FetchError> {
     Ok(response.content_length())
 }
 
+/// Maps a media download's HTTP status onto the same classes the site
+/// adapters use, so callers can tell "try again" from "this URL is dead":
+/// 4xx is a property of the media (gone, refused by the host), while 429/5xx
+/// is a property of the moment. A transport error never reaches this — it
+/// fails in `send()` and stays [`FetchError::Http`].
+fn download_status_error(status: reqwest::StatusCode) -> FetchError {
+    match status.as_u16() {
+        401 | 403 => FetchError::Blocked,
+        404 | 410 => FetchError::NotFound,
+        _ => FetchError::Transient(format!("media status {status}")),
+    }
+}
+
 /// Downloads a media file with a hard size cap: the body is streamed and the
 /// download aborts with [`FetchError::TooLarge`] the moment the cap is
 /// crossed (or when a declared Content-Length already exceeds it). Keeps the
 /// bot from buffering arbitrarily large bodies into memory.
 pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
-    let response = apply_media_headers(CLIENT.get(url), url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = apply_media_headers(CLIENT.get(url), url).send().await?;
+    let response = if response.status().is_success() {
+        response
+    } else {
+        return Err(download_status_error(response.status()));
+    };
     if let Some(len) = response.content_length()
         && len > max_bytes
     {
@@ -566,10 +581,12 @@ pub async fn download_media_to_file(
     out: &mut std::fs::File,
 ) -> Result<u64, FetchError> {
     use std::io::Write;
-    let response = apply_media_headers(CLIENT.get(url), url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = apply_media_headers(CLIENT.get(url), url).send().await?;
+    let response = if response.status().is_success() {
+        response
+    } else {
+        return Err(download_status_error(response.status()));
+    };
     if let Some(len) = response.content_length()
         && len > max_bytes
     {

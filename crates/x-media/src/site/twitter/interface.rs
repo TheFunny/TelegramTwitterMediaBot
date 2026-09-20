@@ -105,6 +105,9 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     if !status.is_success() {
         return match status.as_u16() {
             404 | 410 => Err(FetchError::NotFound),
+            // A refusal or an auth demand is not a bad moment: retrying it
+            // three times only delays an error the user has to see.
+            401 | 403 => Err(FetchError::Blocked),
             _ => Err(FetchError::Transient(format!("twitter status {status}"))),
         };
     }
@@ -146,7 +149,18 @@ fn parse_syndication_body(text: &str) -> Result<serde_json::Value, FetchError> {
         return Err(FetchError::NotFound);
     }
     if body.get("id_str").is_none() {
-        return Err(FetchError::Sensitive);
+        // Syndication answers an empty `{}` for withheld (NSFW /
+        // age-restricted) tweets: the documented case, kept as `Sensitive`
+        // because it is what triggers the logged-in auth fallback.
+        if body.as_object().is_some_and(|object| object.is_empty()) {
+            return Err(FetchError::Sensitive);
+        }
+        // Any other shape is not a tweet: an interstitial, a truncated body,
+        // a change on their side. Reporting that as withheld content told the
+        // user to set TWITTER_AUTH_TOKEN for something auth cannot fix.
+        return Err(FetchError::Transient(
+            "unexpected syndication body".to_string(),
+        ));
     }
     Ok(body)
 }
@@ -760,6 +774,17 @@ mod tests {
             parse_syndication_body("{}"),
             Err(FetchError::Sensitive)
         ));
+    }
+
+    #[test]
+    fn syndication_unexpected_shape_is_transient_not_withheld() {
+        // A 200 that is not a tweet at all (an interstitial, a truncated
+        // body) must not be reported as withheld content: that message tells
+        // the user to set TWITTER_AUTH_TOKEN, which cannot fix it.
+        match parse_syndication_body("{\"foo\":1}") {
+            Err(FetchError::Transient(_)) => {}
+            other => panic!("expected Transient, got {other:?}"),
+        }
     }
 
     #[test]

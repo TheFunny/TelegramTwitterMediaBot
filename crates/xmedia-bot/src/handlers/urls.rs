@@ -210,19 +210,23 @@ async fn dispatch_send(
                 "send for [key={}] chat={chat_id} failed after {ms}ms, queued for retry in {delay_seconds:.1}s",
                 log_key(url)
             );
-            send::enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
             // Name the post and the wait: "queued for retry" alone left the
-            // user guessing which link it was and how long the wait is.
-            let _ = reply(
-                ctx.sender,
-                chat_id,
-                reply_to,
+            // user guessing which link it was and how long the wait is. The
+            // promise is made only when the retry was really persisted — an
+            // enqueue that failed (DB write) would leave the user waiting for
+            // a retry nothing can deliver.
+            let promised = if send::enqueue_retry(ctx.task_queue, &task, delay_seconds).await {
                 format!(
                     "Send failed for {} — retrying in {delay_seconds:.0}s.",
                     log_key(url)
-                ),
-            )
-            .await;
+                )
+            } else {
+                format!(
+                    "Send failed for {} and the retry could not be queued — please send the link again.",
+                    log_key(url)
+                )
+            };
+            let _ = reply(ctx.sender, chat_id, reply_to, promised).await;
         }
         Err(send::SendError::Permanent {
             message: err_message,

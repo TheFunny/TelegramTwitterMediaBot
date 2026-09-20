@@ -81,10 +81,11 @@ fn recover_update(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 
 /// Base delay × 2^attempts (attempts = retries already done), capped at 300s.
 /// Applied at the queue layer so the attempt count actually reaches the
-/// backoff computation; Telegram `RetryAfter` delays get the same treatment
-/// (conservatively larger wait, no API change needed).
+/// backoff computation. The cap only ever scales *up*: a delay the server
+/// asked for (Telegram `RetryAfter`) must not be shortened, retrying earlier
+/// than allowed just re-triggers the flood control it came from.
 fn scaled_retry_delay(base: f64, attempts: i32) -> f64 {
-    (base * 2f64.powi(attempts)).min(300.0)
+    (base * 2f64.powi(attempts)).min(300.0).max(base)
 }
 
 impl PersistentTaskQueue {
@@ -519,6 +520,10 @@ mod tests {
         assert_eq!(scaled_retry_delay(1.5, 1), 3.0);
         assert_eq!(scaled_retry_delay(1.0, 10), 300.0, "capped at 300s");
         assert_eq!(scaled_retry_delay(300.0, 0), 300.0);
+        // A server-asked delay above the cap is honoured, not truncated: a
+        // 1800s flood-control wait used to become 300s and earn another 429.
+        assert_eq!(scaled_retry_delay(1800.0, 0), 1800.0);
+        assert_eq!(scaled_retry_delay(1800.0, 1), 1800.0);
     }
 
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {

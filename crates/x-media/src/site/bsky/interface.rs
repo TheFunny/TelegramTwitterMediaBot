@@ -239,6 +239,9 @@ pub async fn fetch(handle: &str, rkey: &str) -> Result<Post, FetchError> {
     if !status.is_success() {
         return match status.as_u16() {
             404 | 410 => Err(FetchError::NotFound),
+            // A refusal or an auth demand is not a bad moment: retrying it
+            // three times only delays an error the user has to see.
+            401 | 403 => Err(FetchError::Blocked),
             _ => Err(FetchError::Transient(format!("bsky status {status}"))),
         };
     }

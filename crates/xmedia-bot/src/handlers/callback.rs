@@ -117,9 +117,24 @@ async fn handle_callback(
                         delay_seconds,
                         task,
                     }) => {
-                        log::info!("forward queued for retry in {delay_seconds:.1}s");
-                        send::enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
-                        ("Forward queued for retry.".to_string(), false)
+                        // The queued row owns the forward from here (it carries
+                        // the message ids itself), so the prompt is settled
+                        // either way: leaving it live let a second Confirm copy
+                        // the same messages to the channel twice, and let Skip
+                        // answer "nothing was forwarded" while the row still
+                        // delivered it.
+                        let queued =
+                            send::enqueue_retry(ctx.task_queue, &task, delay_seconds).await;
+                        if queued {
+                            log::info!("forward queued for retry in {delay_seconds:.1}s");
+                            ("Forward queued for retry.".to_string(), true)
+                        } else {
+                            log::error!("forward retry could not be queued");
+                            (
+                                "Forward failed and the retry could not be queued.".to_string(),
+                                true,
+                            )
+                        }
                     }
                     Err(send::SendError::Permanent { message, .. }) => {
                         log::error!("forward failed permanently: {message}");
@@ -314,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retryable_forward_is_queued_and_keeps_the_prompt() {
+    async fn retryable_forward_is_queued_and_settles_the_prompt() {
         use teloxide::types::Seconds;
         let sender = MockSender::scripted(vec![Outcome::CopyErr], || {
             RequestError::RetryAfter(Seconds::from_seconds(7))
@@ -325,23 +340,45 @@ mod tests {
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
 
+        // The queued row carries the message ids itself, so it owns the
+        // forward from here and the prompt is closed with it. Keeping it live
+        // (the old behaviour) let a second Confirm copy the same messages to
+        // the channel twice, and let Skip answer "nothing was forwarded" while
+        // the row still delivered it.
         assert_eq!(
             sender.calls(),
-            vec!["copy_messages", "answer_callback_query"]
+            vec!["copy_messages", "delete_message", "answer_callback_query"]
         );
         assert_eq!(
             sender.answers(),
             vec![Some("Forward queued for retry.".to_string())]
         );
         assert_eq!(stores.queued_tasks().await, 1);
-        // The prompt is not settled: the queued retry still needs the record.
         assert!(
-            ctx.chat_store
+            !ctx.chat_store
                 .get(1)
                 .await
                 .edit_message
-                .contains_key(&PROMPT_ID)
+                .contains_key(&PROMPT_ID),
+            "the record must be dropped so the prompt cannot be used again"
         );
+
+        // A second tap finds no record: it cannot enqueue a duplicate copy.
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
+        assert_eq!(
+            sender.calls(),
+            vec![
+                "copy_messages",
+                "delete_message",
+                "answer_callback_query",
+                "answer_callback_query"
+            ]
+        );
+        assert_eq!(
+            sender.answers().last().map(|a| a.as_deref()),
+            Some(Some("Expired"))
+        );
+        assert_eq!(stores.queued_tasks().await, 1, "no second forward row");
     }
 
     #[tokio::test]

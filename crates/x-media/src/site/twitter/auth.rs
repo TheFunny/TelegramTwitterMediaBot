@@ -132,6 +132,9 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         log::warn!("twitter auth fetch {id}: HTTP {status}");
         return match status.as_u16() {
             404 | 410 => Err(FetchError::NotFound),
+            // A stale/refused `auth_token` is not a bad moment: retrying it
+            // three times only delays the report.
+            401 | 403 => Err(FetchError::Blocked),
             _ => Err(FetchError::Transient(format!(
                 "twitter auth status {status}"
             ))),

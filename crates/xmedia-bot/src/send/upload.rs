@@ -71,19 +71,7 @@ async fn download_to_temp(
     };
     let bytes = match x_media::site::download_media_limited(media_url, limit).await {
         Ok(bytes) => bytes,
-        Err(FetchError::Http(_)) => {
-            return Err(FallbackError::Retryable {
-                delay_seconds: retry_delay_seconds(0),
-            });
-        }
-        Err(FetchError::TooLarge) => {
-            return Err(FallbackError::MediaTooLarge);
-        }
-        Err(e) => {
-            return Err(FallbackError::Permanent {
-                message: format!("download failed: {e}"),
-            });
-        }
+        Err(e) => return Err(classify_download_error(e)),
     };
     let ext = sniff_ext(&bytes);
     let mut file = tempfile::Builder::new()
@@ -93,12 +81,35 @@ async fn download_to_temp(
             message: format!("temp file failed: {e}"),
         })?;
     use std::io::Write;
-    file.as_file_mut()
-        .write_all(&bytes)
-        .map_err(|e| FallbackError::Permanent {
-            message: format!("temp file write failed: {e}"),
-        })?;
+    // A write failure is resource exhaustion far more often than a broken temp
+    // dir (ENOSPC / EDQUOT), and that clears on its own — worth an attempt
+    // instead of dropping the post on the first try. Creating the file (above)
+    // stays permanent: a temp dir that cannot be created at all is a
+    // deployment fault that should fail loudly and immediately. `Retryable`
+    // carries no message, so the cause is logged here.
+    file.as_file_mut().write_all(&bytes).map_err(|e| {
+        log::error!("temp file write failed: {e}");
+        FallbackError::Retryable {
+            delay_seconds: retry_delay_seconds(0),
+        }
+    })?;
     Ok((file, bytes))
+}
+
+/// Which failure class a media download belongs to. Transport errors and
+/// server-side hiccups (429/5xx, see `download_media_limited`) are worth
+/// another attempt; a 4xx means the media itself is gone or refused, and a
+/// retry could only ask the same URL again.
+fn classify_download_error(err: FetchError) -> FallbackError {
+    match err {
+        FetchError::Http(_) | FetchError::Transient(_) => FallbackError::Retryable {
+            delay_seconds: retry_delay_seconds(0),
+        },
+        FetchError::TooLarge => FallbackError::MediaTooLarge,
+        e => FallbackError::Permanent {
+            message: format!("download failed: {e}"),
+        },
+    }
 }
 
 /// Builds the media group item from an uploaded file.
@@ -341,5 +352,33 @@ pub(super) async fn send_batch_via_upload(
     match result {
         Ok(messages) => Ok(messages),
         Err(e) => Err(classify_to_send_error(&e, task, "upload failed")),
+    }
+}
+
+#[cfg(test)]
+mod download_class_tests {
+    use super::*;
+
+    #[test]
+    fn download_errors_split_by_whether_a_retry_can_help() {
+        // Transport failure and a server-side hiccup: try again.
+        assert!(matches!(
+            classify_download_error(FetchError::Transient("media status 503".into())),
+            FallbackError::Retryable { .. }
+        ));
+        // The media is gone / the host refuses us: a retry repeats the 4xx.
+        assert!(matches!(
+            classify_download_error(FetchError::NotFound),
+            FallbackError::Permanent { .. }
+        ));
+        assert!(matches!(
+            classify_download_error(FetchError::Blocked),
+            FallbackError::Permanent { .. }
+        ));
+        // Over the cap: degrade to the smaller URL, never retry.
+        assert!(matches!(
+            classify_download_error(FetchError::TooLarge),
+            FallbackError::MediaTooLarge
+        ));
     }
 }

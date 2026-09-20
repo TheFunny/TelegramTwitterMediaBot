@@ -271,7 +271,7 @@ pub fn retry_delay_seconds(attempts: u32) -> f64 {
 /// these errors are handled by the download-and-reupload fallback, NOT by a
 /// queue retry (resending the URL cannot succeed).
 pub fn is_media_fetch_failure(e: &ApiError) -> bool {
-    const MARKERS: [&str; 6] = [
+    const MARKERS: [&str; 7] = [
         "webpage_media_empty",
         "media_empty",
         "empty_web_media",
@@ -280,6 +280,11 @@ pub fn is_media_fetch_failure(e: &ApiError) -> bool {
         // Oversized photos (width + height > 10000 px) are rejected on URL
         // sends too; route them to the download-and-resize fallback.
         "photo_invalid_dimensions",
+        // Telegram refused to fetch the URL it was handed. Single-media URL
+        // sends answer with this one (the media-group verbs use the
+        // `webpage_*`/`media_empty` markers above), and it is exactly the
+        // case the download-and-reupload fallback exists for.
+        "failed to get http url content",
     ];
     let description = e.to_string().to_lowercase();
     MARKERS.iter().any(|marker| description.contains(marker))
@@ -320,16 +325,52 @@ pub fn classify_request_error(e: &RequestError) -> Classification {
         RequestError::Network(_) => Classification::Retryable {
             delay_seconds: retry_delay_seconds(0),
         },
+        // A 5xx from the API — or from a proxy in front of it — is transient.
+        // teloxide only sleeps 10s on a server error and then parses whatever
+        // body came back, so by the time we see the error the HTTP status is
+        // gone: a JSON 5xx body arrives as an unknown description, an HTML
+        // error page as `InvalidJson`. Both used to be Permanent, which
+        // dead-lettered a post over a Telegram-side blip.
+        RequestError::Api(api) if is_server_error_text(&api.to_string()) => {
+            Classification::Retryable {
+                delay_seconds: retry_delay_seconds(0),
+            }
+        }
         RequestError::Api(api) if is_media_fetch_failure(api) => Classification::MediaFetchFailure,
         RequestError::Api(api) => Classification::Permanent {
             message: api.to_string(),
         },
+        // An unparsable body can only come from something that is not the Bot
+        // API (which always answers JSON): a 5xx/error page from an
+        // intermediary, cut off mid-response. A JSON body that merely does not
+        // match the expected type cannot be fixed by retrying, so that case
+        // stays permanent.
+        RequestError::InvalidJson { raw, .. } if !raw.trim_start().starts_with('{') => {
+            Classification::Retryable {
+                delay_seconds: retry_delay_seconds(0),
+            }
+        }
         RequestError::MigrateToChatId(_)
         | RequestError::InvalidJson { .. }
         | RequestError::Io(_) => Classification::Permanent {
             message: e.to_string(),
         },
     }
+}
+
+/// Descriptions a 5xx carries when its body *is* JSON (teloxide keeps only the
+/// description text, never the status code). Matched like the media-fetch
+/// markers below; anything unmatched stays permanent, so a new permanent API
+/// error is not retried just because it is unfamiliar.
+fn is_server_error_text(description: &str) -> bool {
+    const MARKERS: [&str; 4] = [
+        "server error",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+    ];
+    let description = description.to_lowercase();
+    MARKERS.iter().any(|marker| description.contains(marker))
 }
 
 /// Task boxed to keep the error size within `result_large_err` limits.
@@ -919,6 +960,15 @@ mod tests {
     }
 
     #[test]
+    fn is_media_fetch_failure_matches_the_single_media_url_description() {
+        // `sendPhoto`/`sendAnimation`-style URL sends answer with this one
+        // instead of the `webpage_*` markers; without it the URL send failed
+        // permanently instead of going through the reupload fallback.
+        let api = ApiError::Unknown("Bad Request: failed to get HTTP URL content".into());
+        assert!(is_media_fetch_failure(&api));
+    }
+
+    #[test]
     fn is_size_error_matches_known_errors() {
         // 413 upload cap.
         let e = ApiError::RequestEntityTooLarge;
@@ -978,6 +1028,39 @@ mod tests {
         assert!(matches!(
             classify_request_error(&e),
             Classification::MediaFetchFailure
+        ));
+        // A server-error description (teloxide drops the HTTP status, so a
+        // JSON 5xx arrives as an unknown description) -> Retryable. Without
+        // this a Telegram 502 dead-lettered the post.
+        let e = RequestError::Api(ApiError::Unknown("Internal Server Error".into()));
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Retryable { .. }
+        ));
+        // An HTML/proxy error page in place of the API's JSON -> Retryable.
+        let e = RequestError::InvalidJson {
+            source: std::sync::Arc::new(
+                serde_json::from_str::<serde_json::Value>("<html>502</html>").unwrap_err(),
+            ),
+            raw: "<html>502 Bad Gateway</html>".into(),
+        };
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Retryable { .. }
+        ));
+        // A JSON body of the wrong shape is a type mismatch, not a transport
+        // problem: still permanent.
+        // (The `source` is only ever rendered, so an unrelated parse error
+        // stands in for the shape mismatch; `raw` is what the classifier reads.)
+        let e = RequestError::InvalidJson {
+            source: std::sync::Arc::new(
+                serde_json::from_str::<serde_json::Value>("x").unwrap_err(),
+            ),
+            raw: "{\"ok\":true,\"result\":true}".into(),
+        };
+        assert!(matches!(
+            classify_request_error(&e),
+            Classification::Permanent { .. }
         ));
         // MigrateToChatId -> Permanent
         let e = RequestError::MigrateToChatId(ChatId(123));

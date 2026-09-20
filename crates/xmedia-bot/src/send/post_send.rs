@@ -277,7 +277,20 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                     })
                     .await;
             }
-            Err(e) => log::error!("failed to send edit prompt: {e}"),
+            Err(e) => {
+                log::error!("failed to send edit prompt: {e}");
+                // Nothing is forwarded until the prompt is confirmed, so a
+                // prompt that never arrived means this post is never forwarded.
+                // Tell the chat instead of letting it wait for a prompt that
+                // will not come.
+                notify_failure(
+                    ctx.sender,
+                    notify_chat_id,
+                    notify_message_id,
+                    "Could not open the edit-before-forward prompt — nothing was forwarded.",
+                )
+                .await;
+            }
         }
         return;
     }
@@ -301,7 +314,17 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                 delay_seconds,
                 task,
             }) => {
-                enqueue_retry(ctx.task_queue, *task, delay_seconds).await;
+                // The forward is already committed from the user's side; if it
+                // cannot be queued, say so rather than going quiet.
+                if !enqueue_retry(ctx.task_queue, &task, delay_seconds).await {
+                    notify_failure(
+                        ctx.sender,
+                        notify_chat_id,
+                        notify_message_id,
+                        &failure_text(Some(&task), "retry could not be queued"),
+                    )
+                    .await;
+                }
             }
             Err(SendError::Permanent { message, .. }) => {
                 notify_failure(
@@ -316,16 +339,24 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
     }
 }
 
-/// Enqueues a task for a later attempt (retry / forward resume). When the
-/// enqueue itself fails the task can never be sent again, so its keep-alive
-/// temp media is released instead of leaking until process exit.
-pub(crate) async fn enqueue_retry(queue: &PersistentTaskQueue, task: Task, delay_seconds: f64) {
-    let payload = serde_json::to_value(&task).expect("task serializes");
+/// Enqueues a task for a later attempt (retry / forward resume). Returns
+/// whether the retry is actually persisted: when the enqueue itself fails the
+/// task can never run again, so its keep-alive temp media is released instead
+/// of leaking until process exit — and the caller must not tell the user a
+/// retry is coming (nothing would ever deliver it).
+pub(crate) async fn enqueue_retry(
+    queue: &PersistentTaskQueue,
+    task: &Task,
+    delay_seconds: f64,
+) -> bool {
+    let payload = serde_json::to_value(task).expect("task serializes");
     let run_after = now_f64() + delay_seconds;
     if let Err(e) = queue.enqueue(payload, run_after).await {
         log::error!("failed to enqueue retry: {e}");
-        release_keep_alive(&task);
+        release_keep_alive(task);
+        return false;
     }
+    true
 }
 
 /// Queue entry point: parses the stored task and dispatches.

@@ -77,6 +77,8 @@ pub async fn fetch(note_id: &str) -> Result<model::Note, FetchError> {
     if !status.is_success() {
         return Err(match status.as_u16() {
             400 => not_found_or_invalid(response).await,
+            // A refusal or an auth demand is not a bad moment.
+            401 | 403 => FetchError::Blocked,
             _ => FetchError::Transient(format!("misskey status {status}")),
         });
     }
