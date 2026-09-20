@@ -754,7 +754,7 @@ mod tests {
     use super::post_send::build_edit_markup;
     use super::upload::sniff_ext;
     use super::*;
-    use crate::ctx::test_support::TestStores;
+    use crate::ctx::test_support::{TestStores, cached_photo};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -1561,20 +1561,7 @@ mod tests {
             forward_channel_id: None,
             notify_chat_id: None,
             notify_message_id: None,
-            cache_data: Some(CachedPost {
-                url: "https://x.com/u/status/1".into(),
-                caption: "cap".into(),
-                title: "t".into(),
-                content: "c".into(),
-                author: "a".into(),
-                author_url: "au".into(),
-                tags: String::new(),
-                sensitive: false,
-                media: vec![CachedMedia {
-                    kind: CachedMediaKind::Photo,
-                    file_id: "AgAC-file-id".into(),
-                }],
-            }),
+            cache_data: Some(cached_photo()),
         }
     }
 
@@ -1584,10 +1571,7 @@ mod tests {
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
         let task = cached_sequence_task();
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_sequence_cache_data())
-            .await;
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
 
         settle_task(&ctx, &task, Settled::Sent).await;
 
@@ -1607,10 +1591,7 @@ mod tests {
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
         let task = cached_sequence_task();
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_sequence_cache_data())
-            .await;
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
 
         settle_task(&ctx, &task, Settled::Failed).await;
 
@@ -1622,15 +1603,5 @@ mod tests {
                 .is_none(),
             "a permanently failed cached send must drop the entry"
         );
-    }
-
-    fn cached_sequence_cache_data() -> CachedPost {
-        match cached_sequence_task() {
-            Task::SendMediaSequence {
-                cache_data: Some(post),
-                ..
-            } => post,
-            other => panic!("expected a cached sequence task, got {other:?}"),
-        }
     }
 }

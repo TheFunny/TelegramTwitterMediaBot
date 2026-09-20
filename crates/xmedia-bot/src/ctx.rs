@@ -49,7 +49,66 @@ pub static CONTEXT: LazyLock<AppContext<'static>> =
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
+    use crate::state::EditMessage;
     use std::sync::Arc;
+    use teloxide::{ApiError, RequestError};
+
+    /// The edit-before-forward prompt's message id, and the message the prompt
+    /// refers to (the one whose caption a reply swaps).
+    pub(crate) const PROMPT_ID: i64 = 7;
+    pub(crate) const FORWARDED_ID: i64 = 9;
+
+    /// A Telegram API error, for the tests that script a failure.
+    pub(crate) fn api_error(message: &str) -> RequestError {
+        RequestError::Api(ApiError::Unknown(message.to_string()))
+    }
+
+    /// The cached post every test that touches the link cache starts from: one
+    /// photo with a Telegram file id at the canonical URL (key `twitter:1`).
+    /// Tests that need another field mutate the returned value.
+    pub(crate) fn cached_photo() -> CachedPost {
+        CachedPost {
+            url: "https://x.com/u/status/1".into(),
+            caption: "cap".into(),
+            title: "t".into(),
+            content: "c".into(),
+            author: "a".into(),
+            author_url: "au".into(),
+            tags: String::new(),
+            sensitive: false,
+            media: vec![CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "AgAC-file-id".into(),
+            }],
+        }
+    }
+
+    /// Seeds the live prompt a post-send leaves behind in chat 1: the chat's
+    /// template, a bound forward channel (the prompt's "forward" button
+    /// branches on it) and the record for [`PROMPT_ID`] pointing at
+    /// [`FORWARDED_ID`]. `template` is the record's template — what a reply
+    /// swaps the caption through, `""` for none — and `created_at` backdates
+    /// the record for the expiry cases.
+    pub(crate) async fn seed_prompt(ctx: &AppContext<'_>, template: &str, created_at: i64) {
+        ctx.chat_store
+            .update(1, |data| {
+                data.forward_channel_id = Some(2);
+                data.template
+                    .insert("tpl".to_string(), "<b>[]</b>".to_string());
+                data.edit_message.insert(
+                    PROMPT_ID,
+                    EditMessage {
+                        url: "https://x.com/u/status/1".into(),
+                        chat_id: 1,
+                        forward_message_ids: vec![FORWARDED_ID],
+                        template: template.to_string(),
+                        created_at,
+                    },
+                );
+            })
+            .await;
+    }
 
     pub(crate) struct TestStores {
         _dir: tempfile::TempDir,

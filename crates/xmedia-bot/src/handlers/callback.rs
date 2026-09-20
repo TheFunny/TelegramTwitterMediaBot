@@ -204,52 +204,22 @@ async fn handle_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::TestStores;
+    use crate::ctx::test_support::{PROMPT_ID, TestStores, api_error, seed_prompt};
     use crate::media_sender::test_support::{MockSender, Outcome};
-    use crate::state::EditMessage;
-    use teloxide::ApiError;
 
-    /// The edit-before-forward prompt's message id in these tests.
-    const PROMPT_ID: i64 = 7;
-    /// The message the prompt refers to (the one whose caption is swapped).
-    const FORWARDED_ID: i64 = 9;
-
-    fn api_error() -> RequestError {
-        RequestError::Api(ApiError::Unknown("Bad Request: chat not found".into()))
-    }
+    /// The Telegram wording the mocks answer with: a chat the bot cannot reach.
+    const API_ERROR: &str = "Bad Request: chat not found";
 
     fn callback_id() -> CallbackQueryId {
         CallbackQueryId("cb-1".to_string())
     }
 
-    /// Seeds a live prompt record plus a forward channel and a template;
-    /// `created_at` backdates the record for the expiry cases.
-    async fn seed_prompt(ctx: &AppContext<'_>, created_at: i64) {
-        ctx.chat_store
-            .update(1, |data| {
-                data.forward_channel_id = Some(2);
-                data.template
-                    .insert("tpl".to_string(), "<b>[]</b>".to_string());
-                data.edit_message.insert(
-                    PROMPT_ID,
-                    EditMessage {
-                        url: "https://x.com/u/status/1".into(),
-                        chat_id: 1,
-                        forward_message_ids: vec![FORWARDED_ID],
-                        template: String::new(),
-                        created_at,
-                    },
-                );
-            })
-            .await;
-    }
-
     #[tokio::test]
     async fn template_button_swaps_the_caption_and_records_the_choice() {
-        let sender = MockSender::scripted(vec![Outcome::EditOk], api_error);
+        let sender = MockSender::scripted(vec![Outcome::EditOk], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, crate::db::unix_now()).await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "template|tpl").await;
 
@@ -266,10 +236,10 @@ mod tests {
 
     #[tokio::test]
     async fn forward_button_copies_then_clears_the_prompt() {
-        let sender = MockSender::scripted(vec![Outcome::CopyOk], api_error);
+        let sender = MockSender::scripted(vec![Outcome::CopyOk], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, crate::db::unix_now()).await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
 
@@ -288,10 +258,10 @@ mod tests {
     async fn skip_drops_the_prompt_without_forwarding() {
         // "skip" needs no forward channel and no scripted outcomes: it deletes
         // the prompt and drops the record, so no forward can ever happen.
-        let sender = MockSender::scripted(vec![], api_error);
+        let sender = MockSender::scripted(vec![], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, crate::db::unix_now()).await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "skip").await;
 
@@ -311,10 +281,10 @@ mod tests {
 
     #[tokio::test]
     async fn forward_without_a_channel_is_reported() {
-        let sender = MockSender::scripted(vec![], api_error);
+        let sender = MockSender::scripted(vec![], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, crate::db::unix_now()).await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
         ctx.chat_store
             .update(1, |data| data.forward_channel_id = None)
             .await;
@@ -336,7 +306,7 @@ mod tests {
         });
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, crate::db::unix_now()).await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
 
@@ -383,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_and_expired_prompts_answer_expired() {
-        let sender = MockSender::scripted(vec![], api_error);
+        let sender = MockSender::scripted(vec![], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
 
@@ -393,7 +363,7 @@ mod tests {
 
         // A record past its TTL (nothing swept it yet) is dropped on use.
         let stale = crate::db::unix_now() - ctx.config.edit_message_ttl.as_secs() as i64 - 1;
-        seed_prompt(&ctx, stale).await;
+        seed_prompt(&ctx, "", stale).await;
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
         assert_eq!(
             sender.answers(),

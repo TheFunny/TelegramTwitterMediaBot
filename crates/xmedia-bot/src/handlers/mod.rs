@@ -224,45 +224,19 @@ fn is_group(kind: &ChatKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::TestStores;
+    use crate::ctx::test_support::{PROMPT_ID, TestStores, api_error, seed_prompt};
     use crate::media_sender::test_support::{MockSender, Outcome};
-    use crate::state::EditMessage;
-    use teloxide::ApiError;
 
-    const PROMPT_ID: i64 = 7;
-    const FORWARDED_ID: i64 = 9;
-
-    fn api_error() -> RequestError {
-        RequestError::Api(ApiError::Unknown("Bad Request: message not found".into()))
-    }
-
-    /// Seeds a prompt record; `template` names the chat template used for it
-    /// (empty = none, the caption gets the bare link).
-    async fn seed_prompt(ctx: &AppContext<'_>, template: &str) {
-        ctx.chat_store
-            .update(1, |data| {
-                data.template
-                    .insert("tpl".to_string(), "<b>[]</b>".to_string());
-                data.edit_message.insert(
-                    PROMPT_ID,
-                    EditMessage {
-                        url: "https://x.com/u/status/1".into(),
-                        chat_id: 1,
-                        forward_message_ids: vec![FORWARDED_ID],
-                        template: template.to_string(),
-                        created_at: crate::db::unix_now(),
-                    },
-                );
-            })
-            .await;
-    }
+    /// The Telegram wording the mocks answer with: a message the bot cannot
+    /// edit (the prompt was deleted).
+    const API_ERROR: &str = "Bad Request: message not found";
 
     #[tokio::test]
     async fn reply_to_a_prompt_swaps_the_caption_through_its_template() {
-        let sender = MockSender::scripted(vec![Outcome::EditOk], api_error);
+        let sender = MockSender::scripted(vec![Outcome::EditOk], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, "tpl").await;
+        seed_prompt(&ctx, "tpl", crate::db::unix_now()).await;
 
         let consumed = edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await;
 
@@ -275,10 +249,10 @@ mod tests {
 
     #[tokio::test]
     async fn reply_text_and_url_are_escaped_into_the_caption() {
-        let sender = MockSender::scripted(vec![Outcome::EditOk], api_error);
+        let sender = MockSender::scripted(vec![Outcome::EditOk], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, "").await;
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
 
         edit_message_handler(&ctx, 1, PROMPT_ID, "<script>alert(1)</script>").await;
 
@@ -291,10 +265,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_caption_swap_still_consumes_the_reply() {
-        let sender = MockSender::scripted(vec![Outcome::EditErr], api_error);
+        let sender = MockSender::scripted(vec![Outcome::EditErr], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
-        seed_prompt(&ctx, "tpl").await;
+        seed_prompt(&ctx, "tpl", crate::db::unix_now()).await;
 
         // The edit failed (message deleted etc.); the reply must still be
         // swallowed instead of being treated as a link to fetch.
@@ -304,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn reply_to_an_unrelated_message_is_not_consumed() {
-        let sender = MockSender::scripted(vec![], api_error);
+        let sender = MockSender::scripted(vec![], || api_error(API_ERROR));
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
 

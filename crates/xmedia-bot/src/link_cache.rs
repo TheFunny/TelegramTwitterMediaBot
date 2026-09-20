@@ -180,23 +180,7 @@ impl LinkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn entry() -> CachedPost {
-        CachedPost {
-            url: "https://x.com/u/status/1".into(),
-            caption: "cap".into(),
-            title: "t".into(),
-            content: "c".into(),
-            author: "a".into(),
-            author_url: "au".into(),
-            tags: "".into(),
-            sensitive: true,
-            media: vec![CachedMedia {
-                kind: CachedMediaKind::Photo,
-                file_id: "AgAC...".into(),
-            }],
-        }
-    }
+    use crate::ctx::test_support::cached_photo;
 
     /// A payload written before the title/content split has no `content`
     /// field. It must still read back — the cache deletes what it cannot
@@ -247,12 +231,12 @@ mod tests {
         let cache = LinkCache::new(
             crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
         );
-        cache.put("twitter:1", &entry()).await;
+        cache.put("twitter:1", &cached_photo()).await;
         let got = cache.get("twitter:1", Duration::from_secs(3600)).await;
         assert!(got.is_some());
         let got = got.unwrap();
         assert_eq!(got.url, "https://x.com/u/status/1");
-        assert_eq!(got.media[0].file_id, "AgAC...");
+        assert_eq!(got.media[0].file_id, "AgAC-file-id");
     }
 
     #[tokio::test]
@@ -261,7 +245,7 @@ mod tests {
         let cache = LinkCache::new(
             crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
         );
-        cache.put("twitter:1", &entry()).await;
+        cache.put("twitter:1", &cached_photo()).await;
         // Force the row into the past so a 1s TTL expires it.
         {
             let conn = rusqlite::Connection::open(dir.path().join("c.db")).unwrap();
@@ -314,8 +298,8 @@ mod tests {
         let cache = LinkCache::new(
             crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
         );
-        cache.put("twitter:1", &entry()).await;
-        cache.put("pixiv:2", &entry()).await;
+        cache.put("twitter:1", &cached_photo()).await;
+        cache.put("pixiv:2", &cached_photo()).await;
         cache.remove("twitter:1").await;
         assert!(
             cache
@@ -349,8 +333,8 @@ mod tests {
         let cache = LinkCache::new(
             crate::db::open_store(dir.path().join("c.db").to_str().unwrap()).unwrap(),
         );
-        cache.put("twitter:1", &entry()).await;
-        cache.put("pixiv:2", &entry()).await;
+        cache.put("twitter:1", &cached_photo()).await;
+        cache.put("pixiv:2", &cached_photo()).await;
         // By key: only the matching row is removed.
         assert_eq!(cache.clear(Some("twitter:1")).await, 1);
         assert!(

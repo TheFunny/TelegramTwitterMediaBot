@@ -622,8 +622,7 @@ async fn url_media_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::TestStores;
-    use crate::link_cache::CachedMedia;
+    use crate::ctx::test_support::{TestStores, cached_photo};
     use crate::media_sender::test_support::{MockSender, Outcome};
     use std::time::Duration;
     use teloxide::{ApiError, RequestError};
@@ -634,23 +633,6 @@ mod tests {
         ))
     }
 
-    fn cached_photo_entry() -> CachedPost {
-        CachedPost {
-            url: "https://x.com/u/status/1".into(),
-            caption: "cap".into(),
-            title: "t".into(),
-            content: "c".into(),
-            author: "a".into(),
-            author_url: "au".into(),
-            tags: "".into(),
-            sensitive: false,
-            media: vec![CachedMedia {
-                kind: CachedMediaKind::Photo,
-                file_id: "file-1".into(),
-            }],
-        }
-    }
-
     #[tokio::test]
     async fn cache_hit_sends_file_ids_and_invalidates_on_permanent_failure() {
         let stores = TestStores::new();
@@ -659,10 +641,7 @@ mod tests {
             permanent_error,
         );
         let ctx = stores.ctx(&sender);
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_photo_entry())
-            .await;
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
 
         url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
 
@@ -699,7 +678,7 @@ mod tests {
         ] {
             let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
             let ctx = stores.ctx(&sender);
-            let mut entry = cached_photo_entry();
+            let mut entry = cached_photo();
             entry.caption = format!("{prefix}{text}");
             entry.title = String::new();
             entry.content = text.into();
@@ -748,10 +727,7 @@ mod tests {
         let sender =
             MockSender::scripted(vec![Outcome::GroupOk, Outcome::MessageOk], permanent_error);
         let ctx = stores.ctx(&sender);
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_photo_entry())
-            .await;
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
         seed_post_send_settings(&ctx).await;
 
         url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
@@ -771,10 +747,7 @@ mod tests {
         // prompt (send_message) would panic with "unexpected outcome".
         let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
         let ctx = stores.ctx(&sender);
-        stores
-            .link_cache()
-            .put("twitter:1", &cached_photo_entry())
-            .await;
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
         seed_post_send_settings(&ctx).await;
 
         url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::Suppressed).await;
