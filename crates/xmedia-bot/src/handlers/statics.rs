@@ -23,8 +23,9 @@ static DB: LazyLock<Arc<db::DbPool>> = LazyLock::new(|| {
 /// create parent dirs, so the old hardcoded `data/task_queue.db` failed with
 /// a confusing error when started from a directory without `data/`, and a
 /// CWD-relative path is a footgun for systemd / cron deployments — `DATA_DIR`
-/// lets them pin the state anywhere.
-fn db_path() -> std::path::PathBuf {
+/// lets them pin the state anywhere. Also read by the startup config line, so
+/// the log says where the state actually landed.
+pub(crate) fn db_path() -> std::path::PathBuf {
     let dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let dir_path = std::path::Path::new(&dir);
     std::fs::create_dir_all(dir_path).expect("failed to create data directory");

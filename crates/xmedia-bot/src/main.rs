@@ -67,11 +67,27 @@ async fn main() {
         log::warn!("failed to register commands: {e}");
     }
 
+    // The effective tunables, so an operator can see what the process actually
+    // resolved (a mistyped DATA_DIR or a forgotten TTL override is otherwise
+    // invisible until it bites). The proxy URL is never printed — it may embed
+    // credentials — and admin ids are chat identifiers, so they stay at debug.
+    let quote_chars = match CONFIG.caption_quote_text_chars {
+        0 => "off".to_string(),
+        n => format!("{n} chars"),
+    };
     log::info!(
-        "config: {} admin(s), edit-message TTL {}s",
+        "config: {} admin(s), state {}, edit-message TTL {}s, link cache TTL {}s, caption quote {quote_chars}, proxy={}",
         CONFIG.admin_ids.len(),
-        CONFIG.edit_message_ttl.as_secs()
+        crate::handlers::db_path().display(),
+        CONFIG.edit_message_ttl.as_secs(),
+        CONFIG.link_cache_ttl.as_secs(),
+        if std::env::var("TELOXIDE_PROXY").is_ok() {
+            "yes"
+        } else {
+            "no"
+        }
     );
+    log::debug!("config: admin ids {:?}", CONFIG.admin_ids);
 
     // Queue worker: handles typed tasks, dead-letters failed sends to the
     // task's chat. Both closures use the shared context (the queue requires
