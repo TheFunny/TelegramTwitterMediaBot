@@ -27,7 +27,7 @@ export PIXIV_REFRESH_TOKEN=<token>
 cargo run -p xmedia-bot
 ```
 
-Docker deployment (see `docker-compose.yml.example`):
+Docker deployment (`docker-compose.yml` in this repo is the orchestration; instance values live in the `.env` next to it, and compose substitutes every `${VAR}` from there):
 
 ```bash
 docker build -t tgxmb .
@@ -42,11 +42,11 @@ Bilibili dynamics are fetched anonymously by default (no login; the bot fetches 
 
 ### Webhook deployment (needs a reverse proxy)
 
-`docker-compose.yml.example` ships an [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion) reverse-proxy orchestration. Pick one deployment shape:
+`docker-compose.yml` ships an [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion) reverse-proxy orchestration. The committed file needs **no editing**: domain, tokens and admins are instance values and live in the `.env` beside it (compose reads and substitutes `${VAR}` at startup). Pick one deployment shape:
 
 **With a domain**
 1. Point a DNS A record at the server
-2. In compose set `VIRTUAL_HOST` and `WEBHOOK_URL` to the domain, and uncomment `ACME_HOST` (set it to the domain)
+2. In `.env` set `VIRTUAL_HOST` and `WEBHOOK_URL` to the domain; to have acme-companion issue the certificate, also uncomment the `ACME_HOST` line in `docker-compose.yml` and set `ACME_HOST` in `.env`
 3. acme-companion issues and renews certificates automatically — nothing manual
 
 **IP only**
@@ -74,7 +74,7 @@ Let's Encrypt can issue certificates for public IPs (available since 2026, valid
      --key-file /acme.sh/<SERVER_IP>.key \
      --reloadcmd "curl --unix-socket /var/run/docker.sock -X POST http://localhost/containers/nginx-proxy/kill?signal=HUP"
    ```
-3. In compose set `VIRTUAL_HOST: '<SERVER_IP>'` and `WEBHOOK_URL: 'https://<SERVER_IP>/'`; no `WEBHOOK_CERT` needed. Renewal is handled by the acme.sh daemon (`--days 3` = renew every 3 days, buffer against the 7-day validity), and a successful renewal HUP-notifies nginx-proxy to load the new certificate.
+3. In `.env` set `VIRTUAL_HOST=<SERVER_IP>` and `WEBHOOK_URL=https://<SERVER_IP>/`; no `WEBHOOK_CERT` needed. Renewal is handled by the acme.sh daemon (`--days 3` = renew every 3 days, buffer against the 7-day validity), and a successful renewal HUP-notifies nginx-proxy to load the new certificate.
 
    Limitations: certificate validity ~7 days; only http-01/tls-alpn-01 validation (port 80 must be publicly reachable); no DNS-01, private IPs or IP ranges; at most 5 certificates per 168 hours for the same IP set. It is recommended to trial-issue with `--server letsencrypt_test` first, then switch to the production server.
 
@@ -94,9 +94,9 @@ Telegram only accepts ports 443/80/88/8443.
 | `CAPTION_QUOTE_TEXT_CHARS` | **The text part** of the caption (the joined `{title}` + `{content}`) is wrapped in a collapsible blockquote once it reaches this many characters, default 200; `0` disables |
 | `DATA_DIR` | Data directory (where the SQLite `task_queue.db` lives), default `data` (relative to the working directory, created automatically) |
 | `RUST_LOG` | Log level, default `info,hyper_util=warn,reqwest=warn` (an unset variable no longer silences the log). Recipes: `info,xmedia_bot=debug,x_media=debug` (app detail, no dependency noise) / `debug,hyper_util=off` (everything) / `trace` (also prints full links and message text — **user data**) |
-| `TELOXIDE_PROXY` | HTTP proxy (e.g. `http://127.0.0.1:10808`); applies to both the Telegram Bot API and site fetches — required on restricted networks (e.g. behind the GFW) |
+| `TELOXIDE_PROXY` | HTTP proxy (e.g. `http://127.0.0.1:10808`); applies to both the Telegram Bot API and site fetches — required on restricted networks (e.g. behind the GFW). **Never leave it blank** (`TELOXIDE_PROXY=`) — teloxide panics on a value it cannot parse; omit the line when unused. `docker-compose.yml` deliberately does not pass it to the container (a `127.0.0.1` proxy there is the container itself): add the line and use `host.docker.internal:<port>` when a deployment needs one |
 | `LOCAL_USER_ID` | UID the container runs as, default 9001 |
-| `VIRTUAL_HOST` | Public domain or IP; nginx-proxy routes by this |
+| `VIRTUAL_HOST` | Public domain or IP; nginx-proxy routes by this (set it in `.env`, which compose reads) |
 | `VIRTUAL_PORT` | Port the bot listens on inside the container; nginx-proxy's forwarding target |
 | `ACME_HOST` | Domain deployment: when set to the domain, acme-companion issues/renews certificates automatically |
 | `DEFAULT_HOST` | nginx-proxy routes requests with unknown Host headers to this vhost (needed for IP access) |

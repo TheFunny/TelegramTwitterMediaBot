@@ -1,0 +1,108 @@
+# Deployment reference for the Docker Hub image. Instance values (token, admins,
+# site credentials, domain) live in `.env` next to this file — `docker compose`
+# substitutes every `${VAR}` from it automatically — so this file stays in the
+# repository unmodified. A variable that is not listed here is not passed into
+# the container at all.
+#
+# JSON-file logs grow without limit by default: a long-running bot (and the
+# proxy in front of it) will fill the disk. One cap, applied to every service
+# below via the anchor.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:1.11.6-alpine
+    restart: always
+    environment:
+      # Routes requests with an unknown Host (i.e. plain IP access) here; set
+      # DEFAULT_HOST in .env to use it.
+      DEFAULT_HOST: '${DEFAULT_HOST:-}'
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs:ro
+      - html:/usr/share/nginx/html:ro
+    networks: [proxy]
+    labels:
+      - 'com.github.nginx-proxy.nginx'
+    container_name: nginx-proxy
+    logging: *default-logging
+
+  acme-companion:
+    image: nginxproxy/acme-companion
+    restart: always
+    environment:
+      DEFAULT_EMAIL: '${DEFAULT_EMAIL:-}'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - certs:/etc/nginx/certs:rw
+      - html:/usr/share/nginx/html:rw
+      - acme:/etc/acme.sh
+    networks: [proxy]
+    container_name: acme-companion
+    depends_on:
+      - nginx-proxy
+    logging: *default-logging
+
+  tgxmb:
+    image: yoursfunny/telegram-twitter-media-bot:latest
+    restart: always
+    environment:
+      # From .env (the instance's own values; see the env table in README.md).
+      TELOXIDE_TOKEN: '${TELOXIDE_TOKEN:-}'
+      BOT_ADMIN: '${BOT_ADMIN:-}'
+      PIXIV_REFRESH_TOKEN: '${PIXIV_REFRESH_TOKEN:-}'
+      TWITTER_AUTH_TOKEN: '${TWITTER_AUTH_TOKEN:-}'
+      BILIBILI_COOKIE: '${BILIBILI_COOKIE:-}'
+      VIRTUAL_HOST: '${VIRTUAL_HOST:-}'
+      WEBHOOK_URL: '${WEBHOOK_URL:-}'
+      WEBHOOK_SECRET_TOKEN: '${WEBHOOK_SECRET_TOKEN:-}'
+      # Defaults, listed so they are discoverable; override in .env when needed.
+      LOCAL_USER_ID: '${LOCAL_USER_ID:-1000}'
+      RUST_LOG: '${RUST_LOG:-info}'
+      EDIT_MESSAGE_TTL_SECONDS: '${EDIT_MESSAGE_TTL_SECONDS:-86400}'
+      LINK_CACHE_TTL_SECONDS: '${LINK_CACHE_TTL_SECONDS:-604800}'
+      CAPTION_QUOTE_TEXT_CHARS: '${CAPTION_QUOTE_TEXT_CHARS:-200}'
+      VIRTUAL_PORT: '${VIRTUAL_PORT:-8443}'
+      WEBHOOK: '${WEBHOOK:-true}'
+      WEBHOOK_LISTEN: '${WEBHOOK_LISTEN:-0.0.0.0}'
+      WEBHOOK_PORT: '${WEBHOOK_PORT:-8443}'
+      # For a certificate on a bare IP: uncomment and set ACME_HOST in .env.
+      # ACME_HOST: '${ACME_HOST:-}'
+      #
+      # Not listed on purpose: TELOXIDE_PROXY. Docker Desktop reaches a host
+      # proxy through host.docker.internal (a loopback address inside the
+      # container is the container itself), and teloxide panics on an *empty*
+      # value, so add the line deliberately when this deployment needs one:
+      #   TELOXIDE_PROXY: '${TELOXIDE_PROXY}'
+    volumes:
+      - ./data:/app/data
+    networks: [proxy]
+    depends_on:
+      - nginx-proxy
+    container_name: tgxmb
+    logging: *default-logging
+    # Webhook mode only (in polling mode there is no listener, so drop this
+    # block or set WEBHOOK=true): the bot listens on WEBHOOK_PORT; nginx-proxy
+    # shows 502s while this is down, so surface it to the orchestrator.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/${WEBHOOK_PORT:-8443}'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  certs:
+  html:
+  acme:
+
+networks:
+  proxy:
+    name: proxy

@@ -27,7 +27,7 @@ export PIXIV_REFRESH_TOKEN=<token>
 cargo run -p xmedia-bot
 ```
 
-Docker 部署（参考 `docker-compose.yml.example`）：
+Docker 部署（编排见仓库里的 `docker-compose.yml`，实例相关的值写在同目录的 `.env`，compose 会自动替换其中的 `${VAR}`）：
 
 ```bash
 docker build -t tgxmb .
@@ -42,11 +42,11 @@ Bilibili 动态默认匿名抓取（无需登录，bot 会自动从 B 站的匿�
 
 ### Webhook 部署（需要反向代理）
 
-`docker-compose.yml.example` 内置了 [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion) 反向代理编排，按部署环境二选一：
+`docker-compose.yml` 内置了 [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion) 反向代理编排，仓库里的这份文件**不需要改动**：域名、令牌、管理员等实例相关的值都写在同目录的 `.env` 里（compose 启动时自动读取并替换 `${VAR}`）。按部署环境二选一：
 
 **有域名**
 1. DNS A 记录指向服务器
-2. compose 里设 `VIRTUAL_HOST`、`WEBHOOK_URL` 为域名，并取消注释 `ACME_HOST`（设为域名）
+2. `.env` 里设 `VIRTUAL_HOST`、`WEBHOOK_URL` 为域名；要由 acme-companion 自动签发证书时，再取消 `docker-compose.yml` 里 `ACME_HOST` 那行的注释，并在 `.env` 里把 `ACME_HOST` 设为域名
 3. acme-companion 自动签发与续期证书，无需手动处理
 
 **只有 IP**
@@ -74,7 +74,7 @@ Let's Encrypt 支持为公网 IP 签发证书（2026 年起可用，有效期约
      --key-file /acme.sh/<SERVER_IP>.key \
      --reloadcmd "curl --unix-socket /var/run/docker.sock -X POST http://localhost/containers/nginx-proxy/kill?signal=HUP"
    ```
-3. compose 里设 `VIRTUAL_HOST: '<SERVER_IP>'`、`WEBHOOK_URL: 'https://<SERVER_IP>/'`，无需 `WEBHOOK_CERT`。续期由 acme.sh daemon 自动完成（`--days 3` = 每 3 天续一次，证书 7 天有效有缓冲），续期成功后自动 HUP 通知 nginx-proxy 加载新证书。
+3. `.env` 里设 `VIRTUAL_HOST=<SERVER_IP>`、`WEBHOOK_URL=https://<SERVER_IP>/`，无需 `WEBHOOK_CERT`。续期由 acme.sh daemon 自动完成（`--days 3` = 每 3 天续一次，证书 7 天有效有缓冲），续期成功后自动 HUP 通知 nginx-proxy 加载新证书。
 
    限制：证书约 7 天有效；验证仅支持 http-01/tls-alpn-01（80 端口必须公网可达）；不支持 DNS-01、私有 IP 与 IP 段；同一 IP 集合每 168 小时限签发 5 张。建议先用 `--server letsencrypt_test` 试签，成功后再切正式服务器。
 
@@ -94,9 +94,9 @@ Telegram 只接受 443/80/88/8443 端口。
 | `CAPTION_QUOTE_TEXT_CHARS` | 正文（`{title}` + `{content}` 合计）达到该长度（字符）时，caption 的**正文部分**用可折叠引用块包裹，默认 200；`0` 关闭 |
 | `DATA_DIR` | 数据目录（SQLite 数据库 `task_queue.db` 所在目录），默认 `data`（相对工作目录，会自动创建） |
 | `RUST_LOG` | 日志级别，默认 `info,hyper_util=warn,reqwest=warn`（未设置也**不会**哑掉）。排障配方：`info,xmedia_bot=debug,x_media=debug`（应用细节，无依赖噪音）/ `debug,hyper_util=off`（全量）/ `trace`（额外打印完整链接与消息原文，**含用户数据**） |
-| `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需 |
+| `TELOXIDE_PROXY` | HTTP 代理（如 `http://127.0.0.1:10808`）；同时作用于 Telegram Bot API 与站点抓取请求，网络受限环境（如 GFW）必需。**不要留空值**（`TELOXIDE_PROXY=`）——teloxide 对无法解析的值会直接 panic；不用代理就别写这一行。容器里要用代理时，`docker-compose.yml` 的 `environment` 里默认没有它（容器内的 `127.0.0.1` 是容器自己），需要时手动加上并把地址换成 `host.docker.internal:<port>` |
 | `LOCAL_USER_ID` | 容器内运行用户 UID，默认 9001 |
-| `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由 |
+| `VIRTUAL_HOST` | 对外域名或 IP，nginx-proxy 按此路由（写在 `.env`，compose 读取） |
 | `VIRTUAL_PORT` | bot 容器内监听端口，nginx-proxy 的转发目标 |
 | `ACME_HOST` | 域名部署：设为域名时由 acme-companion 自动签发/续期证书 |
 | `DEFAULT_HOST` | nginx-proxy 将未知 Host 的请求路由到该 vhost（IP 访问时需要） |
