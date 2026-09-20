@@ -459,6 +459,11 @@ fn fetch_error_message(err: &x_media::site::FetchError) -> String {
         FetchError::Transient(_) | FetchError::Http(_) => {
             "The source site is unavailable right now (tried 3 times). Try again later.".to_string()
         }
+        FetchError::MediaPrep(_) => concat!(
+            "Could not prepare this post's media (its download or encode failed). ",
+            "Try again later."
+        )
+        .to_string(),
         // Parse/shape surprises, pixiv auth details, oversized media: nothing
         // actionable for the user beyond "this did not work".
         _ => "Failed to fetch media from this link.".to_string(),

@@ -56,8 +56,11 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     // `warn` is a level operators share.
     let key = cache_key(url).unwrap_or_else(|| "?".into());
     // A failed remux is remembered: if it leaves the post with no media at
-    // all, returning `Ok` would read as "this post has no media" and skip the
-    // retry that a transient segment-download failure deserves.
+    // all, returning `Ok` would read as "this post has no media". It is
+    // reported as `FetchError::MediaPrep` rather than a transient failure —
+    // the download legs already got their own retry in place ([`fetch_hls`]),
+    // and the fetch loop's retry would only download every segment again to
+    // fail the same way.
     let mut remux_failure: Option<String> = None;
     for item in fetched.media {
         let is_hls = matches!(&item, Media::Video { url, .. }
@@ -93,7 +96,7 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     if media.is_empty()
         && let Some(reason) = remux_failure
     {
-        return Err(FetchError::Transient(format!(
+        return Err(FetchError::MediaPrep(format!(
             "bsky video remux failed: {reason}"
         )));
     }
@@ -120,6 +123,24 @@ pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
     None
 }
 
+/// One HLS fetch (a playlist or a segment) with an in-place retry for a
+/// retryable class (transport, 429/5xx). These used to get their retry from the
+/// outer fetch loop, which pays for it by replaying the whole post: master
+/// playlist, variant playlist and every segment again. A segment failing near
+/// the end of a 500-segment video meant downloading the entire thing twice
+/// more, so the second attempt belongs on the request that actually failed.
+async fn fetch_hls(url: &str, cap: u64) -> Result<bytes::Bytes, String> {
+    match crate::site::download_media_limited(url, cap).await {
+        Err(FetchError::Http(_) | FetchError::Transient(_)) => {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            crate::site::download_media_limited(url, cap)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        other => other.map_err(|e| e.to_string()),
+    }
+}
+
 /// Downloads an HLS playlist (master or media) and remuxes its segments to a
 /// single MP4 via ffmpeg. Returns the MP4 path plus the temp dir that must
 /// stay alive until the file is uploaded. `Ok(None)` when ffmpeg is missing.
@@ -135,7 +156,7 @@ async fn resolve_bsky_video(
         crate::site::log_once_ffmpeg_missing();
         return Ok(None);
     }
-    let master = crate::site::download_media_limited(playlist_url, 1_048_576)
+    let master = fetch_hls(playlist_url, 1_048_576)
         .await
         .map_err(|e| format!("bsky video master playlist: {e}"))?;
     let master = String::from_utf8_lossy(&master);
@@ -170,7 +191,7 @@ async fn resolve_bsky_video(
         playlist_url.to_string()
     };
 
-    let variant = crate::site::download_media_limited(&playlist_url, 1_048_576)
+    let variant = fetch_hls(&playlist_url, 1_048_576)
         .await
         .map_err(|e| format!("bsky video media playlist: {e}"))?;
     let variant = String::from_utf8_lossy(&variant);
@@ -201,7 +222,7 @@ async fn resolve_bsky_video(
     let mut total: u64 = 0;
     let mut list = String::new();
     for (i, seg) in segments.iter().enumerate() {
-        let bytes = crate::site::download_media_limited(seg, 20 * 1024 * 1024)
+        let bytes = fetch_hls(seg, 20 * 1024 * 1024)
             .await
             .map_err(|e| format!("bsky segment {i}: {e}"))?;
         total += bytes.len() as u64;
@@ -420,6 +441,18 @@ mod tests {
         ] {
             assert!(!PATTERN.is_match(url), "{url}");
         }
+    }
+
+    /// A remux failure is a `MediaPrep`, which the fetch loop does not retry:
+    /// replaying the post means downloading every HLS segment again, when the
+    /// request that failed already got its second attempt in place
+    /// ([`fetch_hls`]). The classes below are the ones still retried there.
+    #[test]
+    fn media_prep_failure_is_not_retried() {
+        assert!(!is_retryable(&FetchError::MediaPrep(
+            "bsky video remux failed: segment 400: 503".into()
+        )));
+        assert!(is_retryable(&FetchError::Transient("429".into())));
     }
 
     #[test]

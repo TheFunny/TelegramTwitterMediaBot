@@ -260,6 +260,13 @@ pub enum FetchError {
     /// A download exceeded the caller's size cap (see [`download_media_limited`]).
     #[error("media too large")]
     TooLarge,
+    /// The post was fetched, but its media could not be prepared locally — a
+    /// download or encode step that runs *after* the site's own response
+    /// (bsky's HLS remux, say). Deliberately not retryable: the retry would
+    /// replay the whole fetch, redoing the download work that just failed
+    /// instead of the request that failed.
+    #[error("media could not be prepared: {0}")]
+    MediaPrep(String),
     /// A transient server-side failure (429 / 5xx); [`fetch`] retries these.
     #[error("transient: {0}")]
     Transient(String),
