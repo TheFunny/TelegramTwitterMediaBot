@@ -112,13 +112,16 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         };
     }
     let text = response.text().await?;
-    // Classify before parsing the tweet (see [`parse_syndication_body`]).
-    parse_syndication_body(&text)?;
-    Tweet::from_syndication_json(&text).map_err(FetchError::Json)
+    // Classify before building the tweet (see [`parse_syndication_body`]), and
+    // build it from the value that classification already parsed: this used to
+    // scan and allocate the whole body twice.
+    let body = parse_syndication_body(&text)?;
+    Tweet::from_syndication_value(body).map_err(FetchError::Json)
 }
 
-/// Parses and classifies a syndication response body. `Ok` means the body is
-/// a real tweet payload; `Err` carries the permanent error class:
+/// Parses and classifies a syndication response body. `Ok` carries the parsed
+/// body on for the caller to build the tweet from — the same value, so the
+/// text is never parsed twice; `Err` carries the permanent error class:
 /// - `NotFound`: an `errors` array (deleted/blocked) or a `TweetTombstone`
 ///   **with a reason** — "This Post was deleted by the Post author." /
 ///   "This Post is from a suspended account." (the tweet is gone).
@@ -227,8 +230,13 @@ impl Tweet {
         )
     }
 
-    pub fn from_syndication_json(raw_json: &str) -> Result<Self, serde_json::Error> {
-        let json: model::SyndicationTweet = serde_json::from_str(raw_json)?;
+    /// Builds a tweet from an already-parsed syndication body. Takes the value
+    /// rather than JSON text so a caller that had to parse it anyway (the
+    /// fetch path classifies the raw shape; the auth fallback builds the shape
+    /// itself) does not pay for a second scan — `from_value` moves the strings
+    /// out instead.
+    pub fn from_syndication_value(body: serde_json::Value) -> Result<Self, serde_json::Error> {
+        let json: model::SyndicationTweet = serde_json::from_value(body)?;
         let id = json.id_str;
         // Expand the user's t.co short links to their real destinations and
         // strip the appended media short link, mirroring FxEmbed's linkFixer
@@ -430,7 +438,7 @@ mod tests {
             "entities": { "urls": [] },
             "mediaDetails": []
         });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         // The appended media short link is stripped, then entities decoded.
         assert_eq!(tweet.text, ">^ω^< & more 'quoted'");
         assert_eq!(tweet.author, "O'Brien");
@@ -489,7 +497,7 @@ mod tests {
                 }
             }
         ]));
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         let fetched: Fetched = tweet.into();
         assert_eq!(
             fetched.source_url,
@@ -535,7 +543,7 @@ mod tests {
                 }
             }
         ]));
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         assert!(matches!(&tweet.media[0], Media::Animated { .. }));
     }
 
@@ -562,7 +570,7 @@ mod tests {
                 "user": { "name": "N", "screen_name": "h" },
                 "mediaDetails": []
             });
-            let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+            let tweet = Tweet::from_syndication_value(raw).unwrap();
             assert_eq!(tweet.text, visible, "left a partial link in {text:?}");
             assert!(!tweet.caption().contains("t.co"), "{text:?}");
         }
@@ -587,7 +595,7 @@ mod tests {
             },
             "mediaDetails": []
         });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         assert_eq!(
             tweet.text,
             "Test Tweet with @mentionThis $twtr http://bit.ly/2pUk4be #hashtag"
@@ -606,7 +614,7 @@ mod tests {
             "user": { "name": "N", "screen_name": "h" },
             "mediaDetails": []
         });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         assert_eq!(tweet.text, "check #tag");
     }
 
@@ -629,7 +637,7 @@ mod tests {
             },
             "mediaDetails": []
         });
-        let tweet = Tweet::from_syndication_json(&raw.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(raw).unwrap();
         assert_eq!(tweet.text, "see  for context");
         assert!(!tweet.caption().contains("t.co"));
     }

@@ -149,7 +149,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
             "missing tweet fields in GraphQL response",
         )))
     })?;
-    Tweet::from_syndication_json(&syndication_shape.to_string()).map_err(FetchError::Json)
+    Tweet::from_syndication_value(syndication_shape).map_err(FetchError::Json)
 }
 
 /// Locates the tweet for `id` in a `TweetDetail` response and unwraps
@@ -223,7 +223,7 @@ fn normalize_tweet_result(result: &Value) -> Result<Value, FetchError> {
 }
 
 /// Maps a GraphQL `{core, legacy, ...}` tweet onto the syndication JSON
-/// shape [`Tweet::from_syndication_json`] parses, so the existing text /
+/// shape [`Tweet::from_syndication_value`] parses, so the existing text /
 /// media handling (t.co expansion, `name=orig`, mp4 variant) is reused.
 fn to_syndication_shape(tweet: &Value) -> Option<Value> {
     let legacy = tweet.get("legacy")?;
@@ -308,7 +308,7 @@ mod tests {
         let json = conversation(tweet_result());
         let result = parse_tweet_result(&json, "2083868672721039569").unwrap();
         let shape = to_syndication_shape(&result).unwrap();
-        let tweet = Tweet::from_syndication_json(&shape.to_string()).unwrap();
+        let tweet = Tweet::from_syndication_value(shape).unwrap();
         let fetched: crate::site::Fetched = tweet.into();
 
         assert!(fetched.sensitive);
