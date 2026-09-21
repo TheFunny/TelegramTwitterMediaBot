@@ -3,13 +3,16 @@
 //! inline cache instead of re-fetching.
 
 use super::log_key;
+use crate::ctx::AppContext;
+use crate::link_cache::{CachedMediaKind, CachedPost};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{
-    InlineQuery, InlineQueryResult, InlineQueryResultMpeg4Gif, InlineQueryResultPhoto,
-    InlineQueryResultVideo, ParseMode,
+    FileId, InlineQuery, InlineQueryResult, InlineQueryResultCachedMpeg4Gif,
+    InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo, InlineQueryResultMpeg4Gif,
+    InlineQueryResultPhoto, InlineQueryResultVideo, ParseMode,
 };
 use x_media::media::Media;
 
@@ -133,7 +136,8 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
         if !INLINE_DEBOUNCE_STATE.lock().claim(user_id, &query_text) {
             return;
         }
-        match answer_inline_query(bot, query).await {
+        let ctx = AppContext::from_statics(&bot);
+        match answer_inline_query(&ctx, query).await {
             Ok(true) => {}
             // The fetch or the answer call failed: release so a repeat of the
             // same query may retry it. An *empty* answer is a real answer
@@ -145,26 +149,40 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
     respond(())
 }
 
-/// Fetches the post behind an inline query and answers it. The caller has
-/// already applied the debounce. Returns `true` when an answer was sent.
-async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, RequestError> {
+/// Answers the inline query behind a post URL. The caller has already applied
+/// the debounce. Returns `true` when an answer was sent.
+async fn answer_inline_query(
+    ctx: &AppContext<'_>,
+    query: InlineQuery,
+) -> Result<bool, RequestError> {
     // The query is user input: `debug` keeps only its normalized key, the
     // text itself is `trace` (same split as the message handler).
     log::debug!("inline query [key={}]", log_key(&query.query));
     log::trace!("inline query: {}", query.query);
+    let Some(key) = x_media::site::cache_key(&query.query) else {
+        return Ok(false);
+    };
+    // A post that was already sent to some chat is answered from the link
+    // cache: its Telegram file ids make the answer instant, and — unlike a URL
+    // result, which Telegram must fetch itself — they carry media that a
+    // hotlink-protected host (pixiv's pximg.net) or a locally encoded file
+    // (ugoira MP4, bsky remux) can never serve inline. That media used to be
+    // skipped outright, so a pixiv link answered empty.
+    if let Some(cached) = ctx.link_cache.get(&key, ctx.config.link_cache_ttl).await {
+        let caption = inline_caption(&cached, ctx.config.caption_quote_text_chars);
+        let results = cached_inline_results(&cached, &caption);
+        answer(ctx.sender, query.id, results).await?;
+        return Ok(true);
+    }
     // No retries: the debounce plus a 1s/2s backoff would outlast the inline
     // query the answer belongs to.
     match x_media::site::fetch_once(&query.query).await {
         Ok(Some(fetched)) => {
-            let mut results: Vec<InlineQueryResult> = Vec::new();
             // Inline results have the same 1024-char caption limit as regular
             // messages; truncate once here for all items, then apply the same
-            // long-post quoting as the send paths. `answer_inline_query` has no
-            // `AppContext` (the debounce spawns it), so the parsed config comes
-            // from the process-wide static, and the text is the *escaped*
-            // title/content the built-in caption embeds (the raw
-            // `Fetched.title`/`content` differ whenever the post contains
-            // `<`/`&`).
+            // long-post quoting as the send paths. The built-in caption is what
+            // an inline answer can use: there is no chat whose per-site format
+            // could apply, so the render fields come from the fetch itself.
             let caption = x_media::site::truncate_caption(&fetched.caption);
             let text = fetched
                 .render_fields()
@@ -173,17 +191,17 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
             let caption = crate::send::quote_long_caption(
                 &caption,
                 &text,
-                super::CONFIG.caption_quote_text_chars,
+                ctx.config.caption_quote_text_chars,
             );
+            let mut results: Vec<InlineQueryResult> = Vec::new();
             for (i, media) in fetched.media.iter().enumerate() {
-                let id = format!("{i}");
                 // Telegram fetches an inline result's URL itself and cannot
                 // send site-specific headers, so hotlink-protected media
                 // (pixiv's pximg.net) would render as a broken file there.
                 // Locally produced media (ugoira MP4, bsky remux) is a local
                 // path and does not parse as a URL at all — same skip.
                 if x_media::site::needs_media_headers(media.url()) {
-                    log::debug!("inline: skipping hotlink-protected media {id}");
+                    log::debug!("inline: skipping hotlink-protected media {i}");
                     continue;
                 }
                 let Some(url) = url::Url::parse(media.url()).ok() else {
@@ -193,59 +211,26 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
                     .thumbnail_url()
                     .and_then(|t| url::Url::parse(t).ok())
                     .unwrap_or_else(|| url.clone());
-                let caption = caption.clone().into_owned();
-                let result = match media {
-                    Media::Illustration { .. } => {
-                        // Inline photo results have their own (smaller) size
-                        // cap; use the reduced variant when one exists.
-                        let photo_url = media
-                            .smaller_url()
-                            .and_then(|u| url::Url::parse(u).ok())
-                            .unwrap_or_else(|| url.clone());
-                        InlineQueryResult::Photo(
-                            InlineQueryResultPhoto::new(id, photo_url, thumbnail)
-                                .caption(caption)
-                                .parse_mode(ParseMode::Html),
-                        )
-                    }
-                    Media::Video { .. } => InlineQueryResult::Video(
-                        InlineQueryResultVideo::new(
-                            id,
-                            url,
-                            "video/mp4".parse().expect("valid mime"),
-                            thumbnail,
-                            fetched.title.clone(),
-                        )
-                        .caption(caption)
-                        .parse_mode(ParseMode::Html),
-                    ),
-                    Media::Animated { .. } => InlineQueryResult::Mpeg4Gif(
-                        InlineQueryResultMpeg4Gif::new(id, url, thumbnail)
-                            .caption(caption)
-                            .parse_mode(ParseMode::Html),
-                    ),
-                };
-                results.push(result);
+                // Inline photo results have their own (smaller) size cap; use
+                // the reduced variant when one exists.
+                let url = media
+                    .smaller_url()
+                    .and_then(|u| url::Url::parse(u).ok())
+                    .unwrap_or(url);
+                results.push(url_result(
+                    i.to_string(),
+                    inline_kind(media),
+                    url,
+                    thumbnail,
+                    fetched.title.clone(),
+                    caption.clone().into_owned(),
+                ));
             }
-            if !results.is_empty() {
-                // Explicit cache window: repeats of the same query within 5
-                // minutes are served by Telegram without hitting the bot.
-                bot.answer_inline_query(query.id, results)
-                    .cache_time(300)
-                    .await?;
-                return Ok(true);
-            }
-            // Every item was skipped: Telegram fetches an inline result's URL
-            // itself, so pixiv's hotlink-protected media (and a local ugoira /
-            // bsky MP4) can never be one. Answer *empty* — the client stops
-            // spinning, and the same query is not re-fetched on every
-            // keystroke: an unanswered query releases the debounce below
-            // (`Ok(false)`), which is what made this re-run the fetch each
-            // time, and the window lets Telegram serve the repeats itself.
-            log::debug!("inline: nothing Telegram can fetch for the query; answering empty");
-            bot.answer_inline_query(query.id, Vec::new())
-                .cache_time(300)
-                .await?;
+            // Every item was skipped, or the post has no media at all: answer
+            // *empty* rather than leaving the query unanswered (a client keeps
+            // spinning on that, and the debounce's release re-runs the fetch on
+            // every keystroke).
+            answer(ctx.sender, query.id, results).await?;
             return Ok(true);
         }
         Ok(None) => {}
@@ -254,12 +239,273 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
     Ok(false)
 }
 
+/// The caption of an inline answer, from a cached post: the caption that was
+/// sent (the site's built-in one, truncated) plus the long-post quoting the
+/// send paths apply.
+fn inline_caption(cached: &CachedPost, quote_chars: usize) -> String {
+    let text = x_media::site::compose_text(&cached.title, &cached.content);
+    crate::send::quote_long_caption(
+        &x_media::site::truncate_caption(&cached.caption),
+        &text,
+        quote_chars,
+    )
+    .into_owned()
+}
+
+/// Which inline result kind a payload maps to.
+fn inline_kind(media: &Media) -> InlineKind {
+    match media {
+        Media::Illustration { .. } => InlineKind::Photo,
+        Media::Video { .. } => InlineKind::Video,
+        Media::Animated { .. } => InlineKind::Gif,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InlineKind {
+    Photo,
+    Video,
+    Gif,
+}
+
+/// One inline result pointing Telegram at a URL it fetches itself.
+fn url_result(
+    id: String,
+    kind: InlineKind,
+    url: url::Url,
+    thumbnail: url::Url,
+    title: String,
+    caption: String,
+) -> InlineQueryResult {
+    let parse_mode = ParseMode::Html;
+    match kind {
+        InlineKind::Photo => InlineQueryResult::Photo(
+            InlineQueryResultPhoto::new(id, url, thumbnail)
+                .caption(caption)
+                .parse_mode(parse_mode),
+        ),
+        InlineKind::Video => InlineQueryResult::Video(
+            InlineQueryResultVideo::new(
+                id,
+                url,
+                "video/mp4".parse().expect("valid mime"),
+                thumbnail,
+                title,
+            )
+            .caption(caption)
+            .parse_mode(parse_mode),
+        ),
+        InlineKind::Gif => InlineQueryResult::Mpeg4Gif(
+            InlineQueryResultMpeg4Gif::new(id, url, thumbnail)
+                .caption(caption)
+                .parse_mode(parse_mode),
+        ),
+    }
+}
+
+/// One inline result served from a Telegram file id.
+fn cached_result(
+    id: String,
+    kind: CachedMediaKind,
+    file_id: String,
+    title: String,
+    caption: String,
+) -> InlineQueryResult {
+    let parse_mode = ParseMode::Html;
+    let file_id = FileId(file_id);
+    match kind {
+        CachedMediaKind::Photo => InlineQueryResult::CachedPhoto(
+            InlineQueryResultCachedPhoto::new(id, file_id)
+                .caption(caption)
+                .parse_mode(parse_mode),
+        ),
+        CachedMediaKind::Video => InlineQueryResult::CachedVideo(
+            InlineQueryResultCachedVideo::new(id, file_id, title)
+                .caption(caption)
+                .parse_mode(parse_mode),
+        ),
+        CachedMediaKind::Animation => InlineQueryResult::CachedMpeg4Gif(
+            InlineQueryResultCachedMpeg4Gif::new(id, file_id)
+                .caption(caption)
+                .parse_mode(parse_mode),
+        ),
+    }
+}
+
+/// The inline results a cached post answers with, one per media item: from the
+/// file id when the entry has one, else from the source URL (a degraded entry
+/// keeps only URLs). A URL item that needs site headers is skipped as in the
+/// fetch path; a *file id* needs no headers, which is what makes a pixiv post
+/// answerable inline.
+fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryResult> {
+    cached
+        .media
+        .iter()
+        .enumerate()
+        .filter_map(|(i, media)| {
+            let id = i.to_string();
+            let caption = || caption.to_string();
+            if !media.file_id.is_empty() {
+                return Some(cached_result(
+                    id,
+                    media.kind,
+                    media.file_id.clone(),
+                    cached.title.clone(),
+                    caption(),
+                ));
+            }
+            // A degraded entry: no file id, so Telegram must fetch the URL.
+            if x_media::site::needs_media_headers(&media.url) {
+                log::debug!("inline: skipping hotlink-protected cached media {i}");
+                return None;
+            }
+            let url = url::Url::parse(&media.url).ok()?;
+            // A photo or gif is an image, so its own URL serves as the
+            // thumbnail; a video needs a real poster, and a degraded entry has
+            // none — Telegram would try to render the video as an image.
+            let kind = match media.kind {
+                CachedMediaKind::Photo => InlineKind::Photo,
+                CachedMediaKind::Video => {
+                    log::debug!("inline: skipping a cached video with no thumbnail {i}");
+                    return None;
+                }
+                CachedMediaKind::Animation => InlineKind::Gif,
+            };
+            Some(url_result(
+                id,
+                kind,
+                url.clone(),
+                url,
+                cached.title.clone(),
+                caption(),
+            ))
+        })
+        .collect()
+}
+
+/// Answers with `results` (an empty vec is a real answer: it stops the client
+/// spinning and lets Telegram serve repeats itself) under the cache window
+/// [`INLINE_STATE_TTL`] mirrors.
+async fn answer(
+    sender: &dyn crate::media_sender::MediaSender,
+    id: teloxide::types::InlineQueryId,
+    results: Vec<InlineQueryResult>,
+) -> Result<(), RequestError> {
+    if results.is_empty() {
+        log::debug!("inline: nothing Telegram can serve for the query; answering empty");
+    }
+    sender.answer_inline_query(id, results, 300).await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DebounceStates, INLINE_STATE_TTL};
+    use super::{DebounceStates, INLINE_STATE_TTL, answer_inline_query};
+    use crate::ctx::test_support::{TestStores, api_error, cached_photo};
+    use crate::link_cache::{CachedMedia, CachedMediaKind};
+    use crate::media_sender::test_support::MockSender;
+    use teloxide::types::InlineQuery;
 
     const URL_A: &str = "https://x.com/a/status/1";
     const URL_B: &str = "https://x.com/b/status/2";
+
+    fn inline_query(url: &str) -> InlineQuery {
+        serde_json::from_value(serde_json::json!({
+            "id": "42",
+            "from": { "id": 5, "is_bot": false, "first_name": "u" },
+            "query": url,
+            "offset": "",
+        }))
+        .expect("a minimal inline query deserializes")
+    }
+
+    /// A post already in the link cache is answered from its file ids: no
+    /// fetch, and — unlike a URL result — media Telegram could never fetch
+    /// itself (a pixiv pximg URL) can be served.
+    #[tokio::test]
+    async fn a_cached_post_answers_from_its_file_ids() {
+        let sender = MockSender::scripted(vec![], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let mut entry = cached_photo();
+        entry.media = vec![
+            CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "AgAC-photo".into(),
+                url: "https://i.pximg.net/img-original/img/1.jpg".into(),
+            },
+            CachedMedia {
+                kind: CachedMediaKind::Animation,
+                file_id: "AgAC-gif".into(),
+                url: "https://i.pximg.net/img-original/img/1.gif".into(),
+            },
+        ];
+        stores.link_cache().put("twitter:1", &entry).await;
+
+        let answered = answer_inline_query(&ctx, inline_query("https://x.com/u/status/1"))
+            .await
+            .unwrap();
+
+        assert!(answered);
+        assert_eq!(
+            sender.inline_answers(),
+            vec![vec!["cached_photo:AgAC-photo", "cached_gif:AgAC-gif"]],
+            "every item goes out as its cached file id, hotlink protection and all"
+        );
+    }
+
+    /// A degraded entry has no file ids left, so its URLs are used — and an
+    /// item Telegram must not fetch (needs site headers) or cannot render (a
+    /// video with no poster) is skipped. Nothing left means an *empty* answer:
+    /// leaving the query unanswered makes the client spin and re-fetch on every
+    /// keystroke.
+    #[tokio::test]
+    async fn a_degraded_cached_post_answers_with_urls_or_empty() {
+        let sender = MockSender::scripted(vec![], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+
+        let mut entry = cached_photo();
+        entry.media = vec![
+            CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: String::new(),
+                url: "https://p/1.jpg".into(),
+            },
+            CachedMedia {
+                kind: CachedMediaKind::Video,
+                file_id: String::new(),
+                url: "https://v/1.mp4".into(),
+            },
+        ];
+        stores.link_cache().put("twitter:1", &entry).await;
+        answer_inline_query(&ctx, inline_query("https://x.com/u/status/1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            sender.inline_answers(),
+            vec![vec!["photo:https://p/1.jpg"]],
+            "the degradable photo goes out by URL, the poster-less video is skipped"
+        );
+
+        // Nothing servable: a pixiv original needs a Referer Telegram does not
+        // send.
+        stores.link_cache().remove("twitter:1").await;
+        let mut entry = cached_photo();
+        entry.media = vec![CachedMedia {
+            kind: CachedMediaKind::Photo,
+            file_id: String::new(),
+            url: "https://i.pximg.net/img-original/img/1.jpg".into(),
+        }];
+        stores.link_cache().put("twitter:1", &entry).await;
+        answer_inline_query(&ctx, inline_query("https://x.com/u/status/1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            sender.inline_answers(),
+            vec![vec!["photo:https://p/1.jpg".to_string()], Vec::new()],
+            "a query with nothing servable is still answered, with no results"
+        );
+    }
 
     #[test]
     fn debounce_state_is_per_user() {

@@ -5,6 +5,7 @@
 
 use super::*;
 use parking_lot::Mutex;
+use teloxide::types::InlineQueryResult;
 
 /// One scripted outcome, consumed front-to-back; the last entry repeats
 /// for further calls of the same method kind.
@@ -233,9 +234,27 @@ pub(crate) struct MockSender {
     /// What each `send_animation` handed Telegram: a URL or a file id as that
     /// string, an upload as `attach://<id>`.
     animation_files: Mutex<Vec<String>>,
+    /// What every `answer_inline_query` answered with, one entry per result:
+    /// `cached_photo:<file id>`, `photo:<url>`, and so on. An answer with no
+    /// results is recorded as an empty inner vec.
+    inline_answers: Mutex<Vec<Vec<String>>>,
     /// Builds the error every `*Err` outcome returns (RequestError is not
     /// cloneable, so the factory recreates it per call).
     error: Box<dyn Fn() -> RequestError + Send + Sync>,
+}
+
+/// A one-string description of an inline result: the kind plus the file id it
+/// is served from, or the URL it points Telegram at.
+fn inline_result_tag(result: &InlineQueryResult) -> String {
+    match result {
+        InlineQueryResult::CachedPhoto(r) => format!("cached_photo:{}", r.photo_file_id.0),
+        InlineQueryResult::CachedVideo(r) => format!("cached_video:{}", r.video_file_id.0),
+        InlineQueryResult::CachedMpeg4Gif(r) => format!("cached_gif:{}", r.mpeg4_file_id.0),
+        InlineQueryResult::Photo(r) => format!("photo:{}", r.photo_url),
+        InlineQueryResult::Video(r) => format!("video:{}", r.video_url),
+        InlineQueryResult::Mpeg4Gif(r) => format!("gif:{}", r.mpeg4_url),
+        other => format!("{other:?}"),
+    }
 }
 
 /// The smallest `Message` the send paths accept, for the outcomes that must
@@ -266,6 +285,7 @@ impl MockSender {
             answers: Mutex::new(Vec::new()),
             edited_texts: Mutex::new(Vec::new()),
             animation_files: Mutex::new(Vec::new()),
+            inline_answers: Mutex::new(Vec::new()),
             error: Box::new(error),
         }
     }
@@ -299,6 +319,11 @@ impl MockSender {
     /// What every `send_animation` handed Telegram, in order.
     pub(crate) fn animation_files(&self) -> Vec<String> {
         self.animation_files.lock().clone()
+    }
+
+    /// What every `answer_inline_query` answered with, in call order.
+    pub(crate) fn inline_answers(&self) -> Vec<Vec<String>> {
+        self.inline_answers.lock().clone()
     }
 
     fn next(&self, kind: &'static str) -> Outcome {
@@ -401,6 +426,26 @@ impl MediaSender for MockSender {
                 other => panic!("unexpected outcome {other:?} for send_message"),
             }
         })
+    }
+
+    fn answer_inline_query(
+        &self,
+        _id: InlineQueryId,
+        results: Vec<InlineQueryResult>,
+        cache_time: u32,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        // Records what the answer was made of, so a test can tell a cached
+        // (file-id) result from a URL one. Always succeeds: the debounce's
+        // release path is covered by `DebounceStates` directly.
+        assert_eq!(
+            cache_time, 300,
+            "the inline cache window is what the tests pin"
+        );
+        self.calls.lock().push("answer_inline_query");
+        self.inline_answers
+            .lock()
+            .push(results.iter().map(inline_result_tag).collect());
+        Box::pin(async move { Ok(()) })
     }
 
     fn answer_callback_query(

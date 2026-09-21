@@ -8,8 +8,8 @@ use teloxide::RequestError;
 use teloxide::prelude::Requester;
 use teloxide::prelude::*;
 use teloxide::types::{
-    CallbackQueryId, ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, Message,
-    MessageId, ParseMode, ReplyParameters,
+    CallbackQueryId, ChatAction, ChatId, InlineKeyboardMarkup, InlineQueryId, InlineQueryResult,
+    InputFile, InputMedia, Message, MessageId, ParseMode, ReplyParameters,
 };
 
 /// Boxed, `Send` future returned by a [`MediaSender`] method (`async fn` in
@@ -59,6 +59,17 @@ pub trait MediaSender: Send + Sync {
         reply_to: Option<MessageId>,
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<i64, RequestError>>;
+
+    /// Answers an inline query with `results`, cached by Telegram for
+    /// `cache_time` seconds. An empty `results` answers *empty*, which is a
+    /// real answer: it stops the client spinning and lets Telegram serve a
+    /// repeat itself instead of the bot re-running the query.
+    fn answer_inline_query(
+        &self,
+        id: InlineQueryId,
+        results: Vec<InlineQueryResult>,
+        cache_time: u32,
+    ) -> BoxFuture<'_, Result<(), RequestError>>;
 
     /// Answers a callback query, optionally with a toast `text` shown to the
     /// user who pressed the button.
@@ -183,6 +194,20 @@ impl MediaSender for Bot {
                 request = request.reply_markup(markup);
             }
             request.await.map(|message| message.id.0 as i64)
+        })
+    }
+
+    fn answer_inline_query(
+        &self,
+        id: InlineQueryId,
+        results: Vec<InlineQueryResult>,
+        cache_time: u32,
+    ) -> BoxFuture<'_, Result<(), RequestError>> {
+        Box::pin(async move {
+            <Bot as Requester>::answer_inline_query(self, id, results)
+                .cache_time(cache_time)
+                .await
+                .map(|_| ())
         })
     }
 
