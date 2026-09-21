@@ -643,20 +643,18 @@ async fn url_media_inner(
             .get(site)
             .cloned()
             .unwrap_or_default();
-        let caption = if format.is_empty() {
-            x_media::site::truncate_caption(&cached.caption)
-        } else {
-            x_media::site::caption_from_fields(
-                &format,
-                "",
-                &cached.url,
-                &cached.author,
-                &cached.author_url,
-                &cached.title,
-                &cached.content,
-                &cached.tags,
-            )
-        };
+        // One call for both: `caption_from_fields` returns the truncated
+        // built-in caption itself when the chat has no format for this site.
+        let caption = x_media::site::caption_from_fields(
+            &format,
+            &cached.caption,
+            &cached.url,
+            &cached.author,
+            &cached.author_url,
+            &cached.title,
+            &cached.content,
+            &cached.tags,
+        );
         let items: Vec<MediaItemPayload> = cached
             .media
             .iter()
