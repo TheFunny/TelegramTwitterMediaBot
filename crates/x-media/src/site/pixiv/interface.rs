@@ -1,4 +1,4 @@
-use super::model::IllustrationModel;
+use super::model::{IllustrationModel, ImageUrlsModel};
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, PixivError, Site, SiteFuture};
 use html_escape::{encode_double_quoted_attribute, encode_text};
@@ -230,27 +230,23 @@ impl Illustration {
             // ffmpeg and appends it as a Video item (api.rs). This fallback
             // keeps media empty when encoding fails or ffmpeg is missing.
         } else if model.page_count > 1 {
+            // Every page is kept: `original` is the only URL the API may leave
+            // out (typically the restricted ones), and a page without it used
+            // to be dropped whole — losing a page of the work while `large`
+            // sat right there.
             media.extend(model.meta_pages.iter().filter_map(|page| {
-                page.image_urls
-                    .original
-                    .clone()
-                    .map(|original| Media::Illustration {
-                        url: original,
-                        thumbnail_url: Some(page.image_urls.medium.clone()),
-                        fallback_url: Some(page.image_urls.large.clone()),
-                    })
+                page_illustration(page.image_urls.original.clone(), &page.image_urls)
             }));
-        } else if let Some(original) = model
-            .meta_single_page
-            .original_image_url
-            .clone()
-            .or(model.image_urls.original.clone())
-        {
-            media.push(Media::Illustration {
-                url: original,
-                thumbnail_url: Some(model.image_urls.medium.clone()),
-                fallback_url: Some(model.image_urls.large.clone()),
-            });
+        } else {
+            // The single page names its original in one of two places, and
+            // `large` is the last resort.
+            let urls = &model.image_urls;
+            let original = model
+                .meta_single_page
+                .original_image_url
+                .clone()
+                .or_else(|| urls.original.clone());
+            media.extend(page_illustration(original, urls));
         }
         let nsfw = model.sanity_level > 5;
         Self {
@@ -265,6 +261,21 @@ impl Illustration {
             _keep_alive: None,
         }
     }
+}
+
+/// One artwork page as a media item: `original` when the API sent one, else the
+/// `large` variant (the same picture at a lower resolution), with `medium` as
+/// the thumbnail. `None` when the API gave no usable URL at all.
+fn page_illustration(original: Option<String>, urls: &ImageUrlsModel) -> Option<Media> {
+    let url = original.unwrap_or_else(|| urls.large.clone());
+    if url.is_empty() {
+        return None;
+    }
+    Some(Media::Illustration {
+        url,
+        thumbnail_url: Some(urls.medium.clone()),
+        fallback_url: Some(urls.large.clone()),
+    })
 }
 
 impl From<Illustration> for Fetched {
@@ -540,14 +551,19 @@ mod tests {
     }
 
     #[test]
-    fn single_page_without_any_original_is_empty() {
+    fn single_page_without_any_original_falls_back_to_large() {
         let v = illust_json("illust", 1, None, None, vec![], 0);
         let fetched: Fetched = parse(v).into();
-        assert!(fetched.media.is_empty());
+        // Neither `meta_single_page.original_image_url` nor `image_urls.
+        // original` is set: the work is still deliverable as `large`.
+        match fetched.media.as_slice() {
+            [Media::Illustration { url, .. }] => assert_eq!(url, "large.jpg"),
+            other => panic!("expected the large variant, got {other:?}"),
+        }
     }
 
     #[test]
-    fn multi_page_skips_pages_without_original() {
+    fn multi_page_keeps_pages_without_original() {
         let v = illust_json(
             "illust",
             2,
@@ -560,17 +576,27 @@ mod tests {
             0,
         );
         let fetched: Fetched = parse(v).into();
-        assert_eq!(fetched.media.len(), 1);
+        // Both pages arrive: the restricted one (no `original`) sends its
+        // `large` instead of vanishing — a dropped page is a missing picture.
+        let urls: Vec<&str> = fetched
+            .media
+            .iter()
+            .map(|media| match media {
+                Media::Illustration { url, .. } => url.as_str(),
+                other => panic!("expected Illustration, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(urls, vec!["l1.jpg", "https://i.pximg.net/p2.jpg"]);
         match &fetched.media[0] {
             Media::Illustration {
-                url,
                 thumbnail_url,
                 fallback_url,
                 ..
             } => {
-                assert_eq!(url, "https://i.pximg.net/p2.jpg");
-                assert_eq!(thumbnail_url.as_deref(), Some("m2.jpg"));
-                assert_eq!(fallback_url.as_deref(), Some("l2.jpg"));
+                assert_eq!(thumbnail_url.as_deref(), Some("m1.jpg"));
+                // `large` is the item itself here, so it is not also a
+                // smaller variant of itself.
+                assert_eq!(fallback_url.as_deref(), Some("l1.jpg"));
             }
             other => panic!("expected Illustration, got {other:?}"),
         }
