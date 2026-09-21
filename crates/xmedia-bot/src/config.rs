@@ -41,22 +41,38 @@ impl Config {
             }
         }
 
-        let admin_ids = match env::var("BOT_ADMIN") {
-            Ok(s) => {
-                let (ids, bad): (Vec<_>, Vec<_>) = s
+        /// A setting that must parse when it is set: an unparseable value warns
+        /// (naming the variable) and counts as unset.
+        fn parse_opt<T: std::str::FromStr>(name: &str) -> Option<T> {
+            env::var(name).ok().and_then(|s| {
+                s.parse::<T>().ok().or_else(|| {
+                    log::warn!("invalid {name}={s:?}");
+                    None
+                })
+            })
+        }
+
+        let admin_ids = env::var("BOT_ADMIN")
+            .map(|s| {
+                let mut bad = Vec::new();
+                let ids: Vec<i64> = s
                     .split(',')
                     .map(str::trim)
                     .filter(|part| !part.is_empty())
-                    .partition(|part| part.parse::<i64>().is_ok());
+                    .filter_map(|part| match part.parse::<i64>() {
+                        Ok(id) => Some(id),
+                        Err(_) => {
+                            bad.push(part);
+                            None
+                        }
+                    })
+                    .collect();
                 if !bad.is_empty() {
                     log::warn!("BOT_ADMIN: ignoring non-numeric ids: {bad:?}");
                 }
-                ids.into_iter()
-                    .filter_map(|p| p.parse::<i64>().ok())
-                    .collect()
-            }
-            Err(_) => Vec::new(),
-        };
+                ids
+            })
+            .unwrap_or_default();
 
         let edit_message_ttl =
             Duration::from_secs(parse_u64("EDIT_MESSAGE_TTL_SECONDS", 24 * 3600));
@@ -69,24 +85,9 @@ impl Config {
         // The webhook settings are consumed by `.expect()` in main when
         // WEBHOOK=true, so an unparseable value fails fast at startup with a
         // clear message; still log here for the WEBHOOK=false case.
-        let webhook_url = env::var("WEBHOOK_URL").ok().and_then(|s| {
-            s.parse::<url::Url>().ok().or_else(|| {
-                log::warn!("invalid WEBHOOK_URL={s:?}");
-                None
-            })
-        });
-        let webhook_listen = env::var("WEBHOOK_LISTEN").ok().and_then(|s| {
-            s.parse::<IpAddr>().ok().or_else(|| {
-                log::warn!("invalid WEBHOOK_LISTEN={s:?}");
-                None
-            })
-        });
-        let webhook_port = env::var("WEBHOOK_PORT").ok().and_then(|s| {
-            s.parse::<u16>().ok().or_else(|| {
-                log::warn!("invalid WEBHOOK_PORT={s:?}");
-                None
-            })
-        });
+        let webhook_url = parse_opt::<url::Url>("WEBHOOK_URL");
+        let webhook_listen = parse_opt::<IpAddr>("WEBHOOK_LISTEN");
+        let webhook_port = parse_opt::<u16>("WEBHOOK_PORT");
         // Empty strings count as unset (e.g. `-e WEBHOOK_CERT=` to disable a
         // value that would otherwise come from `.env`).
         let webhook_cert = env::var("WEBHOOK_CERT").ok().filter(|s| !s.is_empty());
@@ -106,5 +107,27 @@ impl Config {
             webhook_cert,
             webhook_secret_token,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ids an operator's `BOT_ADMIN` yields: blanks dropped, non-numeric
+    /// entries warned about and skipped, the rest kept in order. Parsed once —
+    /// the split used to parse every entry twice.
+    #[test]
+    fn bot_admin_keeps_the_numeric_ids_in_order() {
+        // SAFETY: no other test reads BOT_ADMIN, and the value is restored
+        // before this test returns.
+        let previous = env::var("BOT_ADMIN").ok();
+        unsafe { env::set_var("BOT_ADMIN", " 7 ,abc,42, ,") };
+        let ids = Config::load().admin_ids;
+        match previous {
+            Some(value) => unsafe { env::set_var("BOT_ADMIN", value) },
+            None => unsafe { env::remove_var("BOT_ADMIN") },
+        }
+        assert_eq!(ids, vec![7, 42]);
     }
 }
