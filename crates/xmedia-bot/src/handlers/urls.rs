@@ -54,13 +54,7 @@ type FetchOutcome = Result<Option<x_media::site::Fetched>, x_media::site::FetchE
 /// The channel a sharer publishes its result on, and waiters subscribe to.
 type SharedFetch<T> = tokio::sync::broadcast::Sender<std::sync::Arc<T>>;
 
-/// Fetches `url`, sharing one in-flight fetch per `key` (its site cache key)
-/// with every other caller asking for the same post meanwhile.
-async fn fetch_shared(key: &str, url: &str) -> std::sync::Arc<FetchOutcome> {
-    shared_fetch(&IN_FLIGHT_FETCHES, key, || x_media::site::fetch(url)).await
-}
-
-/// [`fetch_shared`]'s core, over the caller's own map so the sharing rules can
+/// The sharing core, over the caller's own map so the sharing rules can
 /// be tested without a network fetch.
 ///
 /// A caller that finds a live entry subscribes to it and waits; the caller that
@@ -676,9 +670,9 @@ async fn url_media_inner(
     log::debug!("fetching [key={}]", log_key(url));
     log::trace!("fetching {url}");
     // One fetch per post at a time: a concurrent duplicate of this link waits
-    // for *this* fetch instead of running its own (see [`fetch_shared`]).
+    // for *this* fetch instead of running its own.
     let outcome = match x_media::site::cache_key(url) {
-        Some(key) => fetch_shared(&key, url).await,
+        Some(key) => shared_fetch(&IN_FLIGHT_FETCHES, &key, || x_media::site::fetch(url)).await,
         // A URL no site claims (reached only through `/test`): nothing to key
         // the sharing on, and the dispatcher answers without a request.
         None => std::sync::Arc::new(x_media::site::fetch(url).await),
