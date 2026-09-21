@@ -349,8 +349,7 @@ pub fn chunk_media_items<T>(items: Vec<T>) -> Vec<Vec<T>> {
 /// mixed, the first item must be a photo (Telegram's sendMediaGroup rule).
 /// Stable sort keeps the source order within each kind; a lone animation is
 /// untouched (it takes the SendAnimation path before this runs).
-pub fn photos_first(items: Vec<MediaItemPayload>) -> Vec<MediaItemPayload> {
-    let mut items = items;
+pub fn photos_first(mut items: Vec<MediaItemPayload>) -> Vec<MediaItemPayload> {
     items.sort_by_key(|item| match item {
         MediaItemPayload::Photo { .. } => 0,
         MediaItemPayload::Video { .. } | MediaItemPayload::Animation { .. } => 1,

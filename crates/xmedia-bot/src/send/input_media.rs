@@ -7,10 +7,6 @@ use teloxide::types::{
     InputFile, InputMedia, InputMediaAnimation, InputMediaPhoto, InputMediaVideo, ParseMode,
 };
 
-fn parse_media_url(s: &str) -> Result<url::Url, String> {
-    url::Url::parse(s).map_err(|e| format!("invalid media URL: {e}"))
-}
-
 pub(super) fn item_url(item: &MediaItemPayload) -> &str {
     match item {
         MediaItemPayload::Photo { media, .. }
@@ -23,7 +19,8 @@ pub(super) fn item_url(item: &MediaItemPayload) -> &str {
 /// (e.g. a locally encoded ugoira MP4) is uploaded directly.
 pub(super) fn input_file_for(media: &str) -> Result<InputFile, String> {
     if media.starts_with("http://") || media.starts_with("https://") {
-        Ok(InputFile::url(parse_media_url(media)?))
+        let url = url::Url::parse(media).map_err(|e| format!("invalid media URL: {e}"))?;
+        Ok(InputFile::url(url))
     } else if !std::path::Path::new(media).exists() {
         // A retried task may reference a temp file the original send's
         // TempDir already cleaned up; fail fast and permanent instead of
