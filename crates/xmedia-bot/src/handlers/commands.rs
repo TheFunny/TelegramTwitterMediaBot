@@ -2,7 +2,7 @@
 //! registration. URL/inline/callback flows live in their own modules.
 
 use super::urls::{PostSend, url_media};
-use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply};
+use super::{log_key, reply};
 use crate::ctx::AppContext;
 use crate::state::ChatData;
 use teloxide::RequestError;
@@ -253,29 +253,41 @@ async fn set_forward_channel_handler(
     Ok(channel_id)
 }
 
+/// Runs one parsed command. Takes its context (stores + the sender) and the
+/// `Bot`, the same shape [`crate::handlers::handle_message`] uses: `bot` is
+/// only for the calls the [`MediaSender`] surface does not carry (channel
+/// admin lookups, the HTML-parse-mode report).
+///
+/// [`MediaSender`]: crate::media_sender::MediaSender
 pub(crate) async fn execute_command(
+    ctx: &AppContext<'_>,
     bot: &Bot,
     message: &Message,
     command: Command,
 ) -> Result<(), RequestError> {
     match command {
         Command::Start => {
-            bot.send_message(message.chat.id, START_TEXT).await?;
+            ctx.sender
+                .send_message(message.chat.id, START_TEXT.to_string(), None, None)
+                .await?;
         }
         Command::Help => {
             // The command list plus the parts teloxide's `descriptions()`
             // cannot show: argument syntax, caption placeholders, and where a
             // link actually works.
-            bot.send_message(
-                message.chat.id,
-                format!("{}\n\n{}", Command::descriptions(), HELP_FOOTER),
-            )
-            .await?;
+            ctx.sender
+                .send_message(
+                    message.chat.id,
+                    format!("{}\n\n{}", Command::descriptions(), HELP_FOOTER),
+                    None,
+                    None,
+                )
+                .await?;
         }
         Command::SetForwardChannel(channel) => {
             let result = match set_forward_channel_handler(bot, message, channel).await {
                 Ok(channel_id) => {
-                    CHAT_STORE
+                    ctx.chat_store
                         .update(message.chat.id.0, |data| {
                             data.forward_channel_id = Some(channel_id);
                         })
@@ -299,11 +311,12 @@ pub(crate) async fn execute_command(
                     "Bot can't post messages to the channel".to_string()
                 }
             };
-            reply(bot, message.chat.id.0, message.id, result).await?;
+            reply(ctx.sender, message.chat.id.0, message.id, result).await?;
         }
         Command::RemoveForwardChannel => {
             let chat_id = message.chat.id.0;
-            let text = CHAT_STORE
+            let text = ctx
+                .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_some() {
                         data.forward_channel_id = None;
@@ -313,11 +326,12 @@ pub(crate) async fn execute_command(
                     }
                 })
                 .await;
-            reply(bot, message.chat.id.0, message.id, text).await?;
+            reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::EditBeforeForward => {
             let chat_id = message.chat.id.0;
-            let text = CHAT_STORE
+            let text = ctx
+                .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_none() {
                         "Please enable forward channel first.".to_string()
@@ -331,7 +345,7 @@ pub(crate) async fn execute_command(
                     }
                 })
                 .await;
-            reply(bot, message.chat.id.0, message.id, text).await?;
+            reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::SetTemplate(name) => {
             let chat_id = message.chat.id.0;
@@ -344,7 +358,7 @@ pub(crate) async fn execute_command(
                     } else if name.is_empty() {
                         "Please provide a name for the template.".to_string()
                     } else {
-                        CHAT_STORE
+                        ctx.chat_store
                             .update(chat_id, |data| {
                                 data.template.insert(
                                     name,
@@ -356,14 +370,14 @@ pub(crate) async fn execute_command(
                     }
                 }
             };
-            reply(bot, message.chat.id.0, message.id, text).await?;
+            reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::RemoveTemplate(name) => {
             let chat_id = message.chat.id.0;
             let name = name.trim().to_string();
             if name.is_empty() {
                 reply(
-                    bot,
+                    ctx.sender,
                     chat_id,
                     message.id,
                     "Usage: /remove_template <name> (see /settings for the saved names)",
@@ -371,7 +385,8 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            let removed = CHAT_STORE
+            let removed = ctx
+                .chat_store
                 .update(chat_id, |data| data.template.remove(&name).is_some())
                 .await;
             let text = if removed {
@@ -379,33 +394,33 @@ pub(crate) async fn execute_command(
             } else {
                 // Name the live templates: a typo would otherwise look like a
                 // successful delete.
-                let names = sorted_template_names(&CHAT_STORE.get(chat_id).await);
+                let names = sorted_template_names(&ctx.chat_store.get(chat_id).await);
                 if names.is_empty() {
                     format!("No template named '{name}'. None are saved yet.")
                 } else {
                     format!("No template named '{name}'. Saved: {}", names.join(", "))
                 }
             };
-            reply(bot, chat_id, message.id, text).await?;
+            reply(ctx.sender, chat_id, message.id, text).await?;
         }
         Command::Settings => {
             let chat_id = message.chat.id.0;
-            let data = CHAT_STORE.get(chat_id).await;
-            reply(bot, chat_id, message.id, settings_text(&data)).await?;
+            let data = ctx.chat_store.get(chat_id).await;
+            reply(ctx.sender, chat_id, message.id, settings_text(&data)).await?;
         }
         Command::BotDict => {
             // Debug dump of the chat's persisted state: admin only (it echoes
             // forward-channel ids and templates to whoever asks).
-            if require_admin(bot, message).await?.is_none() {
+            if require_admin(ctx, message).await?.is_none() {
                 return Ok(());
             }
-            let chat_data = CHAT_STORE.get(message.chat.id.0).await;
+            let chat_data = ctx.chat_store.get(message.chat.id.0).await;
             let debug = html_escape::encode_text(&format!("{chat_data:?}")).into_owned();
             // A chat with many templates/edit records exceeds Telegram's 4096
             // char message limit; the dump is plain text (no parse mode), so a
             // plain byte-boundary cut is safe.
             let text = cap_text(debug, MAX_DEBUG_DUMP_CHARS);
-            reply(bot, message.chat.id.0, message.id, text).await?;
+            reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::SetFormat(arg) => {
             let chat_id = message.chat.id.0;
@@ -415,7 +430,7 @@ pub(crate) async fn execute_command(
                 }
                 _ => {
                     reply(
-                        bot,
+                        ctx.sender,
                         message.chat.id.0,
                         message.id,
                         "Usage: /set_format <site> <format>",
@@ -426,7 +441,7 @@ pub(crate) async fn execute_command(
             };
             if !x_media::site::site_ids().contains(&site) {
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     "Unknown site. Use twitter, bsky, pixiv, misskey or bilibili.",
@@ -438,13 +453,13 @@ pub(crate) async fn execute_command(
             // set a format once could never get back to the default (the
             // built-in format string is not something a user can retype).
             if format == "-" {
-                CHAT_STORE
+                ctx.chat_store
                     .update(chat_id, |data| {
                         data.message_format.remove(site);
                     })
                     .await;
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     "Format reset to the built-in one.",
@@ -457,7 +472,7 @@ pub(crate) async fn execute_command(
             // exact keys), which is invisible until a post arrives.
             if let Some(token) = unknown_placeholder(&format) {
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     format!(
@@ -472,13 +487,13 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            CHAT_STORE
+            ctx.chat_store
                 .update(chat_id, |data| {
                     data.message_format.insert(site.to_string(), format);
                 })
                 .await;
             reply(
-                bot,
+                ctx.sender,
                 message.chat.id.0,
                 message.id,
                 "Format set. Use /debug <link> to preview the caption.",
@@ -486,15 +501,15 @@ pub(crate) async fn execute_command(
             .await?;
         }
         Command::ClearCache(arg) => {
-            let Some(sender_id) = require_admin(bot, message).await? else {
+            let Some(sender_id) = require_admin(ctx, message).await? else {
                 return Ok(());
             };
             let arg = arg.trim();
             if arg.is_empty() {
-                let removed = LINK_CACHE.clear(None).await;
+                let removed = ctx.link_cache.clear(None).await;
                 log::info!("cache cleared by {sender_id}: {removed} entries");
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     format!("Cleared {removed} cached entr{}.", plural(removed)),
@@ -505,7 +520,7 @@ pub(crate) async fn execute_command(
                     Some(key) => key,
                     None => {
                         reply(
-                            bot,
+                            ctx.sender,
                             message.chat.id.0,
                             message.id,
                             "Unrecognized link. Use a twitter/x, pixiv, bsky, misskey or bilibili post URL.",
@@ -514,10 +529,10 @@ pub(crate) async fn execute_command(
                         return Ok(());
                     }
                 };
-                let removed = LINK_CACHE.clear(Some(&key)).await;
+                let removed = ctx.link_cache.clear(Some(&key)).await;
                 log::info!("cache entry cleared by {sender_id}: {key} ({removed} rows)");
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     format!(
@@ -533,7 +548,7 @@ pub(crate) async fn execute_command(
             let url = arg.trim();
             if url.is_empty() {
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     "Usage: /test <post url>",
@@ -543,7 +558,7 @@ pub(crate) async fn execute_command(
             }
             if x_media::site::cache_key(url).is_none() {
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     "No enabled site matches this link (twitter/x, pixiv, bsky, misskey or bilibili).",
@@ -557,9 +572,8 @@ pub(crate) async fn execute_command(
             // edit-before-forward prompt opens. Info level echoes the
             // normalized key (never the raw URL) per the logging convention.
             log::info!("test: sending [key={}]", log_key(url));
-            let ctx = AppContext::from_statics(bot);
             url_media(
-                &ctx,
+                ctx,
                 message.chat.id.0,
                 message.id.0 as i64,
                 url,
@@ -571,7 +585,7 @@ pub(crate) async fn execute_command(
             let url = arg.trim();
             if url.is_empty() {
                 reply(
-                    bot,
+                    ctx.sender,
                     message.chat.id.0,
                     message.id,
                     "Usage: /debug <post url>",
@@ -585,7 +599,7 @@ pub(crate) async fn execute_command(
             match x_media::site::fetch(url).await {
                 Ok(None) => {
                     reply(
-                        bot,
+                        ctx.sender,
                         message.chat.id.0,
                         message.id,
                         "No enabled site matches this link (twitter/x, pixiv, bsky, misskey or bilibili).",
@@ -594,7 +608,7 @@ pub(crate) async fn execute_command(
                 }
                 Err(e) => {
                     reply(
-                        bot,
+                        ctx.sender,
                         message.chat.id.0,
                         message.id,
                         format!("Fetch failed: {e}"),
@@ -606,7 +620,8 @@ pub(crate) async fn execute_command(
                     // the chat's per-site format override plus the long-post
                     // quoting. Rendering the raw built-in caption here made
                     // `/set_format` look like it did nothing.
-                    let format = CHAT_STORE
+                    let format = ctx
+                        .chat_store
                         .get(message.chat.id.0)
                         .await
                         .format_for(fetched.site_id);
@@ -615,7 +630,7 @@ pub(crate) async fn execute_command(
                         &fetched.caption,
                         &fetched.source_url,
                         fetched.render_fields(),
-                        CONFIG.caption_quote_text_chars,
+                        ctx.config.caption_quote_text_chars,
                     );
                     let report = debug_report(
                         url,
@@ -648,16 +663,19 @@ pub(crate) async fn execute_command(
 
 /// The gate the admin-only commands share: `Some(sender_id)` for an admin,
 /// `None` after the refusal has been sent (the command then returns).
-async fn require_admin(bot: &Bot, message: &Message) -> Result<Option<i64>, RequestError> {
+async fn require_admin(
+    ctx: &AppContext<'_>,
+    message: &Message,
+) -> Result<Option<i64>, RequestError> {
     let sender_id = message
         .from
         .as_ref()
         .map(|user| user.id.0 as i64)
         .unwrap_or(-1);
-    if CONFIG.admin_ids.contains(&sender_id) {
+    if ctx.config.admin_ids.contains(&sender_id) {
         return Ok(Some(sender_id));
     }
-    reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
+    reply(ctx.sender, message.chat.id.0, message.id, "Admin only.").await?;
     Ok(None)
 }
 
@@ -819,10 +837,163 @@ fn debug_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DEBUG_REPORT_CHARS, cap_text, debug_report, preview_caption, settings_text,
-        unknown_placeholder,
+        Command, MAX_DEBUG_REPORT_CHARS, cap_text, debug_report, execute_command, preview_caption,
+        settings_text, unknown_placeholder,
     };
+    use crate::ctx::test_support::{TestStores, api_error, cached_photo};
+    use crate::media_sender::test_support::{MockSender, Outcome};
+    use std::time::Duration;
+    use teloxide::Bot;
+    use teloxide::types::Message;
     use x_media::media::Media;
+
+    /// A private message from `user_id`, as the dispatcher would hand it over.
+    fn message_from(user_id: i64, text: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "message_id": 2,
+            "date": 0,
+            "chat": { "id": 1, "type": "private" },
+            "from": { "id": user_id, "is_bot": false, "first_name": "u" },
+            "text": text,
+        }))
+        .expect("a minimal message deserializes")
+    }
+
+    /// The executor's wiring, which had no test while it reached for the
+    /// process-wide statics: each command reads and writes the chat's own
+    /// store and answers through the sender it was given.
+    #[tokio::test]
+    async fn the_executor_uses_the_context_it_is_given() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let bot = Bot::new("42:TEST");
+        let message = message_from(5, "/settings");
+
+        execute_command(&ctx, &bot, &message, Command::Settings)
+            .await
+            .unwrap();
+        assert!(
+            sender.messages()[0].contains("Forward channel: not set"),
+            "{:?}",
+            sender.messages()
+        );
+
+        // `/set_format` writes the chat's override, the `-` form removes it
+        // again; neither touches another chat.
+        execute_command(
+            &ctx,
+            &bot,
+            &message,
+            Command::SetFormat("twitter {author}: {content}".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stores.chat_store().get(1).await.format_for("twitter"),
+            "{author}: {content}"
+        );
+        execute_command(&ctx, &bot, &message, Command::SetFormat("twitter -".into()))
+            .await
+            .unwrap();
+        assert_eq!(stores.chat_store().get(1).await.format_for("twitter"), "");
+
+        // A typo'd placeholder is refused (and not stored): it would otherwise
+        // render literally into every caption of that site.
+        execute_command(
+            &ctx,
+            &bot,
+            &message,
+            Command::SetFormat("twitter {titel}".into()),
+        )
+        .await
+        .unwrap();
+        let last = sender.messages().last().unwrap().clone();
+        assert!(last.contains("Unknown placeholder {titel}"), "{last}");
+        assert_eq!(stores.chat_store().get(1).await.format_for("twitter"), "");
+    }
+
+    /// The admin gate: the two admin-only commands answer a refusal instead of
+    /// acting, and act for an admin.
+    #[tokio::test]
+    async fn the_admin_only_commands_refuse_a_non_admin() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], || api_error("boom"));
+        let mut stores = TestStores::new();
+        stores.config_mut().admin_ids = vec![5];
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
+        let ctx = stores.ctx(&sender);
+        let bot = Bot::new("42:TEST");
+        let outsider = message_from(9, "/clear_cache");
+
+        for command in [
+            Command::BotDict,
+            Command::ClearCache(String::new()),
+            Command::ClearCache("https://x.com/u/status/1".into()),
+        ] {
+            execute_command(&ctx, &bot, &outsider, command)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            sender.messages(),
+            vec!["Admin only."; 3],
+            "every admin-only command answers the refusal"
+        );
+        assert!(
+            stores
+                .link_cache()
+                .get("twitter:1", Duration::from_secs(60))
+                .await
+                .is_some(),
+            "a refusal must not clear the cache"
+        );
+
+        // The admin's `/clear_cache` does clear it, by link and wholesale.
+        let admin = message_from(5, "/clear_cache");
+        execute_command(
+            &ctx,
+            &bot,
+            &admin,
+            Command::ClearCache("https://x.com/u/status/1".into()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            stores
+                .link_cache()
+                .get("twitter:1", Duration::from_secs(60))
+                .await
+                .is_none(),
+            "the admin's /clear_cache must clear the entry"
+        );
+    }
+
+    /// `/debug` answers the parse result and sends nothing: an unsupported link
+    /// gets the explanation the group/private paths also use.
+    #[tokio::test]
+    async fn debug_replies_without_sending_media() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let bot = Bot::new("42:TEST");
+        let message = message_from(5, "/debug https://example.com/x");
+
+        execute_command(
+            &ctx,
+            &bot,
+            &message,
+            Command::Debug("https://example.com/x".into()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sender.calls(), vec!["send_message"]);
+        assert!(
+            sender.messages()[0].contains("No enabled site matches this link"),
+            "{:?}",
+            sender.messages()
+        );
+    }
 
     #[test]
     fn debug_report_renders_fields_and_media() {

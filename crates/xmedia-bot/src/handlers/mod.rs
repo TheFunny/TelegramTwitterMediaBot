@@ -217,7 +217,7 @@ pub(crate) async fn handle_message(
             text.split_whitespace().next().unwrap_or("<empty>")
         );
         log::trace!("command text: {text_preview}");
-        execute_command(bot, &message, command).await?;
+        execute_command(ctx, bot, &message, command).await?;
         return respond(());
     }
     if is_private {
