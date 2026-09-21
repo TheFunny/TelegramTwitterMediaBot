@@ -657,6 +657,44 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
     }
 }
 
+/// Sends a post that has no media of its own: its caption — the post's URL,
+/// author and text, in the chat's per-site format, long-post quoting included
+/// — becomes the message. Such a post used to be answered with "No media
+/// found", throwing away text the fetch had already parsed and escaped.
+///
+/// No queue entry: there is no `Task` shape for text, and a post with nothing
+/// to download is cheap for the user to paste again, so a failure is reported
+/// rather than retried.
+pub(crate) async fn send_text_post(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to: i64,
+    caption: String,
+) {
+    match ctx
+        .sender
+        .send_message(
+            ChatId(chat_id),
+            caption,
+            Some(MessageId(reply_to as i32)),
+            None,
+        )
+        .await
+    {
+        Ok(_) => log::info!("sent the post's text for chat={chat_id}"),
+        Err(e) => {
+            log::warn!("could not send the post's text for chat={chat_id}: {e}");
+            notify_failure(
+                ctx.sender,
+                Some(chat_id),
+                Some(reply_to),
+                "Could not send this post's text.",
+            )
+            .await;
+        }
+    }
+}
+
 /// Copies already-sent messages to the forward channel. No download fallback:
 /// the files are already on Telegram's servers.
 pub async fn forward_messages(ctx: &AppContext<'_>, task: &Task) -> Result<(), SendError> {
@@ -704,7 +742,7 @@ mod tests {
     use super::post_send::{build_edit_markup, cache_sent_task};
     use super::upload::sniff_ext;
     use super::*;
-    use crate::ctx::test_support::{TestStores, cached_photo, photo_item};
+    use crate::ctx::test_support::{TestStores, api_error, cached_photo, photo_item};
     use std::collections::HashMap;
     use std::time::Duration;
     use teloxide::ApiError;
@@ -783,6 +821,40 @@ mod tests {
         // Already-photos-first input is unchanged.
         let items = vec![photo("https://p/1.jpg"), video("https://v/1.mp4")];
         assert!(matches!(photos_first(items)[0], Photo { .. }));
+    }
+
+    /// A media-less post goes out as a message; a failure is reported rather
+    /// than swallowed (there is no task to retry).
+    #[tokio::test]
+    async fn a_text_post_is_sent_or_reported() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+
+        send_text_post(
+            &ctx,
+            1,
+            2,
+            "https://x.com/u/status/1\n<a>u</a>: hello".to_string(),
+        )
+        .await;
+
+        assert_eq!(sender.calls(), vec!["send_message"]);
+        assert_eq!(
+            sender.messages(),
+            vec!["https://x.com/u/status/1\n<a>u</a>: hello"]
+        );
+
+        // The failure path: the send fails, the notice follows.
+        let sender = MockSender::scripted(vec![Outcome::MessageErr, Outcome::MessageOk], || {
+            api_error("Bad Request: chat not found")
+        });
+        let ctx = stores.ctx(&sender);
+
+        send_text_post(&ctx, 1, 2, "text".into()).await;
+
+        assert_eq!(sender.calls(), vec!["send_message", "send_message"]);
+        assert!(sender.messages()[1].contains("Could not send this post's text"));
     }
 
     #[test]

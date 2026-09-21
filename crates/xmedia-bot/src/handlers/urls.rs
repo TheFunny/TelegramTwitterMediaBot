@@ -615,19 +615,25 @@ async fn url_media_inner(
             let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(e)).await;
         }
         Ok(Some(fetched)) => {
-            if fetched.media.is_empty() {
-                let _ = reply(
-                    ctx.sender,
-                    chat_id,
-                    reply_to,
-                    "No media found or media type is not supported.",
-                )
-                .await;
-                return;
-            }
             let chat_data = ctx.chat_store.get(chat_id).await;
             // Per-site caption format override (empty -> built-in caption).
             let format = chat_data.format_for(fetched.site_id);
+            if fetched.media.is_empty() {
+                // A post with no media is still a post: its text goes out as a
+                // message (through the same caption the media path would
+                // attach, plus the long-post quoting the senders apply to
+                // their own), instead of answering "No media found" to text
+                // the fetch already parsed.
+                let text = fetched
+                    .render_fields()
+                    .map(|(_, _, title, content, _)| x_media::site::compose_text(title, content))
+                    .unwrap_or_default();
+                let caption = fetched.caption_with(&format);
+                let caption =
+                    send::quote_long_caption(&caption, &text, ctx.config.caption_quote_text_chars);
+                send::send_text_post(ctx, chat_id, reply_to.0 as i64, caption.into_owned()).await;
+                return;
+            }
             let caption = fetched.caption_with(&format);
             // Raw render data for the link cache; the send fills in the
             // Telegram file ids and persists the entry.
@@ -818,6 +824,36 @@ mod tests {
 
             assert_eq!(sender.captions(), vec![expected], "text {text:?}");
         }
+    }
+
+    /// A post with no media of its own is delivered as its text instead of
+    /// "No media found" (live: reaching the branch needs a real fetch, since
+    /// `Fetched` cannot be built outside x-media). Run with
+    /// `cargo test -p xmedia-bot -- --ignored live`.
+    #[tokio::test]
+    #[ignore = "live network: fetches the post from its site"]
+    async fn live_a_text_only_link_is_sent_as_text() {
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+
+        url_media(
+            &ctx,
+            1,
+            2,
+            "https://x.com/i/status/1992471125734142256",
+            PostSend::FromChat,
+        )
+        .await;
+
+        assert_eq!(
+            sender.calls(),
+            vec!["send_chat_action", "send_message"],
+            "a media-less post is one message, not a media send"
+        );
+        let text = &sender.messages()[0];
+        assert!(text.contains("https://x.com/"), "{text}");
+        assert!(text.contains("1992471125734142256"), "{text}");
     }
 
     #[tokio::test]
