@@ -227,6 +227,22 @@ pub(super) async fn prepare_upload_item(
                 // before uploading; photos that cannot be brought within the
                 // limits degrade to the smaller URL. CPU-heavy work runs off
                 // the async executor thread.
+                //
+                // The header decides what that will cost in memory, so the
+                // probe travels with the downloaded bytes (both stay alive
+                // through the decode) and the reservation covers their sum:
+                // `PREP_SLOTS` bounds how many photos are prepared at once,
+                // this bounds what they hold between them — 512 MiB, whatever
+                // the batch looks like.
+                let (bytes, decode) = tokio::task::spawn_blocking(move || {
+                    let decode = photo::decode_budget_bytes(&bytes);
+                    (bytes, decode)
+                })
+                .await
+                .map_err(|e| FallbackError::Permanent {
+                    message: format!("photo worker panicked: {e}"),
+                })?;
+                let _budget = photo::reserve_memory(bytes.len() as u64 + decode).await;
                 let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file, &bytes))
                     .await
                     .map_err(|e| FallbackError::Permanent {

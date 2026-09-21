@@ -12,6 +12,7 @@
 //! and 24-bit RGB have no alpha channel).
 
 use std::io::Write;
+use std::sync::LazyLock;
 
 use fast_image_resize as fir;
 use tempfile::NamedTempFile;
@@ -36,6 +37,90 @@ pub(crate) const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
 /// the cap the item degrades to the smaller URL
 /// (`FallbackError::MediaTooLarge`), it is never an error.
 pub(crate) const MAX_PHOTO_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Size of one memory-budget unit. Small enough that ordinary photos do not
+/// queue behind each other, coarse enough that the semaphore is not a counter
+/// per megabyte.
+const MEMORY_UNIT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Process-wide memory budget for photo preparation, in [`MEMORY_UNIT_BYTES`]
+/// units: 512 MiB. `PREP_SLOTS` bounds how many items are prepared at once but
+/// not how much memory they hold — one photo's decode buffer can be up to
+/// [`MAX_DECODE_BYTES`] (512 MiB), and the guard that refuses a bigger one is
+/// per photo, so six concurrent photos could peak near 3 GiB on a host sized
+/// for a fraction of that. Each item charges what it actually holds (its
+/// downloaded bytes plus the decode buffer its header predicts), so a 10-image
+/// album of ordinary photos still runs several at a time while huge ones
+/// serialize.
+const MEMORY_UNITS: u32 = 8;
+
+static MEMORY_BUDGET: LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize)));
+
+/// The buffer `w`×`h` needs in `channels` output channels — the one number the
+/// per-photo guards and the reservation below both use, so they cannot drift.
+fn decode_bytes(w: u32, h: u32, channels: usize) -> u64 {
+    (w as u64) * (h as u64) * channels as u64
+}
+
+/// Units to charge for `bytes`, clamped to the whole budget: an item must never
+/// ask for more than exists, or it would wait for itself forever.
+fn memory_units(bytes: u64) -> u32 {
+    bytes
+        .div_ceil(MEMORY_UNIT_BYTES)
+        .clamp(1, MEMORY_UNITS as u64) as u32
+}
+
+/// Reserves `bytes` of the preparation budget until the returned permit drops.
+pub(crate) async fn reserve_memory(bytes: u64) -> tokio::sync::OwnedSemaphorePermit {
+    reserve(std::sync::Arc::clone(&MEMORY_BUDGET), bytes).await
+}
+
+/// [`reserve_memory`] against a caller-chosen budget; the tests pass their own
+/// so they do not fight over the process-wide one.
+async fn reserve(
+    budget: std::sync::Arc<tokio::sync::Semaphore>,
+    bytes: u64,
+) -> tokio::sync::OwnedSemaphorePermit {
+    budget
+        .acquire_many_owned(memory_units(bytes))
+        .await
+        .expect("memory budget semaphore closed")
+}
+
+/// The decode buffer a downloaded photo will allocate, from its header alone —
+/// zero when it is already within Telegram's limits and is uploaded as-is, zero
+/// for a format [`prepare_photo`] does not decode. Mirrors the early return and
+/// the guard of the two branches below.
+pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
+    if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
+        if within_limits(w, h, bytes) {
+            return 0;
+        }
+        return decode_bytes(w, h, output_channels(color));
+    }
+    if let Some((w, h)) = jpeg_dims(bytes) {
+        if within_limits(w, h, bytes) {
+            return 0;
+        }
+        return decode_bytes(w, h, 3);
+    }
+    0
+}
+
+/// Whether a photo is uploaded untouched (Telegram's dimension sum, and the
+/// upload cap its bytes are compared against).
+fn within_limits(w: u32, h: u32, bytes: &[u8]) -> bool {
+    w + h <= PHOTO_MAX_DIMENSION_SUM && bytes.len() as u64 <= MAX_UPLOAD_BYTES
+}
+
+/// JPEG dimensions from the headers, without decoding any pixels.
+fn jpeg_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
+    decoder.decode_headers().ok()?;
+    let info = decoder.info()?;
+    Some((info.width as u32, info.height as u32))
+}
 /// JPEG output quality (1-100).
 const JPEG_QUALITY: u8 = 90;
 
@@ -239,7 +324,7 @@ fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     );
 
     let channels = output_channels(color_type);
-    if (w as u64) * (h as u64) * channels as u64 > MAX_DECODE_BYTES {
+    if decode_bytes(w, h, channels) > MAX_DECODE_BYTES {
         log::warn!("photo decode buffer exceeds the memory budget; falling back to smaller media");
         return Ok(PhotoPrep::UseFallback);
     }
@@ -310,7 +395,7 @@ fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> 
     if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
         return Ok(PhotoPrep::Upload(file));
     }
-    if (w as u64) * (h as u64) * 3 > MAX_DECODE_BYTES {
+    if decode_bytes(w, h, 3) > MAX_DECODE_BYTES {
         log::warn!("photo decode buffer exceeds the memory budget; falling back to smaller media");
         return Ok(PhotoPrep::UseFallback);
     }
@@ -334,6 +419,7 @@ fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn png_header(w: u32, h: u32, depth: u8, color: u8) -> Vec<u8> {
         let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
@@ -341,6 +427,100 @@ mod tests {
         bytes.extend(h.to_be_bytes());
         bytes.extend([depth, color, 0, 0, 0]);
         bytes
+    }
+
+    /// The budget is a *process-wide* memory bound: `PREP_SLOTS` (6) caps how
+    /// many photos are prepared at once, but six max-size photos would still
+    /// hold six decode buffers of up to 512 MiB each.
+    #[tokio::test]
+    async fn huge_decodes_cannot_overlap_but_do_run_alone() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
+        let max_photo = MAX_DECODE_BYTES + MAX_PHOTO_DOWNLOAD_BYTES;
+
+        // One max-size photo fits (clamped to the whole budget), so it can
+        // never wait for budget that cannot exist.
+        let first = tokio::time::timeout(
+            Duration::from_millis(50),
+            reserve(budget.clone(), max_photo),
+        )
+        .await
+        .expect("a max-size photo must not wait");
+        // A second one of the same size has to wait for the first to finish.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reserve(budget.clone(), max_photo)
+            )
+            .await
+            .is_err(),
+            "two max-size decodes overlapped"
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                reserve(budget.clone(), max_photo)
+            )
+            .await
+            .is_ok(),
+            "the budget was not released"
+        );
+    }
+
+    /// A 10-image album of ordinary photos must not serialize: they charge
+    /// their real (small) buffers, not a fixed heavyweight slot.
+    #[tokio::test]
+    async fn ordinary_photos_share_the_budget() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
+        // A 4 MiB photo that decodes to ~36 MiB (4000x3000 RGB).
+        let ordinary = 4 * 1024 * 1024 + 36 * 1024 * 1024;
+        let mut held = Vec::new();
+        for i in 0..MEMORY_UNITS {
+            held.push(
+                tokio::time::timeout(Duration::from_millis(50), reserve(budget.clone(), ordinary))
+                    .await
+                    .unwrap_or_else(|_| panic!("ordinary photo {i} waited for budget")),
+            );
+        }
+    }
+
+    #[test]
+    fn memory_units_round_up_and_clamp() {
+        assert_eq!(memory_units(1), 1);
+        assert_eq!(memory_units(MEMORY_UNIT_BYTES), 1);
+        assert_eq!(memory_units(MEMORY_UNIT_BYTES + 1), 2);
+        // Never more than exists, or the item waits for itself forever.
+        assert_eq!(memory_units(u64::MAX), MEMORY_UNITS);
+        // One item's worst case (a max download plus a max decode) takes the
+        // whole budget by itself.
+        assert_eq!(
+            memory_units(MAX_DECODE_BYTES + MAX_PHOTO_DOWNLOAD_BYTES),
+            MEMORY_UNITS
+        );
+    }
+
+    /// What the reservation is charged is decided by the header, and it has to
+    /// agree with what the pipeline does: a photo uploaded as-is costs nothing,
+    /// one that gets processed costs its decoded buffer.
+    #[test]
+    fn decode_budget_follows_the_processing_decision() {
+        // 9999x2 (sum 10001) is over the dimension cap → processed → charged.
+        let oversized = png_header(9999, 2, 8, 2); // 8-bit RGB
+        assert_eq!(decode_budget_bytes(&oversized), 9999 * 2 * 3);
+        // Inside the limits (dimensions *and* bytes) → uploaded as-is.
+        let small = png_header(100, 100, 8, 2);
+        assert_eq!(decode_budget_bytes(&small), 0);
+        // A format the pipeline does not decode costs nothing either.
+        assert_eq!(decode_budget_bytes(b"GIF89a not a photo"), 0);
+
+        // JPEG: 9999x2 is over the cap, so its RGB decode buffer is charged.
+        let (w, h) = (9999u16, 2u16);
+        let rgb = vec![90u8; w as usize * h as usize * 3];
+        let mut bytes = Vec::new();
+        jpeg_encoder::Encoder::new(&mut bytes, 90)
+            .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        assert_eq!(decode_budget_bytes(&bytes), 9999 * 2 * 3);
     }
 
     #[test]
