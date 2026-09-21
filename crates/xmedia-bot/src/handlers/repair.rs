@@ -190,6 +190,7 @@ mod tests {
     use super::*;
     use crate::ctx::test_support::{TestStores, permanent_error, photo_item};
     use crate::media_sender::test_support::MockSender;
+    use crate::send::MediaRef;
 
     fn queued_task(media: &str, batch_index: usize, sent: Vec<i64>) -> Task {
         Task::SendMediaSequence {
@@ -281,8 +282,8 @@ mod tests {
                 assert_eq!(caption, "fresh caption");
                 assert!(
                     matches!(
-                        &media_batches[0][0],
-                        MediaItemPayload::Photo { media, .. } if media == "https://cdn/fresh.jpg"
+                        media_batches[0][0].media_ref(),
+                        MediaRef::Source(media) if media == "https://cdn/fresh.jpg"
                     ),
                     "fresh media must replace the lost local file"
                 );
@@ -330,13 +331,11 @@ mod tests {
                 caption,
                 ..
             } => {
-                let media: Vec<String> = media_batches
+                let media: Vec<&str> = media_batches
                     .iter()
                     .flatten()
-                    .map(|item| match item {
-                        MediaItemPayload::Photo { media, .. }
-                        | MediaItemPayload::Video { media, .. }
-                        | MediaItemPayload::Animation { media, .. } => media.clone(),
+                    .map(|item| match item.media_ref() {
+                        MediaRef::Source(media) | MediaRef::FileId(media) => media.as_str(),
                     })
                     .collect();
                 assert!(!media.is_empty(), "the fresh fetch yielded no media");

@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 pub(crate) enum Outcome {
     GroupOk,
     GroupErr,
+    AnimationOk,
     AnimationErr,
     CopyOk,
     CopyErr,
@@ -229,9 +230,23 @@ pub(crate) struct MockSender {
     answers: Mutex<Vec<Option<String>>>,
     /// `(chat, message, text)` of every text rewrite, in order.
     edited_texts: Mutex<Vec<(i64, i64, String)>>,
+    /// What each `send_animation` handed Telegram: a URL or a file id as that
+    /// string, an upload as `attach://<id>`.
+    animation_files: Mutex<Vec<String>>,
     /// Builds the error every `*Err` outcome returns (RequestError is not
     /// cloneable, so the factory recreates it per call).
     error: Box<dyn Fn() -> RequestError + Send + Sync>,
+}
+
+/// The smallest `Message` the send paths accept, for the outcomes that must
+/// report one (`send_animation` reads its id, and its media for the cache).
+pub(crate) fn mock_message(id: i64) -> Message {
+    serde_json::from_value(serde_json::json!({
+        "message_id": id,
+        "date": 0,
+        "chat": { "id": 1, "type": "private" },
+    }))
+    .expect("a minimal message deserializes")
 }
 
 impl MockSender {
@@ -250,6 +265,7 @@ impl MockSender {
             captions: Mutex::new(Vec::new()),
             answers: Mutex::new(Vec::new()),
             edited_texts: Mutex::new(Vec::new()),
+            animation_files: Mutex::new(Vec::new()),
             error: Box::new(error),
         }
     }
@@ -278,6 +294,11 @@ impl MockSender {
     /// `(chat, message, text)` of every `edit_message_text`, in order.
     pub(crate) fn edited_texts(&self) -> Vec<(i64, i64, String)> {
         self.edited_texts.lock().clone()
+    }
+
+    /// What every `send_animation` handed Telegram, in order.
+    pub(crate) fn animation_files(&self) -> Vec<String> {
+        self.animation_files.lock().clone()
     }
 
     fn next(&self, kind: &'static str) -> Outcome {
@@ -330,10 +351,20 @@ impl MediaSender for MockSender {
         _reply_to: MessageId,
         _caption: &'a str,
         _spoiler: bool,
-        _file: InputFile,
+        file: InputFile,
     ) -> BoxFuture<'a, Result<Message, RequestError>> {
+        // Record what Telegram was handed: a URL or a file id serializes as
+        // that string, an upload as `attach://<id>`. Enough to tell a cached
+        // send (which must not re-upload) from a fresh one.
+        self.animation_files.lock().push(
+            serde_json::to_value(&file)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+        );
         Box::pin(async move {
             match self.next("send_animation") {
+                Outcome::AnimationOk => Ok(mock_message(MockSender::SENT_ID)),
                 Outcome::AnimationErr => Err(self.error()),
                 other => panic!("unexpected outcome {other:?} for send_animation"),
             }

@@ -50,7 +50,7 @@ pub static CONTEXT: LazyLock<AppContext<'static>> =
 pub(crate) mod test_support {
     use super::*;
     use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
-    use crate::send::MediaItemPayload;
+    use crate::send::{MediaItemPayload, MediaRef};
     use crate::state::EditMessage;
     use std::sync::Arc;
     use teloxide::{ApiError, RequestError};
@@ -77,10 +77,13 @@ pub(crate) mod test_support {
     /// `send`'s own tests build that case directly).
     pub(crate) fn photo_item(media: &str, has_spoiler: bool, file_id: bool) -> MediaItemPayload {
         MediaItemPayload::Photo {
-            media: media.to_string(),
+            media: if file_id {
+                MediaRef::FileId(media.to_string())
+            } else {
+                MediaRef::Source(media.to_string())
+            },
             has_spoiler,
             fallback_url: None,
-            file_id,
         }
     }
 

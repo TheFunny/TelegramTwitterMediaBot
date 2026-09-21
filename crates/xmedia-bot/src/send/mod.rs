@@ -19,7 +19,7 @@ pub(crate) use error::classify_to_send_error;
 pub use error::{
     Classification, SendError, classify_request_error, is_media_fetch_failure, is_size_error,
 };
-use input_media::{build_media_group, input_file_for, item_url};
+use input_media::{build_media_group, item_url};
 use post_send::{cache_animation_send, cache_sent_task};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -41,40 +41,58 @@ pub(crate) use post_send::{
 /// missing token fails fast instead of on the first task.
 pub static BOT: LazyLock<Bot> = LazyLock::new(Bot::from_env);
 
+/// Where an item's bytes come from. One `media: String` used to carry both
+/// meanings with a `file_id: bool` beside it to say which — three copies of a
+/// flag every reader had to re-check.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaRef {
+    /// A media URL Telegram fetches itself, or a local path to upload.
+    Source(String),
+    /// A Telegram file id from the link cache: sent as-is, no fetch, no upload.
+    FileId(String),
+}
+
+/// A queued retry persists this payload, so its wire shape is a contract with
+/// the rows already on disk: `media` used to be a bare string with a
+/// `file_id: bool` beside it, and a row in that older shape no longer parses —
+/// the queue dead-letters it (`handle_task`'s "invalid task payload") and the
+/// dead-letter path still names the post, so the one-time upgrade cost is a
+/// retry that could not be resumed anyway.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MediaItemPayload {
     Photo {
-        media: String,
+        media: MediaRef,
         has_spoiler: bool,
         /// Smaller variant used when the primary media exceeds Telegram's
         /// size limits.
         #[serde(default)]
         fallback_url: Option<String>,
-        /// `media` is a Telegram file id (link-cache hit), not a URL.
-        #[serde(default)]
-        file_id: bool,
     },
     Video {
-        media: String,
+        media: MediaRef,
         has_spoiler: bool,
         thumbnail: Option<String>,
         #[serde(default)]
         fallback_url: Option<String>,
-        /// `media` is a Telegram file id (link-cache hit), not a URL.
-        #[serde(default)]
-        file_id: bool,
     },
     Animation {
-        media: String,
+        media: MediaRef,
         has_spoiler: bool,
-        /// `media` is a Telegram file id (link-cache hit), not a URL.
-        #[serde(default)]
-        file_id: bool,
     },
 }
 
 impl MediaItemPayload {
+    /// The item's media reference, whatever kind of item it is.
+    pub(crate) fn media_ref(&self) -> &MediaRef {
+        match self {
+            MediaItemPayload::Photo { media, .. }
+            | MediaItemPayload::Video { media, .. }
+            | MediaItemPayload::Animation { media, .. } => media,
+        }
+    }
+
     fn fallback_url(&self) -> Option<&str> {
         match self {
             MediaItemPayload::Photo { fallback_url, .. }
@@ -277,12 +295,8 @@ impl Task {
         };
         let mut out = Vec::new();
         for item in items {
-            let is_file_id = match item {
-                MediaItemPayload::Photo { file_id, .. }
-                | MediaItemPayload::Video { file_id, .. }
-                | MediaItemPayload::Animation { file_id, .. } => *file_id,
-            };
-            if is_file_id {
+            // A file id names a Telegram-hosted copy, not a local file.
+            if matches!(item.media_ref(), MediaRef::FileId(_)) {
                 continue;
             }
             let media = item_url(item);
@@ -556,14 +570,15 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
     let text = task_text(task);
     let caption = quote_long_caption(caption, &text, ctx.config.caption_quote_text_chars);
     let (media_url, has_spoiler) = match animation {
-        MediaItemPayload::Animation {
-            media, has_spoiler, ..
-        } => (media, *has_spoiler),
+        MediaItemPayload::Animation { has_spoiler, .. } => (item_url(animation), *has_spoiler),
         MediaItemPayload::Photo { .. } | MediaItemPayload::Video { .. } => {
             unreachable!("SendAnimation carries an Animation payload")
         }
     };
-    let url_file = match input_file_for(media_url) {
+    // The payload knows whether its media is a URL/path or a cached file id
+    // (this used to go through `input_file_for`, which treated a file id as a
+    // local path and answered "local media file missing").
+    let url_file = match animation.input_file() {
         Ok(file) => file,
         Err(message) => {
             return Err(SendError::Permanent {
@@ -719,19 +734,17 @@ mod tests {
 
     #[test]
     fn photos_first_orders_photos_before_videos() {
-        use MediaItemPayload::{Animation, Photo, Video};
+        use MediaItemPayload::{Photo, Video};
         let photo = |u: &str| Photo {
-            media: u.into(),
+            media: MediaRef::Source(u.into()),
             has_spoiler: false,
             fallback_url: None,
-            file_id: false,
         };
         let video = |u: &str| Video {
-            media: u.into(),
+            media: MediaRef::Source(u.into()),
             has_spoiler: false,
             thumbnail: None,
             fallback_url: None,
-            file_id: false,
         };
         let items = vec![
             video("https://v/1.mp4"),
@@ -743,10 +756,8 @@ mod tests {
         // All photos first (stable: p1 before p2), then all videos in order.
         let kinds: Vec<&str> = ordered
             .iter()
-            .map(|i| match i {
-                Photo { media, .. } => media.as_str(),
-                Video { media, .. } => media.as_str(),
-                Animation { .. } => unreachable!(),
+            .map(|i| match i.media_ref() {
+                MediaRef::Source(media) | MediaRef::FileId(media) => media.as_str(),
             })
             .collect();
         assert_eq!(
@@ -929,9 +940,13 @@ mod tests {
 
     #[test]
     fn media_item_payload_fallback_url_serde_default() {
-        // Old queued payloads without the field deserialize with None.
-        let json =
-            serde_json::json!({"kind": "photo", "media": "https://a/b.jpg", "has_spoiler": false});
+        // `fallback_url` is optional in the wire shape: a payload written
+        // without it deserializes with `None`.
+        let json = serde_json::json!({
+            "kind": "photo",
+            "media": {"source": "https://a/b.jpg"},
+            "has_spoiler": false,
+        });
         let photo: MediaItemPayload = serde_json::from_value(json).unwrap();
         assert!(matches!(
             photo,
@@ -1013,17 +1028,15 @@ mod tests {
             caption: "cap".into(),
             media_batches: vec![
                 vec![MediaItemPayload::Photo {
-                    media: "https://a/b.jpg".into(),
+                    media: MediaRef::Source("https://a/b.jpg".into()),
                     has_spoiler: true,
                     fallback_url: Some("https://a/b_small.jpg".into()),
-                    file_id: false,
                 }],
                 vec![MediaItemPayload::Video {
-                    media: "https://a/v.mp4".into(),
+                    media: MediaRef::Source("https://a/v.mp4".into()),
                     has_spoiler: false,
                     thumbnail: Some("https://a/t.jpg".into()),
                     fallback_url: None,
-                    file_id: false,
                 }],
             ],
             batch_index: 1,
@@ -1268,9 +1281,8 @@ mod tests {
             reply_to_message_id: 2,
             caption: "cap".into(),
             animation: MediaItemPayload::Animation {
-                media: file.to_string_lossy().into_owned(),
+                media: MediaRef::Source(file.to_string_lossy().into_owned()),
                 has_spoiler: false,
-                file_id: false,
             },
             source_url: "https://x.com/u/status/1".into(),
             edit_before_forward: false,

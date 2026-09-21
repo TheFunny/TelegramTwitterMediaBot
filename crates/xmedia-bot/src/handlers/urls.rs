@@ -5,7 +5,7 @@ use super::{log_key, reply};
 use crate::ctx::AppContext;
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::media_sender::MediaSender;
-use crate::send::{self, Delivery, MediaItemPayload, Task};
+use crate::send::{self, Delivery, MediaItemPayload, MediaRef, Task};
 use crate::state::ChatData;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -188,24 +188,21 @@ pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPaylo
         // A gif inside a group becomes a video item; a lone gif takes the
         // animation path (see url_media).
         Media::Illustration { .. } => MediaItemPayload::Photo {
-            media: media.url().to_string(),
+            media: MediaRef::Source(media.url().to_string()),
             has_spoiler: sensitive,
             fallback_url,
-            file_id: false,
         },
         Media::Video { .. } => MediaItemPayload::Video {
-            media: media.url().to_string(),
+            media: MediaRef::Source(media.url().to_string()),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
-            file_id: false,
         },
         Media::Animated { .. } => MediaItemPayload::Video {
-            media: media.url().to_string(),
+            media: MediaRef::Source(media.url().to_string()),
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
-            file_id: false,
         },
     }
 }
@@ -293,11 +290,12 @@ async fn dispatch_send(
 /// the URL costs Telegram a fetch (or the upload fallback a download) and saves
 /// the whole source round trip, including a ugoira encode or an HLS remux.
 fn cached_media_payload(media: &CachedMedia, sensitive: bool) -> MediaItemPayload {
-    let has_file_id = !media.file_id.is_empty();
-    let source = if has_file_id {
-        media.file_id.clone()
+    // The entry's file id when it has one, else its source URL (a permanently
+    // failed send degrades the entry and clears the id).
+    let source = if media.file_id.is_empty() {
+        MediaRef::Source(media.url.clone())
     } else {
-        media.url.clone()
+        MediaRef::FileId(media.file_id.clone())
     };
     // A degraded item carries no smaller variant: a fresh fetch's would, but
     // the item is what the source itself sent, so an oversize is handled by the
@@ -308,19 +306,16 @@ fn cached_media_payload(media: &CachedMedia, sensitive: bool) -> MediaItemPayloa
             media: source,
             has_spoiler: sensitive,
             fallback_url,
-            file_id: has_file_id,
         },
         CachedMediaKind::Video => MediaItemPayload::Video {
             media: source,
             has_spoiler: sensitive,
             thumbnail: None,
             fallback_url,
-            file_id: has_file_id,
         },
         CachedMediaKind::Animation => MediaItemPayload::Animation {
             media: source,
             has_spoiler: sensitive,
-            file_id: has_file_id,
         },
     }
 }
@@ -729,6 +724,34 @@ mod tests {
         assert!(entry.media[0].file_id.is_empty());
     }
 
+    /// A repeat request for a single-gif post re-sends the cached file id
+    /// instead of failing: the animation path used to hand the id to
+    /// `input_file_for`, which read it as a local path and answered "local
+    /// media file missing" (permanent), so the second request of a gif link
+    /// always failed and only the third — from the degraded entry — worked.
+    #[tokio::test]
+    async fn a_cached_animation_sends_by_file_id() {
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![Outcome::AnimationOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+        let mut entry = cached_photo();
+        entry.media = vec![CachedMedia {
+            kind: CachedMediaKind::Animation,
+            file_id: "AgAC-gif".into(),
+            url: "https://p/1.gif".into(),
+        }];
+        stores.link_cache().put("twitter:1", &entry).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
+
+        assert_eq!(sender.calls(), vec!["send_chat_action", "send_animation"]);
+        assert_eq!(
+            sender.animation_files(),
+            vec!["AgAC-gif"],
+            "a cached gif must go out as its file id, not as an upload"
+        );
+    }
+
     /// The two payload shapes a cached item can take, asserted directly: the
     /// file id when there is one, the source URL when the entry was degraded.
     #[test]
@@ -740,16 +763,14 @@ mod tests {
         };
         match cached_media_payload(&with_id, true) {
             MediaItemPayload::Photo {
-                media,
+                media: MediaRef::FileId(media),
                 has_spoiler,
-                file_id,
                 ..
             } => {
-                assert_eq!(media, "AgAC");
-                assert!(file_id, "a cached send must go by file id");
+                assert_eq!(media, "AgAC", "a cached send must go by file id");
                 assert!(has_spoiler);
             }
-            _ => panic!("expected a photo payload"),
+            other => panic!("expected a photo payload by file id, got {other:?}"),
         }
 
         let degraded = CachedMedia {
@@ -759,16 +780,14 @@ mod tests {
         };
         match cached_media_payload(&degraded, false) {
             MediaItemPayload::Video {
-                media,
-                file_id,
+                media: MediaRef::Source(media),
                 fallback_url,
                 ..
             } => {
-                assert_eq!(media, "https://v/1.mp4");
-                assert!(!file_id, "a degraded send must go by URL");
+                assert_eq!(media, "https://v/1.mp4", "a degraded send goes by URL");
                 assert!(fallback_url.is_none());
             }
-            _ => panic!("expected a video payload"),
+            other => panic!("expected a video payload by URL, got {other:?}"),
         }
     }
 
@@ -1101,17 +1120,15 @@ mod tests {
         use MediaItemPayload::{Animation, Photo, Video};
 
         let photo = || Photo {
-            media: "https://p/1.jpg".into(),
+            media: MediaRef::Source("https://p/1.jpg".into()),
             has_spoiler: false,
             fallback_url: None,
-            file_id: false,
         };
         let video = || Video {
-            media: "https://v/1.mp4".into(),
+            media: MediaRef::Source("https://v/1.mp4".into()),
             has_spoiler: false,
             thumbnail: None,
             fallback_url: None,
-            file_id: false,
         };
 
         // Unknown before the fetch: the pipeline starts on "typing".
@@ -1124,9 +1141,8 @@ mod tests {
             ActionHint::for_items(&[
                 video(),
                 Animation {
-                    media: "https://v/2.mp4".into(),
+                    media: MediaRef::Source("https://v/2.mp4".into()),
                     has_spoiler: false,
-                    file_id: false,
                 }
             ])
             .action(),

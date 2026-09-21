@@ -3,7 +3,9 @@
 //! that exceed Telegram's limits and uploads the batch via multipart.
 
 use super::input_media::{input_file_for, item_url, media_from};
-use super::{MediaItemPayload, SendError, Task, classify_to_send_error, retry_delay_seconds};
+use super::{
+    MediaItemPayload, MediaRef, SendError, Task, classify_to_send_error, retry_delay_seconds,
+};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
 use std::sync::LazyLock;
@@ -68,10 +70,15 @@ pub(super) enum FallbackError {
 async fn download_to_temp(
     item: &MediaItemPayload,
 ) -> Result<(NamedTempFile, bytes::Bytes), FallbackError> {
-    let media_url = match item {
-        MediaItemPayload::Photo { media, .. }
-        | MediaItemPayload::Video { media, .. }
-        | MediaItemPayload::Animation { media, .. } => media,
+    // Only a URL/path item is ever downloaded: a file id is sent as-is (see
+    // `MediaItemPayload::input_file`), so this path cannot see one.
+    let media_url = match item.media_ref() {
+        MediaRef::Source(media) => media,
+        MediaRef::FileId(id) => {
+            return Err(FallbackError::Permanent {
+                message: format!("file id reached the download path: {id}"),
+            });
+        }
     };
     // Photos are downloaded even over the upload cap so `prepare_photo` can
     // downscale / transcode them, up to their own download cap; videos and

@@ -2,16 +2,16 @@
 //! URL / local path), the per-kind `InputMedia` builders and the media-group
 //! assembly with its caption rule.
 
-use super::MediaItemPayload;
+use super::{MediaItemPayload, MediaRef};
 use teloxide::types::{
     InputFile, InputMedia, InputMediaAnimation, InputMediaPhoto, InputMediaVideo, ParseMode,
 };
 
+/// The item's media string, whether it is a URL/path or a file id — callers
+/// that need the distinction match on [`MediaRef`] themselves.
 pub(super) fn item_url(item: &MediaItemPayload) -> &str {
-    match item {
-        MediaItemPayload::Photo { media, .. }
-        | MediaItemPayload::Video { media, .. }
-        | MediaItemPayload::Animation { media, .. } => media,
+    match item.media_ref() {
+        MediaRef::Source(media) | MediaRef::FileId(media) => media,
     }
 }
 
@@ -35,24 +35,10 @@ impl MediaItemPayload {
     /// The input for a send: a cached file id goes out as `InputFile::file_id`
     /// (no fetch, no upload), URLs go to Telegram, anything else is a local
     /// path (transient upload fallback).
-    fn input_file(&self) -> Result<InputFile, String> {
-        match self {
-            MediaItemPayload::Photo {
-                media,
-                file_id: true,
-                ..
-            }
-            | MediaItemPayload::Video {
-                media,
-                file_id: true,
-                ..
-            }
-            | MediaItemPayload::Animation {
-                media,
-                file_id: true,
-                ..
-            } => Ok(InputFile::file_id(media.clone().into())),
-            _ => input_file_for(item_url(self)),
+    pub(super) fn input_file(&self) -> Result<InputFile, String> {
+        match self.media_ref() {
+            MediaRef::FileId(id) => Ok(InputFile::file_id(id.clone().into())),
+            MediaRef::Source(media) => input_file_for(media),
         }
     }
 }
