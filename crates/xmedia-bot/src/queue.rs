@@ -239,23 +239,20 @@ impl PersistentTaskQueue {
     /// `in_progress`). The startup repair reads these before the workers start:
     /// with no worker running, no row can be leased while it writes.
     pub async fn runnable_rows(&self) -> Vec<(String, String)> {
-        let result = self
-            .pool
-            .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, payload FROM tasks WHERE status IN ('pending', 'in_progress') ORDER BY run_after",
-                )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
-            })
-            .await;
-        match result {
-            Ok(rows) => rows,
-            Err(e) => {
-                log::error!("queue row scan failed: {e}");
-                Vec::new()
-            }
-        }
+        self.pool
+            .with_conn_or(
+                log::Level::Error,
+                "queue row scan failed",
+                Vec::new(),
+                |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, payload FROM tasks WHERE status IN ('pending', 'in_progress') ORDER BY run_after",
+                    )?;
+                    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                    rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+                },
+            )
+            .await
     }
 
     /// Replaces a runnable row's payload and restarts its attempt budget: the
@@ -291,28 +288,25 @@ impl PersistentTaskQueue {
     }
 
     pub async fn pending_backlog(&self) -> Option<(i64, f64)> {
-        let result = self
-            .pool
-            .with_conn(|conn| {
-                let (count, oldest) = conn.query_row(
-                    "SELECT COUNT(*), MIN(run_after) FROM tasks WHERE status='pending'",
-                    [],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?)),
-                )?;
-                // `MIN` over zero rows is NULL, so the count is what decides.
-                Ok(match oldest {
-                    Some(oldest) if count > 0 => Some((count, oldest)),
-                    _ => None,
-                })
-            })
-            .await;
-        match result {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("queue backlog query failed: {e}");
-                None
-            }
-        }
+        self.pool
+            .with_conn_or(
+                log::Level::Error,
+                "queue backlog query failed",
+                None,
+                |conn| {
+                    let (count, oldest) = conn.query_row(
+                        "SELECT COUNT(*), MIN(run_after) FROM tasks WHERE status='pending'",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?)),
+                    )?;
+                    // `MIN` over zero rows is NULL, so the count is what decides.
+                    Ok(match oldest {
+                        Some(oldest) if count > 0 => Some((count, oldest)),
+                        _ => None,
+                    })
+                },
+            )
+            .await
     }
 }
 
@@ -455,23 +449,20 @@ impl QueueWorker {
     }
 
     async fn earliest_run_after(&self) -> Option<f64> {
-        let result = self
-            .pool
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT MIN(run_after) FROM tasks WHERE status='pending'",
-                    [],
-                    |row| row.get::<_, Option<f64>>(0),
-                )
-            })
-            .await;
-        match result {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("queue timing query failed: {e}");
-                None
-            }
-        }
+        self.pool
+            .with_conn_or(
+                log::Level::Error,
+                "queue timing query failed",
+                None,
+                |conn| {
+                    conn.query_row(
+                        "SELECT MIN(run_after) FROM tasks WHERE status='pending'",
+                        [],
+                        |row| row.get::<_, Option<f64>>(0),
+                    )
+                },
+            )
+            .await
     }
 
     /// Processes one leased row, keeping the lease alive while the handler

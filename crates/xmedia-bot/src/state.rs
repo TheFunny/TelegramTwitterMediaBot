@@ -61,22 +61,24 @@ impl ChatStore {
         let chat_key = chat_id.to_string();
         let payload = self
             .pool
-            .with_conn(move |conn| {
-                // Concurrent handler tasks (batch-forwards) may write chat_state
-                // while this read runs; the shared busy timeout handles the
-                // write-lock collision instead of failing the query.
-                conn.query_row(
-                    "SELECT payload FROM chat_state WHERE chat_id = ?1",
-                    params![chat_key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-            })
+            .with_conn_or(
+                log::Level::Warn,
+                "chat_state read failed",
+                None,
+                move |conn| {
+                    // Concurrent handler tasks (batch-forwards) may write
+                    // chat_state while this read runs; the shared busy timeout
+                    // handles the write-lock collision instead of failing the
+                    // query.
+                    conn.query_row(
+                        "SELECT payload FROM chat_state WHERE chat_id = ?1",
+                        params![chat_key],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                },
+            )
             .await
-            .unwrap_or_else(|e| {
-                log::warn!("chat_state read failed: {e}");
-                None
-            })
             .unwrap_or_default();
         let data: ChatData = serde_json::from_str(&payload).unwrap_or_default();
         self.cache.lock().insert(chat_id, data.clone());
@@ -88,19 +90,20 @@ impl ChatStore {
         self.cache.lock().insert(chat_id, data.clone());
         let payload = serde_json::to_string(data).expect("chat state serializes");
         let chat_id = chat_id.to_string();
-        let result = self
-            .pool
-            .with_conn(move |conn| {
-                conn.execute(
-                    "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
-                    params![chat_id, payload],
-                )?;
-                Ok(())
-            })
+        self.pool
+            .with_conn_or(
+                log::Level::Warn,
+                "chat_state write failed",
+                (),
+                move |conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
+                        params![chat_id, payload],
+                    )?;
+                    Ok(())
+                },
+            )
             .await;
-        if let Err(e) = result {
-            log::warn!("chat_state write failed: {e}");
-        }
     }
 
     /// The per-chat async lock serializing get→mutate→set cycles.

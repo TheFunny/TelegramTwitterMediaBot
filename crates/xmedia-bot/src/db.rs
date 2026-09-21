@@ -82,6 +82,26 @@ impl DbPool {
     pub fn path(&self) -> &str {
         &self.inner.path
     }
+
+    /// [`with_conn`] for the many callers that answer a failed statement with
+    /// a default plus one log line: `what` names the operation and `level`
+    /// says how bad it is (`Error` when the failure loses work the caller
+    /// expected, `Warn` when the user is still served).
+    ///
+    /// [`with_conn`]: DbPool::with_conn
+    pub async fn with_conn_or<T, F>(&self, level: log::Level, what: &str, default: T, f: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+    {
+        match self.with_conn(f).await {
+            Ok(value) => value,
+            Err(e) => {
+                log::log!(level, "{what}: {e}");
+                default
+            }
+        }
+    }
 }
 
 impl PoolInner {
