@@ -258,6 +258,9 @@ fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut 
             out.push(CachedMedia {
                 kind: kind_of_item(item),
                 file_id,
+                // A fresh send's item is the source URL (file ids only appear
+                // in a *cached* send, and `cache_sent_task` skips those).
+                url: item_url(item).to_string(),
             });
         }
     }
@@ -684,7 +687,7 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
     {
         Ok(message) => {
             let id = message.id.0 as i64;
-            cache_animation_send(ctx, task, &message).await;
+            cache_animation_send(ctx, task, &message, media_url).await;
             Ok(vec![id])
         }
         Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
@@ -719,7 +722,7 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
                     {
                         Ok(message) => {
                             let id = message.id.0 as i64;
-                            cache_animation_send(ctx, task, &message).await;
+                            cache_animation_send(ctx, task, &message, media_url).await;
                             Ok(vec![id])
                         }
                         Err(e) => Err(classify_to_send_error(
@@ -1663,7 +1666,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settled_failed_drops_the_cache_entry() {
+    async fn settled_failed_degrades_the_cache_entry_then_drops_it() {
         let sender = MockSender::scripted(vec![], media_fetch_error);
         let stores = TestStores::new();
         let ctx = stores.ctx(&sender);
@@ -1672,13 +1675,27 @@ mod tests {
 
         settle_task(&ctx, &task, Settled::Failed).await;
 
+        // The file id is what failed, not the media: the entry survives with
+        // its source URLs, so the next request re-sends without a fetch.
+        let entry = stores
+            .link_cache()
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .expect("a failed cached send must not drop the entry outright");
+        assert_eq!(entry.media.len(), 1);
+        assert!(entry.media[0].file_id.is_empty(), "the stale id must go");
+        assert_eq!(entry.media[0].url, "https://pbs.twimg.com/media/photo.jpg");
+        assert_eq!(entry.caption, "cap", "the text is still good");
+
+        // A second failure — this time the URLs did not work either — drops it.
+        settle_task(&ctx, &task, Settled::Failed).await;
         assert!(
             stores
                 .link_cache()
                 .get("twitter:1", Duration::from_secs(3600))
                 .await
                 .is_none(),
-            "a permanently failed cached send must drop the entry"
+            "a degraded entry that fails again must be dropped"
         );
     }
 }

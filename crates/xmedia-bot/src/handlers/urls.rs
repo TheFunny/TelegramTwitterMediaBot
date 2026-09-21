@@ -3,7 +3,7 @@
 
 use super::{log_key, reply};
 use crate::ctx::{AppContext, CONTEXT};
-use crate::link_cache::{CachedMediaKind, CachedPost};
+use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::media_sender::MediaSender;
 use crate::send::{self, MediaItemPayload, Task};
 use crate::state::ChatData;
@@ -361,6 +361,47 @@ async fn dispatch_send(
     }
 }
 
+/// A cached entry's item as a send payload: the Telegram file id when the entry
+/// still has one, otherwise the source URL.
+///
+/// The URL case is a *degraded* entry — `send::post_send`'s `invalidate_cache`
+/// drops the file ids of an entry whose cached send failed permanently, keeping
+/// the URLs, because a stale file id says nothing about the media. Sending from
+/// the URL costs Telegram a fetch (or the upload fallback a download) and saves
+/// the whole source round trip, including a ugoira encode or an HLS remux.
+fn cached_media_payload(media: &CachedMedia, sensitive: bool) -> MediaItemPayload {
+    let has_file_id = !media.file_id.is_empty();
+    let source = if has_file_id {
+        media.file_id.clone()
+    } else {
+        media.url.clone()
+    };
+    // A degraded item carries no smaller variant: a fresh fetch's would, but
+    // the item is what the source itself sent, so an oversize is handled by the
+    // upload fallback rather than by a URL that was never recorded.
+    let fallback_url = None;
+    match media.kind {
+        CachedMediaKind::Photo => MediaItemPayload::Photo {
+            media: source,
+            has_spoiler: sensitive,
+            fallback_url,
+            file_id: has_file_id,
+        },
+        CachedMediaKind::Video => MediaItemPayload::Video {
+            media: source,
+            has_spoiler: sensitive,
+            thumbnail: None,
+            fallback_url,
+            file_id: has_file_id,
+        },
+        CachedMediaKind::Animation => MediaItemPayload::Animation {
+            media: source,
+            has_spoiler: sensitive,
+            file_id: has_file_id,
+        },
+    }
+}
+
 /// Whether a send also runs the chat's post-send actions. `/test` sends with
 /// them suppressed so a test can never forward to the channel or open the
 /// edit-before-forward prompt; a normal link uses whatever the chat is
@@ -636,26 +677,7 @@ async fn url_media_inner(
         let items: Vec<MediaItemPayload> = cached
             .media
             .iter()
-            .map(|m| match m.kind {
-                CachedMediaKind::Photo => MediaItemPayload::Photo {
-                    media: m.file_id.clone(),
-                    has_spoiler: cached.sensitive,
-                    fallback_url: None,
-                    file_id: true,
-                },
-                CachedMediaKind::Video => MediaItemPayload::Video {
-                    media: m.file_id.clone(),
-                    has_spoiler: cached.sensitive,
-                    thumbnail: None,
-                    fallback_url: None,
-                    file_id: true,
-                },
-                CachedMediaKind::Animation => MediaItemPayload::Animation {
-                    media: m.file_id.clone(),
-                    has_spoiler: cached.sensitive,
-                    file_id: true,
-                },
-            })
+            .map(|m| cached_media_payload(m, cached.sensitive))
             .collect();
         // The indicator switches to "sending photo/video" once the kinds are
         // known; `items` is moved into the task below.
@@ -989,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_hit_sends_file_ids_and_invalidates_on_permanent_failure() {
+    async fn cache_hit_sends_file_ids_and_degrades_on_permanent_failure() {
         let stores = TestStores::new();
         let sender = MockSender::scripted(
             vec![Outcome::GroupErr, Outcome::MessageErr],
@@ -1006,14 +1028,83 @@ mod tests {
             sender.calls(),
             vec!["send_chat_action", "send_media_group", "send_message"]
         );
-        // The stale cache entry was invalidated so the next request re-fetches.
-        assert!(
-            stores
-                .link_cache()
-                .get("twitter:1", Duration::from_secs(3600))
-                .await
-                .is_none()
-        );
+        // The entry is degraded, not dropped: the next request re-sends from
+        // the source URL without a fetch.
+        let entry = stores
+            .link_cache()
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .expect("a stale file id must not cost the whole entry");
+        assert!(entry.media[0].file_id.is_empty());
+        assert_eq!(entry.media[0].url, "https://pbs.twimg.com/media/photo.jpg");
+    }
+
+    /// A degraded entry (see the test above) sends the source URL: no fetch,
+    /// no download of the post's data, and no upload of our own — Telegram
+    /// fetches the media it is pointed at. The absence of a `send_message`
+    /// (which the fetch-error path would emit) is what proves no fetch ran.
+    #[tokio::test]
+    async fn a_degraded_entry_sends_by_url_without_fetching() {
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![Outcome::GroupOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+        let mut cached = cached_photo();
+        cached.media[0].file_id.clear();
+        stores.link_cache().put("twitter:1", &cached).await;
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
+
+        assert_eq!(sender.calls(), vec!["send_chat_action", "send_media_group"]);
+        // Still cached, still degraded: a degraded entry keeps serving.
+        let entry = stores
+            .link_cache()
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .expect("the entry must stay");
+        assert!(entry.media[0].file_id.is_empty());
+    }
+
+    /// The two payload shapes a cached item can take, asserted directly: the
+    /// file id when there is one, the source URL when the entry was degraded.
+    #[test]
+    fn cached_media_payload_prefers_the_file_id_over_the_url() {
+        let with_id = CachedMedia {
+            kind: CachedMediaKind::Photo,
+            file_id: "AgAC".into(),
+            url: "https://p/1.jpg".into(),
+        };
+        match cached_media_payload(&with_id, true) {
+            MediaItemPayload::Photo {
+                media,
+                has_spoiler,
+                file_id,
+                ..
+            } => {
+                assert_eq!(media, "AgAC");
+                assert!(file_id, "a cached send must go by file id");
+                assert!(has_spoiler);
+            }
+            _ => panic!("expected a photo payload"),
+        }
+
+        let degraded = CachedMedia {
+            kind: CachedMediaKind::Video,
+            file_id: String::new(),
+            url: "https://v/1.mp4".into(),
+        };
+        match cached_media_payload(&degraded, false) {
+            MediaItemPayload::Video {
+                media,
+                file_id,
+                fallback_url,
+                ..
+            } => {
+                assert_eq!(media, "https://v/1.mp4");
+                assert!(!file_id, "a degraded send must go by URL");
+                assert!(fallback_url.is_none());
+            }
+            _ => panic!("expected a video payload"),
+        }
     }
 
     /// The caption-quote threshold matches the post's text inside the caption,

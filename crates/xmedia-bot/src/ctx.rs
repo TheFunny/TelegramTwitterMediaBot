@@ -80,6 +80,7 @@ pub(crate) mod test_support {
             media: vec![CachedMedia {
                 kind: CachedMediaKind::Photo,
                 file_id: "AgAC-file-id".into(),
+                url: "https://pbs.twimg.com/media/photo.jpg".into(),
             }],
         }
     }

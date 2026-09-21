@@ -7,7 +7,7 @@ use super::{SendError, Task, forward_messages, send_animation, send_media_sequen
 use crate::ctx::AppContext;
 use crate::db::{now_f64, unix_now};
 use crate::handlers::log_key;
-use crate::link_cache::{CachedMedia, CachedMediaKind, LinkCache};
+use crate::link_cache::{CachedMedia, CachedMediaKind};
 use crate::media_sender::MediaSender;
 use crate::queue::{PersistentTaskQueue, QueueError};
 use crate::state::EditMessage;
@@ -33,7 +33,12 @@ pub(super) async fn cache_sent_task(ctx: &AppContext<'_>, task: &Task, media: Ve
 }
 
 /// Persists a lone animation send under the post's cache key.
-pub(super) async fn cache_animation_send(ctx: &AppContext<'_>, task: &Task, message: &Message) {
+pub(super) async fn cache_animation_send(
+    ctx: &AppContext<'_>,
+    task: &Task,
+    message: &Message,
+    source_url: &str,
+) {
     if let Some(file_id) = message.animation().map(|a| a.file.id.to_string()) {
         cache_sent_task(
             ctx,
@@ -41,6 +46,7 @@ pub(super) async fn cache_animation_send(ctx: &AppContext<'_>, task: &Task, mess
             vec![CachedMedia {
                 kind: CachedMediaKind::Animation,
                 file_id,
+                url: source_url.to_string(),
             }],
         )
         .await;
@@ -57,25 +63,52 @@ pub(crate) enum Settled {
 /// Every path that ends a task's life — sent, permanently failed, or
 /// dead-lettered after the last retry — funnels through here, so the cleanup a
 /// settled task owes cannot be forgotten by a new path: release the keep-alive
-/// temp media (retryable tasks keep it, they will be resent) and drop the
-/// link-cache entry that a failed send's stale file ids would keep poisoning.
+/// temp media (retryable tasks keep it, they will be resent) and deal with the
+/// link-cache entry a failed send's stale file ids would keep poisoning
+/// (degraded to its source URLs, dropped once those fail too).
 pub(crate) async fn settle_task(ctx: &AppContext<'_>, task: &Task, outcome: Settled) {
     if matches!(outcome, Settled::Failed) {
-        invalidate_cache(ctx.link_cache, task).await;
+        invalidate_cache(ctx, task).await;
     }
     release_keep_alive(task);
 }
 
-/// A cached Telegram file id failed permanently (stale/expired); drop the
-/// cache entry so the next request re-fetches instead of repeating it.
-async fn invalidate_cache(cache: &LinkCache, task: &Task) {
-    if task.is_cached_send()
-        && let Some(url) = task.source_url()
-        && let Some(key) = x_media::site::cache_key(url)
-    {
-        log::debug!("removing stale link cache entry for [key={}]", log_key(url));
-        cache.remove(&key).await;
+/// A cached Telegram file id failed permanently (stale/expired). The media
+/// itself is usually fine, so the entry is *degraded* rather than dropped: its
+/// file ids go away and the source URLs stay, and the next request re-sends the
+/// post from those — no source request, no ugoira encode, no HLS remux — with
+/// the media fetched by Telegram (or by the upload fallback). An entry that is
+/// already degraded, or whose older rows carry no URLs, is removed instead: its
+/// URLs did not work either, and the next request should fetch the post again
+/// and report what the source says.
+async fn invalidate_cache(ctx: &AppContext<'_>, task: &Task) {
+    if !task.is_cached_send() {
+        return;
     }
+    let Some(url) = task.source_url() else {
+        return;
+    };
+    let Some(key) = x_media::site::cache_key(url) else {
+        return;
+    };
+    let Some(mut entry) = ctx.link_cache.get(&key, ctx.config.link_cache_ttl).await else {
+        return;
+    };
+    let degradable = entry.media.iter().all(|m| !m.url.is_empty())
+        && entry.media.iter().any(|m| !m.file_id.is_empty());
+    if !degradable {
+        log::debug!("removing stale link cache entry for [key={}]", log_key(url));
+        ctx.link_cache.remove(&key).await;
+        return;
+    }
+    log::debug!(
+        "degrading stale link cache entry to its source URLs for [key={}]",
+        log_key(url)
+    );
+    for media in &mut entry.media {
+        media.file_id.clear();
+    }
+    ctx.link_cache.put(&key, &entry).await;
 }
 
 /// Locally produced media files (ugoira MP4, bsky remux MP4) whose temp dirs

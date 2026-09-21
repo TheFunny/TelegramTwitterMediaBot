@@ -26,6 +26,12 @@ pub enum CachedMediaKind {
 pub struct CachedMedia {
     pub kind: CachedMediaKind,
     pub file_id: String,
+    /// The media URL the send used, kept so an entry whose file ids stopped
+    /// working can still be re-sent without touching the source site (see the
+    /// bot's `invalidate_cache`). Empty for entries written before this field
+    /// existed — those can only be dropped and re-fetched.
+    #[serde(default)]
+    pub url: String,
 }
 
 /// Everything needed to re-send a post without touching the source site:
@@ -237,6 +243,8 @@ mod tests {
         let got = got.unwrap();
         assert_eq!(got.url, "https://x.com/u/status/1");
         assert_eq!(got.media[0].file_id, "AgAC-file-id");
+        // The source URL rides along: it is what a degraded entry falls back to.
+        assert_eq!(got.media[0].url, "https://pbs.twimg.com/media/photo.jpg");
     }
 
     #[tokio::test]
