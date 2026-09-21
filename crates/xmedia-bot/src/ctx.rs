@@ -65,6 +65,13 @@ pub(crate) mod test_support {
         RequestError::Api(ApiError::Unknown(message.to_string()))
     }
 
+    /// The API error a caption edit that changes nothing answers with — what
+    /// the mocks script for a permanent send failure. A `fn` pointer, so it can
+    /// be handed to `MockSender::scripted` as-is.
+    pub(crate) fn permanent_error() -> RequestError {
+        api_error("Bad Request: message is not modified")
+    }
+
     /// One photo payload item: `media` in the two flags the tests vary (no
     /// smaller variant, since that is the field most tests leave alone —
     /// `send`'s own tests build that case directly).

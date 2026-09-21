@@ -9,18 +9,20 @@
 mod callback;
 mod commands;
 mod inline;
+mod repair;
 mod statics;
+mod url_workers;
 mod urls;
 
 pub use callback::callback_query_handler;
 pub use commands::register_commands;
 pub use inline::inline_query_handler;
 pub(crate) use inline::prune_idle_states;
+pub(crate) use repair::repair_lost_local_media;
 /// The resolved `$DATA_DIR/task_queue.db` path, for the startup config line.
 pub(crate) use statics::db_path;
 pub use statics::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
-pub(crate) use urls::repair_lost_local_media;
-pub use urls::{start_url_workers, stop_url_workers};
+pub use url_workers::{start_url_workers, stop_url_workers};
 
 use crate::ctx::AppContext;
 use crate::media_sender::MediaSender;
@@ -29,7 +31,8 @@ use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, Message, MessageId};
 use teloxide::utils::command::BotCommands;
-use urls::{URL_JOBS, extract_urls};
+use url_workers::URL_JOBS;
+use urls::extract_urls;
 
 /// Reply to a message by id, keeping the reply decoration even if the
 /// original was already deleted.
