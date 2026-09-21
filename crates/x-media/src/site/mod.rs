@@ -79,6 +79,24 @@ pub(crate) struct RenderData {
     pub tags: String,
 }
 
+/// The built-in caption for a post that has no user-supplied format: the
+/// canonical URL, the author as a link, then the post's text after a colon.
+/// The two URLs are escaped for an HTML attribute and the text as HTML text,
+/// so site-supplied content cannot inject markup. Shared by the adapters whose
+/// captions have exactly this shape (bilibili, misskey).
+pub fn caption(url: &str, author_url: &str, author: &str, text: &str) -> String {
+    let url = html_escape::encode_double_quoted_attribute(url);
+    let author_url = html_escape::encode_double_quoted_attribute(author_url);
+    let author = html_escape::encode_text(author);
+    if text.is_empty() {
+        return format!("{url}\n<a href=\"{author_url}\">{author}</a>");
+    }
+    format!(
+        "{url}\n<a href=\"{author_url}\">{author}</a>: {}",
+        html_escape::encode_text(text)
+    )
+}
+
 /// The post's text as one string: title and content joined by a line break,
 /// each only when it is non-empty. This is what the sites' built-in captions
 /// show after the author line, and what the bot quotes when it is long.

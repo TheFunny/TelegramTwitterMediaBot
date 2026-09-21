@@ -30,7 +30,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, RenderData, Site, SiteFuture, compose_text};
-use html_escape::{encode_double_quoted_attribute, encode_text};
+use html_escape::encode_text;
 use regex::Regex;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -276,7 +276,7 @@ impl From<model::Item> for Fetched {
         let text = compose_text(&title, &content);
         let tags = topic_name(&item).to_string();
 
-        let caption = caption(&url, &author_url, &author, &text);
+        let caption = crate::site::caption(&url, &author_url, &author, &text);
         let media = media_of(&item);
 
         Fetched {
@@ -483,19 +483,6 @@ fn to_https(url: &str) -> String {
     } else {
         url.to_string()
     }
-}
-
-fn caption(url: &str, author_url: &str, author: &str, text: &str) -> String {
-    let url = encode_double_quoted_attribute(url);
-    let author_url = encode_double_quoted_attribute(author_url);
-    let author = encode_text(author);
-    if text.is_empty() {
-        return format!("{url}\n<a href=\"{author_url}\">{author}</a>");
-    }
-    format!(
-        "{url}\n<a href=\"{author_url}\">{author}</a>: {}",
-        encode_text(text)
-    )
 }
 
 #[cfg(test)]

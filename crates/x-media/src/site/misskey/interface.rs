@@ -4,7 +4,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, RenderData, Site, SiteFuture};
-use html_escape::{encode_double_quoted_attribute, encode_text};
+use html_escape::encode_text;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -117,7 +117,7 @@ impl From<model::Note> for Fetched {
         text.push_str(content.text.as_deref().unwrap_or_default().trim());
         let text = text.trim().to_string();
 
-        let caption = caption(&url, &author_url, &author, &text);
+        let caption = crate::site::caption(&url, &author_url, &author, &text);
         let sensitive = content.cw.is_some() || content.files.iter().any(|f| f.is_sensitive);
         let media: Vec<Media> = content.files.iter().filter_map(media_from_file).collect();
 
@@ -141,19 +141,6 @@ impl From<model::Note> for Fetched {
             _keep_alive: None,
         }
     }
-}
-
-fn caption(url: &str, author_url: &str, author: &str, text: &str) -> String {
-    let url = encode_double_quoted_attribute(url);
-    let author_url = encode_double_quoted_attribute(author_url);
-    let author = encode_text(author);
-    if text.is_empty() {
-        return format!("{url}\n<a href=\"{author_url}\">{author}</a>");
-    }
-    format!(
-        "{url}\n<a href=\"{author_url}\">{author}</a>: {text}",
-        text = encode_text(text),
-    )
 }
 
 /// Maps a Misskey DriveFile to a [`Media`] item; unknown/audio/other types
