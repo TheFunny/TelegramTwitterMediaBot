@@ -7,7 +7,7 @@ use super::{
     MediaItemPayload, MediaRef, SendError, Task, classify_to_send_error, retry_delay_seconds,
 };
 use crate::media_sender::MediaSender;
-use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
+use crate::photo::{self, PhotoPrep};
 use std::sync::LazyLock;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InputFile, InputMedia, MessageId};
@@ -24,6 +24,15 @@ use x_media::site::FetchError;
 const PREP_CONCURRENCY: usize = 6;
 static PREP_SLOTS: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(PREP_CONCURRENCY));
+
+/// Telegram's multipart upload limit for everything that is not a photo:
+/// its own docs on `sendVideo`/`sendAnimation`/`sendDocument` say 50 MB
+/// (`RequestEntityTooLarge` is "larger than 50 MB"), while photos are the
+/// 10 MiB [`photo::MAX_UPLOAD_BYTES`] case. Using the photo cap here refused
+/// to even download a 10–50 MB video that Telegram itself would have
+/// accepted, and a video has no smaller variant to fall back to — so the
+/// post was lost.
+pub(super) const MAX_MEDIA_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Infers a file extension from magic bytes so Telegram detects the mime type
 /// on multipart uploads.
@@ -82,14 +91,25 @@ async fn download_to_temp(
     };
     // Photos are downloaded even over the upload cap so `prepare_photo` can
     // downscale / transcode them, up to their own download cap; videos and
-    // animations are refused as soon as the declared size crosses the upload
-    // cap. The limit is that cap, not `cap + 1`: a file of exactly the cap is
-    // admitted (`len > max_bytes` is false), and one byte over is not — the
-    // same boundary the size probe this replaced drew.
-    let limit = if matches!(item, MediaItemPayload::Photo { .. }) {
+    // animations are refused as soon as the declared size crosses their own
+    // (larger) upload cap. The limit is that cap, not `cap + 1`: a file of
+    // exactly the cap is admitted (`len > max_bytes` is false), and one byte
+    // over is not — the same boundary the size probe this replaced drew.
+    let is_photo = matches!(item, MediaItemPayload::Photo { .. });
+    let limit = if is_photo {
         photo::MAX_PHOTO_DOWNLOAD_BYTES
     } else {
-        MAX_UPLOAD_BYTES
+        MAX_MEDIA_UPLOAD_BYTES
+    };
+    // A non-photo body is buffered whole and can now be 50 MB, so it charges
+    // the process-wide budget for as long as this function holds it (one
+    // 64 MiB unit covers the cap): `PREP_SLOTS` bounds how many are in flight,
+    // this bounds what they add up to. Photos charge their real buffer after
+    // the download, once their header predicts it.
+    let _budget = if is_photo {
+        None
+    } else {
+        Some(photo::reserve_memory(MAX_MEDIA_UPLOAD_BYTES).await)
     };
     let bytes = match x_media::site::download_media_limited(media_url, limit).await {
         Ok(bytes) => bytes,

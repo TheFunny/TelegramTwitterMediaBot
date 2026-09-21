@@ -709,6 +709,17 @@ mod tests {
     use std::time::Duration;
     use teloxide::ApiError;
 
+    /// The two multipart upload caps, pinned where the bot draws them: photos
+    /// are the 10 MiB case, everything else the 50 MB one. A single cap for
+    /// both refused to download a 10–50 MB video that Telegram would have
+    /// accepted (and a video has no smaller variant to fall back to).
+    #[test]
+    fn upload_caps_match_telegrams_limits() {
+        const { assert!(crate::photo::MAX_UPLOAD_BYTES == 10 * 1024 * 1024) };
+        const { assert!(super::upload::MAX_MEDIA_UPLOAD_BYTES == 50 * 1024 * 1024) };
+        const { assert!(crate::photo::MAX_PHOTO_DOWNLOAD_BYTES <= crate::photo::MAX_DECODE_BYTES) };
+    }
+
     #[test]
     fn oversized_photo_boundary() {
         // The empirical Telegram limit: sum 10000 passes, 10001 fails. Pinned

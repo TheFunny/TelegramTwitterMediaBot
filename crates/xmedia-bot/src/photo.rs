@@ -23,8 +23,10 @@ use tempfile::NamedTempFile;
 pub const PHOTO_MAX_DIMENSION_SUM: u32 = 10000;
 /// Resize target with a safety margin so rounding cannot cross the cap.
 pub const PHOTO_TARGET_DIMENSION_SUM: u32 = 9900;
-/// Upload cap (bytes): files above this are not uploaded; the bot falls back
-/// to a smaller media URL instead.
+/// Photo upload cap (bytes): Telegram rejects a larger `sendPhoto`, so the bot
+/// falls back to a smaller media URL instead. Videos and animations have their
+/// own, larger cap — `send::upload::MAX_MEDIA_UPLOAD_BYTES` — and never become
+/// photos.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Decode budget (bytes): a larger intermediate buffer is not worth the peak
 /// memory; the photo degrades to the smaller URL instead.
@@ -32,9 +34,9 @@ pub(crate) const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
 /// Cap for *downloading* a photo in the send fallback, kept separate from the
 /// decode budget above: the whole body is buffered before it is processed, once
 /// per download slot in flight, while the decode budget is about a single
-/// buffer. Telegram's upload cap is 10 MiB, so a photo this large can only be
-/// sent after a downscale that its reduced variant serves just as well — over
-/// the cap the item degrades to the smaller URL
+/// buffer. Telegram's *photo* upload cap is 10 MiB, so a photo this large can
+/// only be sent after a downscale that its reduced variant serves just as
+/// well — over the cap the item degrades to the smaller URL
 /// (`FallbackError::MediaTooLarge`), it is never an error.
 pub(crate) const MAX_PHOTO_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
 
