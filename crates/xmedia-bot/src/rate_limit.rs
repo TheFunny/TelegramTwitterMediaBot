@@ -91,21 +91,24 @@ impl TokenBucket {
         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
     }
 
-    /// Current balance, for the tests that assert a call site charged the
-    /// bucket (a charge is otherwise only observable as a delay).
-    #[cfg(test)]
-    pub(crate) fn tokens(&self) -> f64 {
+    /// Current balance, refilled to now.
+    fn balance(&self) -> f64 {
         let mut state = self.state.lock();
         self.refill(&mut state);
         state.tokens
     }
 
+    /// Current balance, for the tests that assert a call site charged the
+    /// bucket (a charge is otherwise only observable as a delay).
+    #[cfg(test)]
+    pub(crate) fn tokens(&self) -> f64 {
+        self.balance()
+    }
+
     /// True when the bucket has refilled to capacity: no debt outstanding, so
     /// the chat has not sent anything recently.
     fn is_idle(&self) -> bool {
-        let mut state = self.state.lock();
-        self.refill(&mut state);
-        state.tokens >= self.capacity
+        self.balance() >= self.capacity
     }
 }
 
