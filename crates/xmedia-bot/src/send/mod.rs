@@ -225,20 +225,6 @@ impl Task {
         self.cache_data().is_some_and(|c| !c.media.is_empty())
     }
 
-    /// All media payloads of this task (sequence batches flattened plus the
-    /// lone animation).
-    fn media_items(&self) -> Vec<&MediaItemPayload> {
-        match self {
-            Task::SendMediaSequence { media_batches, .. } => {
-                media_batches.iter().flatten().collect()
-            }
-            Task::SendAnimation { animation, .. } => {
-                std::slice::from_ref(animation).iter().collect()
-            }
-            Task::ForwardMessages { .. } => Vec::new(),
-        }
-    }
-
     /// The chat this task delivers media to (`None` for a channel copy, which
     /// names two chats instead).
     pub(crate) fn chat_id(&self) -> Option<i64> {
@@ -275,8 +261,18 @@ impl Task {
     /// Local file paths referenced by this task's media (ugoira / bsky remux
     /// MP4 and the like); empty for URL or Telegram file-id sends.
     pub(crate) fn local_media_paths(&self) -> Vec<std::path::PathBuf> {
+        // The task's items: sequence batches flattened, or the lone animation.
+        let items: Vec<&MediaItemPayload> = match self {
+            Task::SendMediaSequence { media_batches, .. } => {
+                media_batches.iter().flatten().collect()
+            }
+            Task::SendAnimation { animation, .. } => {
+                std::slice::from_ref(animation).iter().collect()
+            }
+            Task::ForwardMessages { .. } => Vec::new(),
+        };
         let mut out = Vec::new();
-        for item in self.media_items() {
+        for item in items {
             let is_file_id = match item {
                 MediaItemPayload::Photo { file_id, .. }
                 | MediaItemPayload::Video { file_id, .. }
