@@ -410,12 +410,7 @@ pub(crate) async fn execute_command(
             // A chat with many templates/edit records exceeds Telegram's 4096
             // char message limit; the dump is plain text (no parse mode), so a
             // plain byte-boundary cut is safe.
-            let end = debug.floor_char_boundary(MAX_DEBUG_DUMP_CHARS.min(debug.len()));
-            let text = if end < debug.len() {
-                format!("{}…", &debug[..end])
-            } else {
-                debug
-            };
+            let text = cap_text(debug, MAX_DEBUG_DUMP_CHARS);
             reply(bot, message.chat.id.0, message.id, text).await?;
         }
         Command::SetFormat(arg) => {
@@ -697,6 +692,18 @@ const MAX_DEBUG_REPORT_CHARS: usize = 4000;
 /// message, so it must stay under Telegram's 4096-char limit.
 const MAX_DEBUG_DUMP_CHARS: usize = 3500;
 
+/// Truncates `text` to at most `max` characters (the cut lands on a byte
+/// boundary, and the byte before `max` is left free for the ellipsis, so the
+/// result never exceeds `max`). Both callers stay under Telegram's 4096-char
+/// message limit this way.
+fn cap_text(text: String, max: usize) -> String {
+    if text.len() <= max {
+        return text;
+    }
+    let end = text.floor_char_boundary(max.saturating_sub(1));
+    format!("{}…", &text[..end])
+}
+
 /// The caption a link would actually send for this chat: the per-site format
 /// override (empty = the site's built-in caption) and, on a long post, the
 /// same text quoting the send paths apply. `/debug` shows this so the preview
@@ -791,21 +798,18 @@ fn debug_report(
             html_escape::encode_text(item.url())
         ));
     }
-    let mut out = lines.join(
+    let out = lines.join(
         "
 ",
     );
-    if out.chars().count() > MAX_DEBUG_REPORT_CHARS {
-        let end = out.floor_char_boundary(MAX_DEBUG_REPORT_CHARS - 1);
-        out = format!("{}…", &out[..end]);
-    }
-    out
+    cap_text(out, MAX_DEBUG_REPORT_CHARS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DEBUG_REPORT_CHARS, debug_report, preview_caption, settings_text, unknown_placeholder,
+        MAX_DEBUG_REPORT_CHARS, cap_text, debug_report, preview_caption, settings_text,
+        unknown_placeholder,
     };
     use x_media::media::Media;
 
@@ -903,6 +907,15 @@ mod tests {
             ),
             "{report}"
         );
+    }
+
+    #[test]
+    fn cap_text_cuts_on_a_char_boundary() {
+        assert_eq!(cap_text("short".into(), 10), "short");
+        assert_eq!(cap_text("exactly".into(), 7), "exactly");
+        assert_eq!(cap_text("truncated".into(), 5), "trun…");
+        // A multi-byte character at the cut is dropped whole, not split.
+        assert_eq!(cap_text("aaaa漢bb".into(), 6), "aaaa…");
     }
 
     #[test]
