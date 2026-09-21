@@ -396,13 +396,7 @@ pub(crate) async fn execute_command(
         Command::BotDict => {
             // Debug dump of the chat's persisted state: admin only (it echoes
             // forward-channel ids and templates to whoever asks).
-            let sender_id = message
-                .from
-                .as_ref()
-                .map(|user| user.id.0 as i64)
-                .unwrap_or(-1);
-            if !CONFIG.admin_ids.contains(&sender_id) {
-                reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
+            if require_admin(bot, message).await?.is_none() {
                 return Ok(());
             }
             let chat_data = CHAT_STORE.get(message.chat.id.0).await;
@@ -492,15 +486,9 @@ pub(crate) async fn execute_command(
             .await?;
         }
         Command::ClearCache(arg) => {
-            let sender_id = message
-                .from
-                .as_ref()
-                .map(|user| user.id.0 as i64)
-                .unwrap_or(-1);
-            if !CONFIG.admin_ids.contains(&sender_id) {
-                reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
+            let Some(sender_id) = require_admin(bot, message).await? else {
                 return Ok(());
-            }
+            };
             let arg = arg.trim();
             if arg.is_empty() {
                 let removed = LINK_CACHE.clear(None).await;
@@ -648,6 +636,21 @@ pub(crate) async fn execute_command(
         }
     }
     Ok(())
+}
+
+/// The gate the admin-only commands share: `Some(sender_id)` for an admin,
+/// `None` after the refusal has been sent (the command then returns).
+async fn require_admin(bot: &Bot, message: &Message) -> Result<Option<i64>, RequestError> {
+    let sender_id = message
+        .from
+        .as_ref()
+        .map(|user| user.id.0 as i64)
+        .unwrap_or(-1);
+    if CONFIG.admin_ids.contains(&sender_id) {
+        return Ok(Some(sender_id));
+    }
+    reply(bot, message.chat.id.0, message.id, "Admin only.").await?;
+    Ok(None)
 }
 
 /// `"y"` for one, `"ies"` for anything else — "1 entry" / "2 entries".
