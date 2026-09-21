@@ -32,16 +32,17 @@ use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
 /// Reply to a message by id, keeping the reply decoration even if the
-/// original was already deleted. Returns the reply's message id.
+/// original was already deleted.
 pub(crate) async fn reply(
     sender: &dyn MediaSender,
     chat_id: i64,
     reply_to: MessageId,
     text: impl Into<String>,
-) -> Result<i64, RequestError> {
+) -> Result<(), RequestError> {
     sender
         .send_message(ChatId(chat_id), text.into(), Some(reply_to), None)
         .await
+        .map(|_| ())
 }
 
 /// Reply to a message by id with HTML parse mode (same reply decoration as
