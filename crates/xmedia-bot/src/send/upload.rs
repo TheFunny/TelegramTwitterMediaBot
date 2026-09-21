@@ -2,7 +2,7 @@
 //! itself (hotlink protection), the bot downloads the file, shrinks photos
 //! that exceed Telegram's limits and uploads the batch via multipart.
 
-use super::input_media::{animation_media, input_file_for, item_url, photo_media, video_media};
+use super::input_media::{input_file_for, item_url, media_from};
 use super::{MediaItemPayload, SendError, Task, classify_to_send_error, retry_delay_seconds};
 use crate::media_sender::MediaSender;
 use crate::photo::{self, MAX_UPLOAD_BYTES, PhotoPrep};
@@ -133,23 +133,8 @@ fn media_from_file(
     item: &MediaItemPayload,
     path: std::path::PathBuf,
     caption: Option<&str>,
-    thumbnail: Option<&str>,
 ) -> Result<InputMedia, String> {
-    let mut media = match item {
-        MediaItemPayload::Photo { has_spoiler, .. } => {
-            photo_media(InputFile::file(path), caption, *has_spoiler)
-        }
-        MediaItemPayload::Video { has_spoiler, .. } => {
-            video_media(InputFile::file(path), caption, *has_spoiler)
-        }
-        MediaItemPayload::Animation { has_spoiler, .. } => {
-            animation_media(InputFile::file(path), caption, *has_spoiler)
-        }
-    };
-    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut media) {
-        *v = v.clone().thumbnail(input_file_for(thumb)?);
-    }
-    Ok(media)
+    media_from(item, InputFile::file(path), caption, item.thumbnail_url())
 }
 
 /// Builds the media group item from a (smaller) URL.
@@ -157,23 +142,8 @@ fn media_from_url(
     item: &MediaItemPayload,
     url: &str,
     caption: Option<&str>,
-    thumbnail: Option<&str>,
 ) -> Result<InputMedia, String> {
-    let mut media = match item {
-        MediaItemPayload::Photo { has_spoiler, .. } => {
-            photo_media(input_file_for(url)?, caption, *has_spoiler)
-        }
-        MediaItemPayload::Video { has_spoiler, .. } => {
-            video_media(input_file_for(url)?, caption, *has_spoiler)
-        }
-        MediaItemPayload::Animation { has_spoiler, .. } => {
-            animation_media(input_file_for(url)?, caption, *has_spoiler)
-        }
-    };
-    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut media) {
-        *v = v.clone().thumbnail(input_file_for(thumb)?);
-    }
-    Ok(media)
+    media_from(item, input_file_for(url)?, caption, item.thumbnail_url())
 }
 
 /// One item prepared for the upload fallback: the ready-to-send media plus
@@ -199,12 +169,7 @@ pub(super) async fn prepare_upload_item(
     // permanent (a video cannot be re-encoded here).
     let media_url = item_url(&item);
     if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
-        let media = media_from_file(
-            &item,
-            std::path::PathBuf::from(media_url),
-            caption,
-            item.thumbnail_url(),
-        )
+        let media = media_from_file(&item, std::path::PathBuf::from(media_url), caption)
         .map_err(|message| FallbackError::Permanent { message })?;
         return Ok(PreparedItem {
             index,
@@ -252,7 +217,7 @@ pub(super) async fn prepare_upload_item(
                 match prep {
                     PhotoPrep::Upload(upload) => {
                         let path = upload.path().to_path_buf();
-                        let media = media_from_file(&item, path, caption, item.thumbnail_url())
+                        let media = media_from_file(&item, path, caption)
                             .map_err(|message| FallbackError::Permanent { message })?;
                         Ok(PreparedItem {
                             index,
@@ -265,7 +230,7 @@ pub(super) async fn prepare_upload_item(
                             message: "photo dimensions exceed Telegram limits and no smaller variant is available"
                                 .into(),
                         })?;
-                        let media = media_from_url(&item, url, caption, item.thumbnail_url())
+                        let media = media_from_url(&item, url, caption)
                             .map_err(|message| FallbackError::Permanent { message })?;
                         Ok(PreparedItem {
                             index,
@@ -276,7 +241,7 @@ pub(super) async fn prepare_upload_item(
                 }
             } else {
                 let path = file.path().to_path_buf();
-                let media = media_from_file(&item, path, caption, item.thumbnail_url())
+                let media = media_from_file(&item, path, caption)
                     .map_err(|message| FallbackError::Permanent { message })?;
                 Ok(PreparedItem {
                     index,
@@ -291,7 +256,7 @@ pub(super) async fn prepare_upload_item(
                 .ok_or_else(|| FallbackError::Permanent {
                     message: "media too large".into(),
                 })?;
-            let media = media_from_url(&item, url, caption, item.thumbnail_url())
+            let media = media_from_url(&item, url, caption)
                 .map_err(|message| FallbackError::Permanent { message })?;
             Ok(PreparedItem {
                 index,

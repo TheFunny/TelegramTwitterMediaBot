@@ -93,6 +93,31 @@ pub(super) fn animation_media(file: InputFile, caption: Option<&str>, spoiler: b
     InputMedia::Animation(animation)
 }
 
+/// Builds one media-group item around an already-selected file: the per-kind
+/// `InputMedia` (same spoiler/caption handling) plus the video's thumbnail,
+/// which Telegram takes as a separate upload/URL. The one place that dispatch
+/// is written; callers only choose the `InputFile`.
+pub(super) fn media_from(
+    item: &MediaItemPayload,
+    file: InputFile,
+    caption: Option<&str>,
+    thumbnail: Option<&str>,
+) -> Result<InputMedia, String> {
+    let media = match item {
+        MediaItemPayload::Photo { has_spoiler, .. } => photo_media(file, caption, *has_spoiler),
+        MediaItemPayload::Video { has_spoiler, .. } => video_media(file, caption, *has_spoiler),
+        MediaItemPayload::Animation { has_spoiler, .. } => {
+            animation_media(file, caption, *has_spoiler)
+        }
+    };
+    match (thumbnail, media) {
+        (Some(thumb), InputMedia::Video(video)) => {
+            Ok(InputMedia::Video(video.thumbnail(input_file_for(thumb)?)))
+        }
+        (_, media) => Ok(media),
+    }
+}
+
 /// Builds a media group from payloads; only the first item of the batch gets
 /// the caption (Telegram rejects captions on later items).
 pub(super) fn build_media_group(
@@ -104,25 +129,7 @@ pub(super) fn build_media_group(
         .enumerate()
         .map(|(i, item)| {
             let item_caption = if i == 0 { caption } else { None };
-            Ok(match item {
-                MediaItemPayload::Photo { has_spoiler, .. } => {
-                    photo_media(item.input_file()?, item_caption, *has_spoiler)
-                }
-                MediaItemPayload::Video {
-                    has_spoiler,
-                    thumbnail,
-                    ..
-                } => {
-                    let mut video = video_media(item.input_file()?, item_caption, *has_spoiler);
-                    if let (Some(thumb), InputMedia::Video(v)) = (thumbnail, &mut video) {
-                        *v = v.clone().thumbnail(input_file_for(thumb)?);
-                    }
-                    video
-                }
-                MediaItemPayload::Animation { has_spoiler, .. } => {
-                    animation_media(item.input_file()?, item_caption, *has_spoiler)
-                }
-            })
+            media_from(item, item.input_file()?, item_caption, item.thumbnail_url())
         })
         .collect()
 }
