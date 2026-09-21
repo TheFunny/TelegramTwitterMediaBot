@@ -27,9 +27,7 @@ use crate::media_sender::MediaSender;
 use commands::{Command, execute_command};
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{
-    ChatId, ChatKind, Message, MessageId, ParseMode, PublicChatKind, ReplyParameters,
-};
+use teloxide::types::{ChatId, Message, MessageId, ParseMode, ReplyParameters};
 use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
@@ -196,7 +194,7 @@ pub(crate) async fn handle_message(
     bot: &Bot,
     message: Message,
 ) -> Result<(), RequestError> {
-    let is_private = matches!(message.chat.kind, ChatKind::Private(_));
+    let is_private = message.chat.is_private();
     let sender = message
         .from
         .as_ref()
@@ -267,10 +265,11 @@ pub(crate) async fn handle_message(
                 break;
             }
         }
-    } else if is_group(&message.chat.kind)
-        && extract_urls(&message)
-            .iter()
-            .any(|url| x_media::site::cache_key(url).is_some())
+    } else if message.chat.is_group()
+        || message.chat.is_supergroup()
+            && extract_urls(&message)
+                .iter()
+                .any(|url| x_media::site::cache_key(url).is_some())
     {
         // A supported link in a group used to be dropped in silence, which
         // reads as a broken bot (the command menu is registered globally, so
@@ -286,18 +285,6 @@ pub(crate) async fn handle_message(
 /// are private-chat only, inline mode is the group path.
 const GROUP_LINK_HINT: &str =
     "Links are handled in private chat only — send me this link there, or use inline mode here.";
-
-/// Groups and supergroups, as opposed to private chats and channels.
-fn is_group(kind: &ChatKind) -> bool {
-    matches!(
-        kind,
-        ChatKind::Public(chat)
-            if matches!(
-                chat.kind,
-                PublicChatKind::Group | PublicChatKind::Supergroup(_)
-            )
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -464,38 +451,24 @@ mod tests {
 
         assert_eq!(api.methods(), vec!["EditMessageCaption", "SendMessage"]);
         assert_eq!(api.body("SendMessage")["text"], GROUP_LINK_HINT);
-    }
 
-    #[test]
-    fn the_link_hint_is_for_groups_only() {
-        use teloxide::types::{ChatPrivate, ChatPublic, PublicChatChannel, PublicChatSupergroup};
+        // A channel stays silent: the hint reply would be posted into the
+        // channel itself, so the same link must produce no further call.
+        let channel: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 3,
+            "date": 0,
+            "chat": { "id": -1001234567890i64, "type": "channel", "title": "c" },
+            "text": "https://x.com/u/status/1",
+            "entities": [{ "type": "url", "offset": 0, "length": 24 }],
+        }))
+        .expect("a minimal channel message deserializes");
 
-        let group = ChatKind::Public(ChatPublic {
-            title: None,
-            kind: PublicChatKind::Group,
-        });
-        let supergroup = ChatKind::Public(ChatPublic {
-            title: None,
-            kind: PublicChatKind::Supergroup(PublicChatSupergroup {
-                username: None,
-                is_forum: false,
-            }),
-        });
-        // A channel must stay silent: the hint reply would be posted into the
-        // channel itself.
-        let channel = ChatKind::Public(ChatPublic {
-            title: None,
-            kind: PublicChatKind::Channel(PublicChatChannel { username: None }),
-        });
-        let private = ChatKind::Private(ChatPrivate {
-            username: None,
-            first_name: None,
-            last_name: None,
-        });
+        handle_message(&ctx, &bot, channel).await.unwrap();
 
-        assert!(is_group(&group));
-        assert!(is_group(&supergroup));
-        assert!(!is_group(&channel));
-        assert!(!is_group(&private));
+        assert_eq!(
+            api.methods(),
+            vec!["EditMessageCaption", "SendMessage"],
+            "a channel must not get the group hint"
+        );
     }
 }
