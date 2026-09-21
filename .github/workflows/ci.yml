@@ -4,6 +4,8 @@ name: CI
 # job that exercises the real source sites and the token-gated pixiv tests.
 #
 # Layering:
+#   changes — decides whether anything but documentation changed; a docs-only
+#           push/PR skips `test` (which then reports as skipped, not missing).
 #   test  — fmt + clippy + the full offline unit suite + a release-profile
 #           build + cargo-audit dependency gate. Runs on every push and PR,
 #           including forks (it needs no secrets).
@@ -46,7 +48,53 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Docs-only changes skip the heavy job: a README edit does not need a four
+  # minute Rust build (and it cannot break one). A gate job rather than a
+  # workflow-level `paths` filter — that leaves the run without a `test` check
+  # at all, and a required status check then waits for something that will
+  # never be reported, while a *skipped* job reports as neutral.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0 # the diff below needs the pushed range
+      - id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+            git fetch --quiet --no-tags origin "${{ github.base_ref }}"
+            changed="$(git diff --name-only "$base...HEAD")"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "$zero" ]; then
+              # New branch or force push: no usable base to compare against,
+              # so the full suite runs. Same for schedule/dispatch, which have
+              # no `before` at all.
+              changed=""
+            else
+              changed="$(git diff --name-only "$before..${{ github.sha }}")"
+            fi
+          fi
+          # Only a change that is *entirely* markdown may skip the job;
+          # anything else — and an empty diff, i.e. a re-run of the same
+          # commit — counts as code.
+          code=true
+          if [ -n "$changed" ] && ! grep -qvE '\.md$' <<<"$changed"; then
+            code=false
+          fi
+          echo "changed: ${changed:-<no diff>}"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Generous on purpose: the release-profile build below is cold on the very
     # first run (thin LTO + codegen-units = 1 across every dependency), and a

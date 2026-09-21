@@ -75,6 +75,7 @@ jobs:
       - id: check
         shell: bash
         run: |
+          zero=0000000000000000000000000000000000000000
           if [ "$GITHUB_REF_TYPE" = "branch" ]; then
             # A branch run can start before the release tag for its commit
             # reaches the remote — pushing master first is the usual way to hit
@@ -87,13 +88,25 @@ jobs:
             # pushing the branch and the tag together
             # (`git push origin master vX.Y.Z`) removes it.
             git fetch --tags --force --quiet origin
+            if git tag --points-at "$GITHUB_SHA" | grep -q .; then
+              echo "commit already tagged; the tag run builds the image"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Nothing the image is made of changed — a documentation or
+            # workflow-only commit — so there is no new image to publish. The
+            # PR trigger's path list plus the crate sources, which the image
+            # compiles into the binary.
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && [ "$before" != "$zero" ] \
+              && ! git diff --name-only "$before..$GITHUB_SHA" \
+                | grep -qE '^(Dockerfile|docker-entrypoint\.sh|\.dockerignore|Cargo\.toml|Cargo\.lock|\.github/workflows/docker\.yml|crates/)'; then
+              echo "no build input changed; skipping the image build"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
-          if [ "$GITHUB_REF_TYPE" = "branch" ] && git tag --points-at "$GITHUB_SHA" | grep -q .; then
-            echo "commit already tagged; the tag run builds the image"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
 
   # No `actions/checkout` here on purpose: `docker/build-push-action` defaults
   # to the Git context (`https://github.com/<owner>/<repo>.git#<ref>`), so
