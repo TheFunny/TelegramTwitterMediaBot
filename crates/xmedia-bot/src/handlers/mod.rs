@@ -265,11 +265,10 @@ pub(crate) async fn handle_message(
                 break;
             }
         }
-    } else if message.chat.is_group()
-        || message.chat.is_supergroup()
-            && extract_urls(&message)
-                .iter()
-                .any(|url| x_media::site::cache_key(url).is_some())
+    } else if (message.chat.is_group() || message.chat.is_supergroup())
+        && extract_urls(&message)
+            .iter()
+            .any(|url| x_media::site::cache_key(url).is_some())
     {
         // A supported link in a group used to be dropped in silence, which
         // reads as a broken bot (the command menu is registered globally, so
@@ -469,6 +468,25 @@ mod tests {
             api.methods(),
             vec!["EditMessageCaption", "SendMessage"],
             "a channel must not get the group hint"
+        );
+
+        // And an *unsupported* link in a group stays silent too: the hint is
+        // for links a site adapter claims (the branch's own filter).
+        let unsupported: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 4,
+            "date": 0,
+            "chat": { "id": -100, "type": "group", "title": "g" },
+            "text": "https://example.com/x",
+            "entities": [{ "type": "url", "offset": 0, "length": 19 }],
+        }))
+        .expect("a minimal group message deserializes");
+
+        handle_message(&ctx, &bot, unsupported).await.unwrap();
+
+        assert_eq!(
+            api.methods(),
+            vec!["EditMessageCaption", "SendMessage"],
+            "an unsupported link must not get the hint"
         );
     }
 }
