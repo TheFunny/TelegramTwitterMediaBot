@@ -39,10 +39,9 @@ concurrency:
 jobs:
   # A tag push and a branch push to the same commit fire two workflow runs;
   # build only once. Tag runs always build; master runs build only when the
-  # pushed commit is not already tagged (the tag run covers it) — which needs
-  # the tags to be present and to have been pushed by the time this runs, so
-  # `docker.yml`'s check step fetches them and the release flow pushes both
-  # refs together.
+  # pushed commit is not already tagged (the tag run covers it). That check
+  # can only see tags that already exist on the remote — see the check step's
+  # re-fetch and the one-push release flow in AGENTS.md.
   should-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -77,14 +76,16 @@ jobs:
         shell: bash
         run: |
           if [ "$GITHUB_REF_TYPE" = "branch" ]; then
-            # The check below is only as good as the tags in this clone, and
-            # `actions/checkout` does not fetch them (fetch-tags defaults to
-            # false, and fetch-depth does not imply it) — which is why the
-            # master run used to build the very commit the tag run was building
-            # in parallel. Fetched here, right before the decision, so a tag
-            # pushed moments ago is seen too. A tag pushed *after* this run
-            # started cannot be anticipated: push the branch and the tag
-            # together (`git push origin master v1.9.1`) or the tag first.
+            # A branch run can start before the release tag for its commit
+            # reaches the remote — pushing master first is the usual way to hit
+            # it — and then `git tag --points-at` legitimately finds nothing
+            # and this run builds the same commit the tag run is building: two
+            # docker builds, one release. (Seen on v1.9.0 and v1.9.1: the
+            # branch run's checkout had every tag *except* the one being
+            # pushed.) Re-fetching here, immediately before the decision,
+            # shrinks the window to "the tag was pushed after this step ran";
+            # pushing the branch and the tag together
+            # (`git push origin master vX.Y.Z`) removes it.
             git fetch --tags --force --quiet origin
           fi
           if [ "$GITHUB_REF_TYPE" = "branch" ] && git tag --points-at "$GITHUB_SHA" | grep -q .; then
