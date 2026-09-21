@@ -39,7 +39,10 @@ concurrency:
 jobs:
   # A tag push and a branch push to the same commit fire two workflow runs;
   # build only once. Tag runs always build; master runs build only when the
-  # pushed commit is not already tagged (the tag run covers it).
+  # pushed commit is not already tagged (the tag run covers it) — which needs
+  # the tags to be present and to have been pushed by the time this runs, so
+  # `docker.yml`'s check step fetches them and the release flow pushes both
+  # refs together.
   should-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -73,6 +76,17 @@ jobs:
       - id: check
         shell: bash
         run: |
+          if [ "$GITHUB_REF_TYPE" = "branch" ]; then
+            # The check below is only as good as the tags in this clone, and
+            # `actions/checkout` does not fetch them (fetch-tags defaults to
+            # false, and fetch-depth does not imply it) — which is why the
+            # master run used to build the very commit the tag run was building
+            # in parallel. Fetched here, right before the decision, so a tag
+            # pushed moments ago is seen too. A tag pushed *after* this run
+            # started cannot be anticipated: push the branch and the tag
+            # together (`git push origin master v1.9.1`) or the tag first.
+            git fetch --tags --force --quiet origin
+          fi
           if [ "$GITHUB_REF_TYPE" = "branch" ] && git tag --points-at "$GITHUB_SHA" | grep -q .; then
             echo "commit already tagged; the tag run builds the image"
             echo "build=false" >> "$GITHUB_OUTPUT"
