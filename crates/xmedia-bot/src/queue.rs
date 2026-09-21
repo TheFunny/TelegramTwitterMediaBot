@@ -294,19 +294,16 @@ impl PersistentTaskQueue {
         let result = self
             .pool
             .with_conn(|conn| {
-                let mut stmt = conn
-                    .prepare("SELECT COUNT(*), MIN(run_after) FROM tasks WHERE status='pending'")?;
-                let mut rows = stmt.query([])?;
-                match rows.next()? {
-                    Some(row) => {
-                        let count = row.get::<_, i64>(0)?;
-                        match row.get::<_, Option<f64>>(1)? {
-                            Some(oldest) if count > 0 => Ok(Some((count, oldest))),
-                            _ => Ok(None),
-                        }
-                    }
-                    None => Ok(None),
-                }
+                let (count, oldest) = conn.query_row(
+                    "SELECT COUNT(*), MIN(run_after) FROM tasks WHERE status='pending'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?)),
+                )?;
+                // `MIN` over zero rows is NULL, so the count is what decides.
+                Ok(match oldest {
+                    Some(oldest) if count > 0 => Some((count, oldest)),
+                    _ => None,
+                })
             })
             .await;
         match result {
@@ -461,13 +458,11 @@ impl QueueWorker {
         let result = self
             .pool
             .with_conn(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT MIN(run_after) FROM tasks WHERE status='pending'")?;
-                let mut rows = stmt.query([])?;
-                match rows.next()? {
-                    Some(row) => Ok(row.get::<_, Option<f64>>(0)?),
-                    None => Ok(None),
-                }
+                conn.query_row(
+                    "SELECT MIN(run_after) FROM tasks WHERE status='pending'",
+                    [],
+                    |row| row.get::<_, Option<f64>>(0),
+                )
             })
             .await;
         match result {

@@ -3,6 +3,7 @@
 
 use crate::db::unix_now;
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,12 +65,12 @@ impl ChatStore {
                 // Concurrent handler tasks (batch-forwards) may write chat_state
                 // while this read runs; the shared busy timeout handles the
                 // write-lock collision instead of failing the query.
-                let mut stmt = conn.prepare("SELECT payload FROM chat_state WHERE chat_id = ?1")?;
-                let mut rows = stmt.query(params![chat_key])?;
-                match rows.next()? {
-                    Some(row) => Ok(Some(row.get::<_, String>(0)?)),
-                    None => Ok(None),
-                }
+                conn.query_row(
+                    "SELECT payload FROM chat_state WHERE chat_id = ?1",
+                    params![chat_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
             })
             .await
             .unwrap_or_else(|e| {

@@ -9,6 +9,7 @@
 //! by the periodic prune in `main`.
 
 use crate::db::now_f64;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -76,14 +77,16 @@ impl LinkCache {
         let result = self
             .pool
             .with_conn(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT payload, created_at FROM link_cache WHERE url = ?1")?;
-                let mut rows = stmt.query(params![key])?;
-                let Some(row) = rows.next()? else {
+                let Some((payload, created_at)) = conn
+                    .query_row(
+                        "SELECT payload, created_at FROM link_cache WHERE url = ?1",
+                        params![key],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+                    )
+                    .optional()?
+                else {
                     return Ok(None);
                 };
-                let payload: String = row.get(0)?;
-                let created_at: f64 = row.get(1)?;
                 if now_f64() - created_at > ttl {
                     conn.execute("DELETE FROM link_cache WHERE url = ?1", params![key])?;
                     return Ok(None);

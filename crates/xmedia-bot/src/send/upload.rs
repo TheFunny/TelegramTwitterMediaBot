@@ -170,7 +170,7 @@ pub(super) async fn prepare_upload_item(
     let media_url = item_url(&item);
     if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
         let media = media_from_file(&item, std::path::PathBuf::from(media_url), caption)
-        .map_err(|message| FallbackError::Permanent { message })?;
+            .map_err(|message| FallbackError::Permanent { message })?;
         return Ok(PreparedItem {
             index,
             media,
