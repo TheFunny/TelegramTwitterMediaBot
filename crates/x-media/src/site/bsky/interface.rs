@@ -123,6 +123,23 @@ pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
     None
 }
 
+/// Segments fetched (and written) at once while remuxing an HLS video. Small
+/// on purpose: a segment can be up to 20 MiB and the whole playlist is capped
+/// at 256 MiB, so this is also what bounds the remux's peak memory.
+const SEGMENT_CONCURRENCY: usize = 4;
+
+/// The ffmpeg concat list for the downloaded segments, **in segment order**.
+/// The downloads complete in completion order (`JoinSet`), and ffmpeg would
+/// happily concatenate them in whatever order the list holds: an out-of-order
+/// list produces a silently scrambled video, not an error.
+fn concat_list(files: &mut [(usize, std::path::PathBuf)]) -> String {
+    files.sort_by_key(|(i, _)| *i);
+    files
+        .iter()
+        .map(|(_, path)| format!("file '{}'\n", path.to_string_lossy()))
+        .collect()
+}
+
 /// One HLS fetch (a playlist or a segment) with an in-place retry for a
 /// retryable class (transport, 429/5xx). These used to get their retry from the
 /// outer fetch loop, which pays for it by replaying the whole post: master
@@ -219,22 +236,45 @@ async fn resolve_bsky_video(
         .prefix(crate::TEMP_FILE_PREFIX)
         .tempdir()
         .map_err(|e| e.to_string())?;
+    // Segments are fetched concurrently under a small bound, and written with
+    // `tokio::fs` (a multi-megabyte `std::fs::write` blocks the executor
+    // thread). Serially, a several-hundred-segment video made the user wait
+    // for every round trip in turn — the dominant cost of a remux.
     let mut total: u64 = 0;
-    let mut list = String::new();
-    for (i, seg) in segments.iter().enumerate() {
-        let bytes = fetch_hls(seg, 20 * 1024 * 1024)
-            .await
-            .map_err(|e| format!("bsky segment {i}: {e}"))?;
-        total += bytes.len() as u64;
+    let mut written: Vec<(usize, std::path::PathBuf)> = Vec::with_capacity(segments.len());
+    let mut next = 0;
+    let mut set = tokio::task::JoinSet::new();
+    loop {
+        while set.len() < SEGMENT_CONCURRENCY && next < segments.len() {
+            let i = next;
+            next += 1;
+            let seg = segments[i].clone();
+            let path = frames_dir.path().join(format!("seg_{i:04}.ts"));
+            set.spawn(async move {
+                let bytes = fetch_hls(&seg, 20 * 1024 * 1024)
+                    .await
+                    .map_err(|e| format!("bsky segment {i}: {e}"))?;
+                tokio::fs::write(&path, &bytes)
+                    .await
+                    .map_err(|e| format!("bsky segment {i}: {e}"))?;
+                Ok::<_, String>((i, bytes.len() as u64, path))
+            });
+        }
+        let Some(joined) = set.join_next().await else {
+            break;
+        };
+        let (i, len, path) = joined.map_err(|e| format!("bsky segment task panicked: {e}"))??;
+        total += len;
         if total > 256 * 1024 * 1024 {
             return Err("bsky video exceeds total size cap".to_string());
         }
-        let path = frames_dir.path().join(format!("seg_{i:04}.ts"));
-        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-        list.push_str(&format!("file '{}'\n", path.to_string_lossy()));
+        written.push((i, path));
     }
+    let list = concat_list(&mut written);
     let list_path = frames_dir.path().join("list.txt");
-    std::fs::write(&list_path, &list).map_err(|e| e.to_string())?;
+    tokio::fs::write(&list_path, &list)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let output = out_dir.path().join("video.mp4");
     let list_str = list_path.to_string_lossy().into_owned();
@@ -409,6 +449,22 @@ mod tests {
 
     fn thread_json(post_json: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "thread": post_json })
+    }
+
+    /// The downloads finish in completion order; ffmpeg concatenates whatever
+    /// order `list.txt` holds, so an unsorted list is a scrambled video rather
+    /// than an error.
+    #[test]
+    fn concat_list_is_in_segment_order() {
+        let mut files = vec![
+            (2, std::path::PathBuf::from("/t/seg_0002.ts")),
+            (0, std::path::PathBuf::from("/t/seg_0000.ts")),
+            (1, std::path::PathBuf::from("/t/seg_0001.ts")),
+        ];
+        assert_eq!(
+            concat_list(&mut files),
+            "file '/t/seg_0000.ts'\nfile '/t/seg_0001.ts'\nfile '/t/seg_0002.ts'\n"
+        );
     }
 
     #[test]
