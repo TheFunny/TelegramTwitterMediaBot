@@ -240,11 +240,18 @@ pub(crate) async fn handle_message(
         return respond(());
     }
     if is_private {
-        let urls = extract_urls(&message);
+        // Only links a site adapter claims: an unsupported URL never gets a
+        // media message, so enqueuing it would spend a queue slot, a worker
+        // wake-up and (through `run_with_chat_action`) a Telegram call on
+        // nothing. Same test the group branch below makes for its hint.
+        let urls: Vec<String> = extract_urls(&message)
+            .into_iter()
+            .filter(|url| x_media::site::cache_key(url).is_some())
+            .collect();
         if !urls.is_empty() {
             // Debug only, and echo the normalized keys instead of the raw URLs.
             let keys: Vec<String> = urls.iter().map(|u| log_key(u)).collect();
-            log::debug!("extracted {} URL(s): {keys:?}", urls.len());
+            log::debug!("queuing {} supported URL(s): {keys:?}", urls.len());
         }
         for url in urls {
             // Clone out of the lock: the parking_lot guard is !Send and must

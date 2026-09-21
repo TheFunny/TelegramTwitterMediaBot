@@ -10,6 +10,7 @@ use crate::state::ChatData;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::LazyLock;
+use teloxide::RequestError;
 use teloxide::types::{ChatAction, ChatId, Message, MessageEntityKind, MessageId};
 use x_media::media::Media;
 
@@ -367,33 +368,50 @@ pub(crate) async fn url_media(
 /// expires an action after ~5s, while a fetch (ugoira encode, HLS remux) plus a
 /// download-and-reupload fallback routinely takes longer. The pipeline updates
 /// `hint` when it knows what it is sending.
+///
+/// No action is ever awaited *ahead* of the pipeline: doing that held the loop
+/// — and with it the fetch the user is waiting for — for a Telegram round trip,
+/// once before the pipeline was polled at all and again every
+/// [`ACTION_REFRESH`]. The in-flight send is held and polled *beside* the
+/// pipeline instead: the opening indicator still goes out before the pipeline's
+/// own first call (that is what it is for), but a slow API can no longer delay
+/// anything but the next indicator.
 async fn run_with_chat_action<F: Future<Output = ()>>(
     sender: &dyn MediaSender,
     chat_id: i64,
     hint: &parking_lot::Mutex<ActionHint>,
     pipeline: F,
 ) {
-    // The guard is released before the await: a parking_lot guard held across
-    // it makes the future !Send, and the URL workers spawn these.
-    let action = hint.lock().action();
-    if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
+    let warn = |e: RequestError| {
         // Cosmetic indicator: a failure degrades the experience, it does not
         // break the send (a group where the bot cannot send actions).
         log::warn!("send_chat_action failed for chat {chat_id}: {e}");
-    }
+    };
+    // The guard is released before the await: a parking_lot guard held across
+    // it makes the future !Send, and the URL workers spawn these.
+    let mut action = Some(sender.send_chat_action(ChatId(chat_id), hint.lock().action()));
     tokio::pin!(pipeline);
     loop {
         tokio::select! {
-            // `biased` polls the pipeline first, so a finished pipeline returns
-            // without ever arming the refresh timer (no stray actions).
+            // `biased` fixes the order below: the indicator is polled ahead of
+            // the pipeline, and a finished pipeline returns without arming the
+            // refresh timer (no stray actions).
             biased;
+            // `select!` evaluates every branch's future expression eagerly, so
+            // the `None` case is an inert block: the guard is what keeps it
+            // from being polled (and from unwrapping a `None`).
+            result = async { action.as_mut().unwrap().await }, if action.is_some() => {
+                action = None;
+                if let Err(e) = result {
+                    warn(e);
+                }
+            }
             () = &mut pipeline => return,
             () = tokio::time::sleep(ACTION_REFRESH) => {
-                let action = hint.lock().action();
-                if let Err(e) = sender.send_chat_action(ChatId(chat_id), action).await {
-                    // Cosmetic indicator: a failure degrades the experience, it does not
-        // break the send (a group where the bot cannot send actions).
-        log::warn!("send_chat_action failed for chat {chat_id}: {e}");
+                // One action in flight at a time: re-arming while the previous
+                // send is still unanswered would drop it mid-request.
+                if action.is_none() {
+                    action = Some(sender.send_chat_action(ChatId(chat_id), hint.lock().action()));
                 }
             }
         }
