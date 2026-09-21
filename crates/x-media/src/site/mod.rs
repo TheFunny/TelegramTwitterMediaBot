@@ -743,10 +743,6 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
     Ok(bytes::Bytes::from(buf))
 }
 
-pub async fn download_media(url: &str) -> Result<bytes::Bytes, FetchError> {
-    download_media_limited(url, u64::MAX).await
-}
-
 /// Streams a download to `out`, aborting with [`FetchError::TooLarge`] the
 /// moment the body crosses `max_bytes` (or when a declared Content-Length
 /// already exceeds it). Unlike [`download_media_limited`] the body is never
@@ -1038,7 +1034,7 @@ mod tests {
     #[ignore = "live network: requires outbound HTTPS to httpbin.org"]
     async fn live_redirect_into_the_hosts_network_is_refused() {
         let url = "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/";
-        match download_media(url).await.unwrap_err() {
+        match download_media_limited(url, u64::MAX).await.unwrap_err() {
             // A policy refusal reaches the caller wrapped by reqwest.
             FetchError::Http(e) => assert!(e.is_redirect(), "got {e}"),
             FetchError::Blocked => {}
@@ -1055,13 +1051,15 @@ mod tests {
             "http://169.254.169.254/latest/meta-data/",
             "http://127.0.0.1:9/secret",
         ] {
-            let err = download_media(url).await.unwrap_err();
+            let err = download_media_limited(url, u64::MAX).await.unwrap_err();
             assert!(matches!(err, FetchError::Blocked), "{url}: got {err:?}");
         }
         // A malformed URL is refused the same way instead of becoming a
         // retryable transport error.
         assert!(matches!(
-            download_media("not a url").await.unwrap_err(),
+            download_media_limited("not a url", u64::MAX)
+                .await
+                .unwrap_err(),
             FetchError::Blocked
         ));
     }
@@ -1142,7 +1140,7 @@ mod tests {
             other => panic!("expected illustration media, got {other:?}"),
         };
         assert!(url.contains("i.pximg.net"));
-        let bytes = download_media(&url).await.unwrap();
+        let bytes = download_media_limited(&url, u64::MAX).await.unwrap();
         assert!(!bytes.is_empty());
     }
 }
