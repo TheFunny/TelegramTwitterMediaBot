@@ -715,7 +715,7 @@ async fn url_media_inner(
             // Per-site caption format override (empty -> built-in caption).
             let format = chat_data
                 .message_format
-                .get(fetched.site_name())
+                .get(fetched.site_id)
                 .cloned()
                 .unwrap_or_default();
             let caption = fetched.caption_with(&format);
@@ -864,7 +864,7 @@ async fn refetch(
     let chat_data = ctx.chat_store.get(chat_id).await;
     let format = chat_data
         .message_format
-        .get(fetched.site_name())
+        .get(fetched.site_id)
         .cloned()
         .unwrap_or_default();
     let caption = fetched.caption_with(&format);

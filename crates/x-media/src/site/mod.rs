@@ -92,13 +92,6 @@ pub fn compose_text(title: &str, content: &str) -> String {
 }
 
 impl Fetched {
-    /// The site this post came from (used for per-site format overrides).
-    /// A thin alias over [`Fetched::site_id`] kept for callers that read the
-    /// site off a fetched post.
-    pub fn site_name(&self) -> &'static str {
-        self.site_id
-    }
-
     /// Renders a user-supplied caption format. The format string is
     /// HTML-escaped in full, then the (already-escaped) placeholder values
     /// are substituted — users can structure text but never inject raw HTML
@@ -586,7 +579,7 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
                 log::debug!(
                     "fetched [key={}]: site {} returned {} media in {}ms",
                     cache_key(url).unwrap_or_else(|| "?".into()),
-                    fetched.site_name(),
+                    fetched.site_id,
                     fetched.media.len(),
                     started.elapsed().as_millis()
                 );

@@ -627,7 +627,7 @@ pub(crate) async fn execute_command(
                         .get(message.chat.id.0)
                         .await
                         .message_format
-                        .get(fetched.site_name())
+                        .get(fetched.site_id)
                         .cloned()
                         .unwrap_or_default();
                     let caption = preview_caption(
@@ -639,7 +639,7 @@ pub(crate) async fn execute_command(
                     );
                     let report = debug_report(
                         url,
-                        fetched.site_name(),
+                        fetched.site_id,
                         &fetched.source_url,
                         &fetched.title,
                         &fetched.content,

@@ -602,7 +602,7 @@ mod tests {
         );
         // Empty format falls back to the built-in caption.
         assert_eq!(fetched.caption_with(""), fetched.caption);
-        assert_eq!(fetched.site_name(), "pixiv");
+        assert_eq!(fetched.site_id, "pixiv");
     }
 
     #[test]
