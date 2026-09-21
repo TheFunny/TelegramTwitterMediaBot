@@ -5,7 +5,7 @@ use super::{log_key, reply};
 use crate::ctx::{AppContext, CONTEXT};
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
 use crate::media_sender::MediaSender;
-use crate::send::{self, MediaItemPayload, Task};
+use crate::send::{self, Delivery, MediaItemPayload, Task};
 use crate::state::ChatData;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -433,37 +433,20 @@ fn build_send_task(
         PostSend::FromChat => (chat_data.edit_before_forward, chat_data.forward_channel_id),
         PostSend::Suppressed => (false, None),
     };
-    if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
-        Task::SendAnimation {
+    Task::from_items(
+        Delivery {
             chat_id,
             reply_to_message_id,
-            caption,
-            animation: items.into_iter().next().unwrap(),
-            source_url,
             edit_before_forward,
             forward_channel_id,
             notify_chat_id: Some(chat_id),
             notify_message_id: Some(reply_to_message_id),
-            cache_data,
-        }
-    } else {
-        Task::SendMediaSequence {
-            chat_id,
-            reply_to_message_id,
-            caption,
-            // Photos first so a mixed photo+video group starts with a photo
-            // (Telegram's sendMediaGroup rule); order within each kind is kept.
-            media_batches: send::chunk_media_items(send::photos_first(items)),
-            batch_index: 0,
-            sent_message_ids: vec![],
-            source_url,
-            edit_before_forward,
-            forward_channel_id,
-            notify_chat_id: Some(chat_id),
-            notify_message_id: Some(reply_to_message_id),
-            cache_data,
-        }
-    }
+        },
+        source_url,
+        caption,
+        items,
+        cache_data,
+    )
 }
 
 /// The per-URL pipeline: link cache → fetch → build → send → post-send.
@@ -850,40 +833,20 @@ fn apply_refresh(task: &Task, fresh: &Refetched) -> Option<Task> {
         Task::ForwardMessages { .. } => return None,
     };
     let (notify_chat_id, notify_message_id) = task.notify_target();
-    let items = fresh.items.clone();
-    let source_url = task.source_url()?.to_string();
-    Some(
-        if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
-            Task::SendAnimation {
-                chat_id,
-                reply_to_message_id,
-                caption: fresh.caption.clone(),
-                animation: items.into_iter().next().expect("checked len"),
-                source_url,
-                edit_before_forward,
-                forward_channel_id,
-                notify_chat_id,
-                notify_message_id,
-                cache_data: fresh.cache_data.clone(),
-            }
-        } else {
-            Task::SendMediaSequence {
-                chat_id,
-                reply_to_message_id,
-                caption: fresh.caption.clone(),
-                media_batches: send::chunk_media_items(send::photos_first(items)),
-                // A fresh delivery: nothing of this payload has been sent.
-                batch_index: 0,
-                sent_message_ids: vec![],
-                source_url,
-                edit_before_forward,
-                forward_channel_id,
-                notify_chat_id,
-                notify_message_id,
-                cache_data: fresh.cache_data.clone(),
-            }
+    Some(Task::from_items(
+        Delivery {
+            chat_id,
+            reply_to_message_id,
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            notify_message_id,
         },
-    )
+        task.source_url()?.to_string(),
+        fresh.caption.clone(),
+        fresh.items.clone(),
+        fresh.cache_data.clone(),
+    ))
 }
 
 /// Fetches the post again and maps it into [`Refetched`]: the same mapping the

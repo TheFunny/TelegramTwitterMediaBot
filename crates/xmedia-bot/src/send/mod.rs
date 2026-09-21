@@ -133,7 +133,73 @@ pub enum Task {
     },
 }
 
+/// The delivery envelope of a task built from ready-made items: who receives
+/// the media, where a failure notice goes, and whether the chat's
+/// edit-before-forward / channel-forward settings apply. The fresh-send path
+/// fills it from the chat's settings, the startup repair from the queued row it
+/// replaces, so the two shapes cannot drift apart.
+pub(crate) struct Delivery {
+    pub chat_id: i64,
+    pub reply_to_message_id: i64,
+    pub edit_before_forward: bool,
+    pub forward_channel_id: Option<i64>,
+    pub notify_chat_id: Option<i64>,
+    pub notify_message_id: Option<i64>,
+}
+
 impl Task {
+    /// A send task for ready-made `items`: a lone animation takes the
+    /// SendAnimation path, everything else the media sequence (photos first,
+    /// chunked). The one place that shape is written.
+    pub(crate) fn from_items(
+        delivery: Delivery,
+        source_url: String,
+        caption: String,
+        items: Vec<MediaItemPayload>,
+        cache_data: Option<CachedPost>,
+    ) -> Task {
+        let Delivery {
+            chat_id,
+            reply_to_message_id,
+            edit_before_forward,
+            forward_channel_id,
+            notify_chat_id,
+            notify_message_id,
+        } = delivery;
+        if items.len() == 1 && matches!(items[0], MediaItemPayload::Animation { .. }) {
+            Task::SendAnimation {
+                chat_id,
+                reply_to_message_id,
+                caption,
+                animation: items.into_iter().next().unwrap(),
+                source_url,
+                edit_before_forward,
+                forward_channel_id,
+                notify_chat_id,
+                notify_message_id,
+                cache_data,
+            }
+        } else {
+            Task::SendMediaSequence {
+                chat_id,
+                reply_to_message_id,
+                caption,
+                // Photos first so a mixed photo+video group starts with a photo
+                // (Telegram's sendMediaGroup rule); order within each kind is kept.
+                media_batches: chunk_media_items(photos_first(items)),
+                // A fresh delivery: nothing of this payload has been sent.
+                batch_index: 0,
+                sent_message_ids: vec![],
+                source_url,
+                edit_before_forward,
+                forward_channel_id,
+                notify_chat_id,
+                notify_message_id,
+                cache_data,
+            }
+        }
+    }
+
     fn cache_data(&self) -> Option<&CachedPost> {
         match self {
             Task::SendMediaSequence { cache_data, .. } | Task::SendAnimation { cache_data, .. } => {
