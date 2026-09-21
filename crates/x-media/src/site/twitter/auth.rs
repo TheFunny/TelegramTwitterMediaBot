@@ -130,15 +130,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     let status = response.status();
     if !status.is_success() {
         log::warn!("twitter auth fetch {id}: HTTP {status}");
-        return match status.as_u16() {
-            404 | 410 => Err(FetchError::NotFound),
-            // A stale/refused `auth_token` is not a bad moment: retrying it
-            // three times only delays the report.
-            401 | 403 => Err(FetchError::Blocked),
-            _ => Err(FetchError::Transient(format!(
-                "twitter auth status {status}"
-            ))),
-        };
+        return Err(crate::site::status_error("twitter auth", status));
     }
     let text = response.text().await?;
     let json: Value = serde_json::from_str(&text)?;

@@ -281,6 +281,21 @@ pub enum FetchError {
     Io(std::io::Error),
 }
 
+/// The error class for a non-success HTTP status, as the site adapters that
+/// share this mapping classify it: 404/410 mean the post is gone and 401/403 a
+/// refusal or an auth demand — both permanent, since retrying cannot change
+/// either — while everything else (429, 5xx) is transient and retried by
+/// [`fetch`]. `site` only names the adapter in the transient message; a site
+/// whose statuses mean something else (bilibili's 412 risk control, misskey's
+/// 400 with `NO_SUCH_NOTE`) maps those before falling back here.
+pub fn status_error(site: &'static str, status: reqwest::StatusCode) -> FetchError {
+    match status.as_u16() {
+        404 | 410 => FetchError::NotFound,
+        401 | 403 => FetchError::Blocked,
+        _ => FetchError::Transient(format!("{site} status {status}")),
+    }
+}
+
 /// How long a download may make no progress: the response head, and then each
 /// individual chunk, must arrive within this window. Not a total timeout — see
 /// [`DOWNLOAD_TOTAL_TIMEOUT`].
