@@ -15,13 +15,17 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId};
 
-/// Persists a successful send under the post's cache key. Only runs for a
-/// fresh (non-resumed) task that carried raw cache data with no file ids yet.
+/// Persists a successful send under the post's cache key. Skips a send that was
+/// served from the cache — its entry already holds the file ids the next repeat
+/// wants — *unless* the entry was degraded (no file ids left, see
+/// `invalidate_cache`): then the ids this send just produced are written back,
+/// which is what returns a degraded entry to the fast path instead of leaving
+/// it to re-upload the media on every repeat.
 pub(super) async fn cache_sent_task(ctx: &AppContext<'_>, task: &Task, media: Vec<CachedMedia>) {
     let Some(cache_data) = task.cache_data() else {
         return;
     };
-    if !cache_data.media.is_empty() || media.is_empty() {
+    if cache_data.media.iter().any(|m| !m.file_id.is_empty()) || media.is_empty() {
         return;
     }
     let mut post = cache_data.clone();

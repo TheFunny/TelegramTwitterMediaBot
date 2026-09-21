@@ -787,7 +787,7 @@ pub async fn forward_messages(ctx: &AppContext<'_>, task: &Task) -> Result<(), S
 
 #[cfg(test)]
 mod tests {
-    use super::post_send::build_edit_markup;
+    use super::post_send::{build_edit_markup, cache_sent_task};
     use super::upload::sniff_ext;
     use super::*;
     use crate::ctx::test_support::{TestStores, cached_photo};
@@ -1643,6 +1643,67 @@ mod tests {
             notify_message_id: None,
             cache_data: Some(cached_photo()),
         }
+    }
+
+    #[tokio::test]
+    async fn a_degraded_entry_regains_the_file_ids_a_send_produced() {
+        let sender = MockSender::scripted(vec![], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        // A degraded entry: no file ids, URL only (what `invalidate_cache`
+        // leaves behind).
+        let mut degraded = cached_photo();
+        degraded.media[0].file_id.clear();
+        stores.link_cache().put("twitter:1", &degraded).await;
+        let mut task = cached_sequence_task();
+        if let Task::SendMediaSequence { cache_data, .. } = &mut task {
+            *cache_data = Some(degraded.clone());
+        }
+
+        cache_sent_task(
+            &ctx,
+            &task,
+            vec![CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "fresh-id".into(),
+                url: "https://pbs.twimg.com/media/photo.jpg".into(),
+            }],
+        )
+        .await;
+
+        let entry = stores
+            .link_cache()
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .expect("the entry must still be there");
+        assert_eq!(
+            entry.media[0].file_id, "fresh-id",
+            "a degraded entry must take the ids its send produced"
+        );
+
+        // A send served from a healthy entry must not rewrite it: the ids it
+        // already holds are exactly what the next repeat wants. Which of the
+        // two a send was is the *task's* cache snapshot — a healthy one carries
+        // file ids.
+        cache_sent_task(
+            &ctx,
+            &cached_sequence_task(),
+            vec![CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: "other-id".into(),
+                url: String::new(),
+            }],
+        )
+        .await;
+        let entry = stores
+            .link_cache()
+            .get("twitter:1", Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(
+            entry.media[0].file_id, "fresh-id",
+            "a healthy entry is left alone"
+        );
     }
 
     #[tokio::test]
