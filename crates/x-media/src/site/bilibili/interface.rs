@@ -72,10 +72,14 @@ static COOKIE: LazyLock<Option<String>> = LazyLock::new(|| {
         .filter(|s| !s.is_empty())
 });
 
-/// Cached `buvid3`/`buvid4` header value from [`SPI_URL`], or `None` when the
-/// fingerprint endpoint was unavailable (requests then go out without a
-/// cookie, as before).
-static BUVID: LazyLock<tokio::sync::Mutex<Option<String>>> = LazyLock::new(Default::default);
+/// Cached `buvid3`/`buvid4` header value from [`SPI_URL`]. The outer `Option`
+/// is "an attempt has been made", the inner one "it produced a cookie": a
+/// failed attempt is remembered too, since it arrives at the request path as
+/// no cookie either way. Caching only success meant every later post asked the
+/// fingerprint endpoint again — one extra round trip per post, and on a
+/// flagged IP the endpoint is what fails.
+static BUVID: LazyLock<tokio::sync::Mutex<Option<Option<String>>>> =
+    LazyLock::new(Default::default);
 
 /// Registry entry for the bilibili adapter (see [`crate::site::Site`]).
 pub struct BilibiliSite;
@@ -154,20 +158,28 @@ async fn cookie() -> Option<String> {
     if let Some(cookie) = COOKIE.as_deref() {
         return Some(cookie.to_string());
     }
-    // ponytail: cached for the process lifetime. Refetching after a `-352`
-    // would mint a new device id for the same flagged IP — the escalation
-    // path is BILIBILI_COOKIE.
-    let mut cached = BUVID.lock().await;
-    if cached.is_none() {
-        *cached = match fetch_buvid().await {
-            Ok(cookie) => cookie,
-            Err(e) => {
-                log::debug!("bilibili fingerprint unavailable: {e}");
-                None
-            }
-        };
+    // ponytail: cached for the process lifetime, a failed attempt included.
+    // Refetching after a `-352` would mint a new device id for the same
+    // flagged IP — the escalation path is BILIBILI_COOKIE.
+    {
+        // The guard is released before the request below: held across it, the
+        // first fingerprint call serialized every concurrent bilibili fetch
+        // behind one round trip.
+        let cached = BUVID.lock().await;
+        if let Some(cookie) = cached.as_ref() {
+            return cookie.clone();
+        }
     }
-    cached.clone()
+    let fetched = match fetch_buvid().await {
+        Ok(cookie) => cookie,
+        Err(e) => {
+            log::debug!("bilibili fingerprint unavailable: {e}");
+            None
+        }
+    };
+    // A caller that got there first wins (`get_or_insert`): two requests racing
+    // the first time cost a duplicate fingerprint call, never a wrong cookie.
+    BUVID.lock().await.get_or_insert(fetched).clone()
 }
 
 /// Fetches the device cookies bilibili hands to any visitor. The result is
