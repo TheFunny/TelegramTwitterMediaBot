@@ -131,18 +131,24 @@ impl ChatStore {
     pub async fn prune_expired(&self, ttl: Duration) -> Vec<(i64, i64)> {
         let now = unix_now();
         let ttl_secs = ttl.as_secs() as i64;
-        // Chats that may have an expired record, from a cache snapshot; the
-        // pruning itself re-reads and writes under the per-chat lock below
-        // (see the eviction note). Takes no lock of its own, so a chat
-        // appearing later is simply picked up by the next sweep.
+        // Chats worth looking at, from a cache snapshot: the ones with an
+        // expired record, plus the ones holding no record at all. The latter
+        // used to be left alone for the process lifetime — every chat that ever
+        // sent a message or ran a command stayed in the cache and in the
+        // per-chat lock map — even though a chat with no live prompt is exactly
+        // what the eviction below is for. The pruning itself re-reads and
+        // writes under the per-chat lock below; taking no lock here means a
+        // chat appearing later is simply picked up by the next sweep.
         let candidates: Vec<i64> = {
             let cache = self.cache.lock();
             cache
                 .iter()
                 .filter(|(_, data)| {
-                    data.edit_message
-                        .values()
-                        .any(|entry| entry.created_at + ttl_secs <= now)
+                    data.edit_message.is_empty()
+                        || data
+                            .edit_message
+                            .values()
+                            .any(|entry| entry.created_at + ttl_secs <= now)
                 })
                 .map(|(chat_id, _)| *chat_id)
                 .collect()
@@ -262,6 +268,58 @@ mod tests {
             data.template.get("t").map(String::as_str),
             Some("[]"),
             "unrelated state lost by the prune"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_chat_is_evicted_and_its_state_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open_store(dir.path().join("e.db").to_str().unwrap()).unwrap();
+        let store = ChatStore::new(pool);
+        // Durable settings and no prompt at all: this chat used to sit in the
+        // cache (and in the per-chat lock map) for the process lifetime,
+        // because the sweep only ever looked at chats with an *expired* record.
+        store
+            .update(9, |data| {
+                data.forward_channel_id = Some(-100);
+                data.message_format.insert("twitter".into(), "{url}".into());
+            })
+            .await;
+        assert!(store.cache.lock().contains_key(&9));
+
+        let removed = store.prune_expired(Duration::from_secs(60)).await;
+
+        assert!(removed.is_empty(), "nothing had expired");
+        assert!(
+            !store.cache.lock().contains_key(&9),
+            "a chat with no live prompt must leave the cache"
+        );
+        assert!(!store.locks.lock().contains_key(&9), "…and its lock");
+        // The DB kept the row, so the next use reloads everything it held.
+        let data = store.get(9).await;
+        assert_eq!(data.forward_channel_id, Some(-100));
+        assert_eq!(
+            data.message_format.get("twitter").map(String::as_str),
+            Some("{url}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_prompt_keeps_its_chat_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open_store(dir.path().join("k.db").to_str().unwrap()).unwrap();
+        let store = ChatStore::new(pool);
+        store
+            .update(10, |data| {
+                data.edit_message.insert(1, edit_entry(10, unix_now()));
+            })
+            .await;
+
+        store.prune_expired(Duration::from_secs(3600)).await;
+
+        assert!(
+            store.cache.lock().contains_key(&10),
+            "a live prompt holds its chat in the cache"
         );
     }
 

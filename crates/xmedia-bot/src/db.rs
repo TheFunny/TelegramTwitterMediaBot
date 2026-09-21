@@ -139,6 +139,11 @@ const MIGRATIONS: &[&str] = &[
     // written by its former holder — which used to duplicate a send or drop
     // the new holder's retry state, silently.
     "ALTER TABLE tasks ADD COLUMN lease_token TEXT",
+    // 2: the 300 s sweep prunes the link cache by `created_at`
+    // (`DELETE FROM link_cache WHERE created_at < ?`). Without an index that
+    // is a full scan of every post sent inside the TTL window — up to a week
+    // of them — on every sweep; the `url` primary key cannot serve it.
+    "CREATE INDEX IF NOT EXISTS idx_link_cache_created_at ON link_cache(created_at)",
 ];
 
 /// Brings an existing database up to [`MIGRATIONS`]. Idempotent: a database
@@ -285,6 +290,18 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(payload, "{\"chat_id\":1}", "rows survive the upgrade");
+            // The link-cache prune's index arrives with the migrations (the
+            // baseline schema has none): without it every sweep scans the
+            // whole table.
+            let index: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'index' AND name = 'idx_link_cache_created_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(index, 1, "the migration's index must exist");
             Ok(())
         })
         .await
