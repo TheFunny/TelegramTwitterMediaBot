@@ -135,13 +135,10 @@ pub fn open_db(path: &str) -> rusqlite::Result<Connection> {
 
 /// Opens the shared DB file, runs the merged schema for all three tables and
 /// returns a pool for it. One call per process in production (the stores
-/// share the returned pool); tests call it per tempdir.
+/// share the returned pool); tests call it per tempdir. The file's directory
+/// must exist already — [`crate::handlers::db_path`] is what creates it, and
+/// it is the only caller that takes a path it did not get from a tempdir.
 pub fn open_store(path: &str) -> rusqlite::Result<Arc<DbPool>> {
-    if let Some(parent) = std::path::Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(rusqlite_error)?;
-    }
     let conn = open_db(path)?;
     schema_init(&conn)?;
     migrate(&conn)?;
@@ -180,10 +177,6 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(&format!("PRAGMA user_version = {target}"))?;
     }
     Ok(())
-}
-
-fn rusqlite_error(e: std::io::Error) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
 }
 
 /// Creates the `tasks`, `chat_state` and `link_cache` tables (idempotent).
