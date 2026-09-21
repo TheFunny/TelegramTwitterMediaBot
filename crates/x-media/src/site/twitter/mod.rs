@@ -2,6 +2,4 @@ mod auth;
 mod interface;
 mod model;
 
-pub use interface::{
-    PATTERN, Tweet, TwitterSite, cache_key, enabled, fetch_from_url, is_retryable, media_headers,
-};
+pub use interface::{PATTERN, Tweet, TwitterSite, cache_key, fetch_from_url};

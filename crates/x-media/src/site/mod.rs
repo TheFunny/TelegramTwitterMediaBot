@@ -891,8 +891,10 @@ mod tests {
         };
         assert_eq!(err.to_string(), "example error: boom");
         assert!(err.source().is_some());
-        // Permanent by default: no site's is_retryable matches it.
-        assert!(!twitter::is_retryable(&err));
+        // Permanent by default: no site's is_retryable matches it (the trait
+        // default is the policy for every site that does not override it).
+        assert!(!twitter::TwitterSite.is_retryable(&err));
+        assert!(twitter::TwitterSite.is_retryable(&FetchError::Transient("429".into())));
     }
 
     #[test]

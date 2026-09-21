@@ -30,8 +30,12 @@ pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:https?://)?(?:www\.|mobile\.)?(?:x|twitter|fixvx|vxtwitter|fixupx|fxtwitter)\.com/[^.]+/status/(\d+)").unwrap()
 });
 
-pub fn enabled() -> bool {
-    true
+/// Cache key for a twitter URL: `"twitter:<id>"`. The prefix is the site id
+/// used for caption-format lookup and link-cache keys.
+pub fn cache_key(url: &str) -> Option<String> {
+    PATTERN
+        .captures(url)
+        .map(|caps| format!("twitter:{}", &caps[1]))
 }
 
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
@@ -66,26 +70,6 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
         }
         Err(e) => Err(e),
     }
-}
-
-/// Cache key for a twitter URL: `"twitter:<id>"`. The prefix is the site id
-/// used for caption-format lookup and link-cache keys.
-pub fn cache_key(url: &str) -> Option<String> {
-    PATTERN
-        .captures(url)
-        .map(|caps| format!("twitter:{}", &caps[1]))
-}
-
-/// Twitter's fetch-retry policy: transient classes only. Not-found, blocked,
-/// sensitive (NSFW withholding) and parse failures are permanent — retrying
-/// them only wastes attempts against the syndication endpoint.
-pub fn is_retryable(err: &FetchError) -> bool {
-    matches!(err, FetchError::Http(_) | FetchError::Transient(_))
-}
-
-/// twimg URLs need no extra headers (no hotlink protection).
-pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
-    None
 }
 
 /// Fetches a tweet from the syndication endpoint. Deleted/blocked tweets
@@ -460,20 +444,6 @@ mod tests {
             Some("twitter:1234567890".into())
         );
         assert_eq!(cache_key("https://example.com/1"), None);
-    }
-
-    #[test]
-    fn is_retryable_classifies_transient_and_permanent() {
-        // Transient: network errors and explicit transient statuses (the
-        // `Http` arm shares this match arm with `Transient`).
-        assert!(is_retryable(&FetchError::Transient("429".into())));
-        // Permanent: gone, blocked, withheld, oversized, unparseable.
-        assert!(!is_retryable(&FetchError::NotFound));
-        assert!(!is_retryable(&FetchError::Blocked));
-        assert!(!is_retryable(&FetchError::Sensitive));
-        assert!(!is_retryable(&FetchError::TooLarge));
-        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
-        assert!(!is_retryable(&FetchError::Json(json_err)));
     }
 
     #[test]

@@ -111,10 +111,6 @@ pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub fn enabled() -> bool {
-    true
-}
-
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     let dynamic_id = PATTERN
         .captures(url)
@@ -133,18 +129,9 @@ pub fn cache_key(url: &str) -> Option<String> {
         .map(|caps| format!("bilibili:{}", &caps[1]))
 }
 
-/// Bilibili's fetch-retry policy: transient classes only. Not-found, blocked
-/// and parse failures are permanent.
-pub fn is_retryable(err: &FetchError) -> bool {
-    matches!(err, FetchError::Http(_) | FetchError::Transient(_))
-}
-
-/// hdslb media serves without a `Referer` (verified live 2026-09-17 on
-/// `i0.hdslb.com` image URLs, requested both with and without one), so no
-/// extra headers.
-pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
-    None
-}
+// hdslb media serves without a `Referer` (verified live 2026-09-17 on
+// `i0.hdslb.com` image URLs, requested both with and without one), so this
+// adapter does not override `Site::media_headers`.
 
 /// `Cookie` header for bilibili requests: the operator's `BILIBILI_COOKIE`
 /// when set, otherwise the anonymous device cookies.
@@ -908,7 +895,7 @@ mod tests {
         // dropping the post.
         for code in [-352, -412] {
             let err = code_error(code, "-352").unwrap();
-            assert!(is_retryable(&err), "{err}");
+            assert!(BilibiliSite.is_retryable(&err), "{err}");
         }
         // A removed dynamic is permanent.
         assert!(matches!(code_error(500, ""), Some(FetchError::NotFound)));
@@ -917,7 +904,7 @@ mod tests {
             Some(FetchError::NotFound)
         ));
         let err = code_error(-400, "param parsing failed").unwrap();
-        assert!(!is_retryable(&err), "{err}");
+        assert!(!BilibiliSite.is_retryable(&err), "{err}");
         assert!(err.to_string().contains("-400"), "{err}");
     }
 

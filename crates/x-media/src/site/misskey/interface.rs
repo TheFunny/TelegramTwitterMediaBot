@@ -34,10 +34,6 @@ impl Site for MisskeySite {
 pub static PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:https?://)?misskey\.io/notes/([\w.\-~]+)").unwrap());
 
-pub fn enabled() -> bool {
-    true
-}
-
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     let caps = PATTERN.captures(url).ok_or(FetchError::NotFound)?;
     let note_id = caps.get(1).ok_or(FetchError::NotFound)?.as_str();
@@ -51,17 +47,6 @@ pub fn cache_key(url: &str) -> Option<String> {
     PATTERN
         .captures(url)
         .map(|caps| format!("misskey:{}", &caps[1]))
-}
-
-/// Misskey's fetch-retry policy: transient classes only. Not-found, blocked
-/// and parse failures are permanent.
-pub fn is_retryable(err: &FetchError) -> bool {
-    matches!(err, FetchError::Http(_) | FetchError::Transient(_))
-}
-
-/// misskey.io media hosts need no extra headers (verified: direct GET works).
-pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
-    None
 }
 
 /// Fetches a note from misskey.io by id. The API answers client failures

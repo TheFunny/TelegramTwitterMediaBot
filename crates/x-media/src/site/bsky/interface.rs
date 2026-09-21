@@ -30,10 +30,6 @@ pub static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:https?://)?bsky\.app/profile/([\w.\-:]+)/post/([\w.\-~]+)").unwrap()
 });
 
-pub fn enabled() -> bool {
-    true
-}
-
 pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
     let caps = PATTERN.captures(url).ok_or(FetchError::NotFound)?;
     let handle = caps
@@ -110,17 +106,6 @@ pub fn cache_key(url: &str) -> Option<String> {
     PATTERN
         .captures(url)
         .map(|caps| format!("bsky:{}/{}", &caps[1], &caps[2]))
-}
-
-/// Bluesky's fetch-retry policy: transient classes only. Not-found, blocked
-/// and parse failures are permanent.
-pub fn is_retryable(err: &FetchError) -> bool {
-    matches!(err, FetchError::Http(_) | FetchError::Transient(_))
-}
-
-/// bsky media (cdn.bsky.app) needs no extra headers.
-pub fn media_headers(_url: &str) -> Option<Vec<(&'static str, String)>> {
-    None
 }
 
 /// Segments fetched (and written) at once while remuxing an HLS video. Small
@@ -499,10 +484,11 @@ mod tests {
     /// ([`fetch_hls`]). The classes below are the ones still retried there.
     #[test]
     fn media_prep_failure_is_not_retried() {
-        assert!(!is_retryable(&FetchError::MediaPrep(
+        use crate::site::Site as _;
+        assert!(!BskySite.is_retryable(&FetchError::MediaPrep(
             "bsky video remux failed: segment 400: 503".into()
         )));
-        assert!(is_retryable(&FetchError::Transient("429".into())));
+        assert!(BskySite.is_retryable(&FetchError::Transient("429".into())));
     }
 
     #[test]
