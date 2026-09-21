@@ -458,7 +458,6 @@ fn image(url: &str) -> Option<Media> {
     }
     Some(if url.ends_with(".gif") {
         Media::Animated {
-            title: None,
             url,
             // Left empty on purpose: the `@518w.jpg` variant is unverified for
             // animated sources, and Telegram generates a frame preview itself.
@@ -466,7 +465,6 @@ fn image(url: &str) -> Option<Media> {
         }
     } else {
         Media::Illustration {
-            title: None,
             // Written before `url` moves so the formatting borrows it.
             thumbnail_url: Some(format!("{url}{THUMB_SUFFIX}")),
             url,

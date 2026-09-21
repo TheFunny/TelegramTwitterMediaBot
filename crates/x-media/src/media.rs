@@ -37,18 +37,15 @@ impl Media {
 #[derive(Debug)]
 pub enum Media {
     Illustration {
-        title: Option<String>,
         url: String,
         thumbnail_url: Option<String>,
         fallback_url: Option<String>,
     },
     Video {
-        title: Option<String>,
         url: String,
         thumbnail_url: String,
     },
     Animated {
-        title: Option<String>,
         url: String,
         thumbnail_url: String,
     },

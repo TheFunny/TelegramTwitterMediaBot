@@ -149,7 +149,6 @@ impl PixivAPI {
             match self.ugoira_video(illust_id).await {
                 Ok(Some((mp4_path, _keep_alive))) => {
                     illustration.media.push(Media::Video {
-                        title: None,
                         url: mp4_path,
                         thumbnail_url: model.image_urls.medium.clone(),
                     });

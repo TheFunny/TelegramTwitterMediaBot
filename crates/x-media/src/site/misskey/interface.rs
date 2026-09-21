@@ -160,21 +160,17 @@ fn caption(url: &str, author_url: &str, author: &str, text: &str) -> String {
 /// are skipped (twitter's `_ => {}` precedent). GIF must be matched before
 /// the generic image arm.
 fn media_from_file(file: &model::DriveFile) -> Option<Media> {
-    let title = file.name.clone();
     match file.mime_type.as_str() {
         "image/gif" => Some(Media::Animated {
-            title,
             url: file.url.clone(),
             thumbnail_url: file.thumbnail_url.clone().unwrap_or_default(),
         }),
         mime if mime.starts_with("image/") => Some(Media::Illustration {
-            title,
             url: file.url.clone(),
             thumbnail_url: file.thumbnail_url.clone(),
             fallback_url: None,
         }),
         mime if mime.starts_with("video/") => Some(Media::Video {
-            title,
             url: file.url.clone(),
             thumbnail_url: file.thumbnail_url.clone().unwrap_or_default(),
         }),
@@ -253,12 +249,10 @@ mod tests {
         assert_eq!(fetched.media.len(), 1);
         match &fetched.media[0] {
             Media::Illustration {
-                title,
                 url,
                 thumbnail_url,
                 fallback_url,
             } => {
-                assert_eq!(title.as_deref(), Some("pic.webp"));
                 assert_eq!(url, "https://media.misskeyusercontent.jp/io/a.webp");
                 assert_eq!(
                     thumbnail_url.as_deref(),

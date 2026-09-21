@@ -30,6 +30,4 @@ pub(crate) struct DriveFile {
     pub(crate) thumbnail_url: Option<String>,
     #[serde(default, rename = "isSensitive")]
     pub(crate) is_sensitive: bool,
-    #[serde(default)]
-    pub(crate) name: Option<String>,
 }

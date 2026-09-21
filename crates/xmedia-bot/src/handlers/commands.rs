@@ -816,13 +816,11 @@ mod tests {
     fn debug_report_renders_fields_and_media() {
         let media = vec![
             Media::Illustration {
-                title: None,
                 url: "https://cdn.example/1.jpg".into(),
                 thumbnail_url: None,
                 fallback_url: None,
             },
             Media::Video {
-                title: None,
                 url: "https://cdn.example/2.mp4".into(),
                 thumbnail_url: "https://cdn.example/2.jpg".into(),
             },
@@ -915,7 +913,6 @@ mod tests {
         // 200 media lines ≈ 8 KB, comfortably over the cap.
         let media: Vec<Media> = (0..200)
             .map(|i| Media::Illustration {
-                title: None,
                 url: format!("https://cdn.example/{i}.jpg"),
                 thumbnail_url: None,
                 fallback_url: None,

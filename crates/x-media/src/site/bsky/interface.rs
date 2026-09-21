@@ -73,7 +73,6 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                     _ => String::new(),
                 };
                 media.push(Media::Video {
-                    title: None,
                     url: mp4_path.to_string_lossy().into_owned(),
                     thumbnail_url,
                 });
@@ -354,7 +353,6 @@ impl Post {
                     match embed {
                         model::Media::Images { images } => {
                             media.extend(images.into_iter().map(|image| Media::Illustration {
-                                title: None,
                                 url: image.fullsize,
                                 thumbnail_url: Some(image.thumb),
                                 fallback_url: None,
@@ -365,7 +363,6 @@ impl Post {
                             thumbnail,
                         } => {
                             media.push(Media::Video {
-                                title: None,
                                 url: playlist,
                                 thumbnail_url: thumbnail,
                             });

@@ -235,7 +235,6 @@ impl Illustration {
                     .original
                     .clone()
                     .map(|original| Media::Illustration {
-                        title: None,
                         url: original,
                         thumbnail_url: Some(page.image_urls.medium.clone()),
                         fallback_url: Some(page.image_urls.large.clone()),
@@ -248,7 +247,6 @@ impl Illustration {
             .or(model.image_urls.original.clone())
         {
             media.push(Media::Illustration {
-                title: None,
                 url: original,
                 thumbnail_url: Some(model.image_urls.medium.clone()),
                 fallback_url: Some(model.image_urls.large.clone()),

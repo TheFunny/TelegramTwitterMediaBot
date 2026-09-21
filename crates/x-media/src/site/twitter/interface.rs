@@ -236,7 +236,6 @@ impl Tweet {
         for item in json.media_details {
             match item.media_type.as_str() {
                 "photo" => media.push(Media::Illustration {
-                    title: None,
                     url: original_twimg_url(&item.media_url_https),
                     thumbnail_url: None,
                     // The param-less base URL is a reduced-size variant;
@@ -244,12 +243,10 @@ impl Tweet {
                     fallback_url: Some(item.media_url_https.clone()),
                 }),
                 "video" => media.push(Media::Video {
-                    title: None,
                     url: mp4_variant(&item),
                     thumbnail_url: item.media_url_https,
                 }),
                 "animated_gif" => media.push(Media::Animated {
-                    title: None,
                     url: mp4_variant(&item),
                     thumbnail_url: item.media_url_https,
                 }),
