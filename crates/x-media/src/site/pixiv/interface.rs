@@ -1,4 +1,4 @@
-use super::model::{IllustrationModel, TypeModel};
+use super::model::IllustrationModel;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, PixivError, Site, SiteFuture};
 use html_escape::{encode_double_quoted_attribute, encode_text};
@@ -225,7 +225,7 @@ impl Illustration {
             tags.insert(0, "AI".to_string());
         }
         let mut media = vec![];
-        if matches!(&model.r#type, TypeModel::Ugoira) {
+        if model.r#type == "ugoira" {
             // No static images for ugoira; the fetch path encodes an MP4 via
             // ffmpeg and appends it as a Video item (api.rs). This fallback
             // keeps media empty when encoding fails or ffmpeg is missing.

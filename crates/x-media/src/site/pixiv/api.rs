@@ -4,7 +4,7 @@
 //! `app-api.pixiv.net`, deserialized with the kept `model.rs` types.
 
 use super::interface::Illustration;
-use super::model::{IllustrationModel, TypeModel, UgoiraMetadataModel};
+use super::model::{IllustrationModel, UgoiraMetadataModel};
 use crate::media::Media;
 use crate::site::FetchError;
 use std::env;
@@ -139,7 +139,7 @@ impl PixivAPI {
     pub async fn fetch(&self, illust_id: u64) -> Result<Illustration, FetchError> {
         let model = self.illust_detail(illust_id).await?;
         let mut illustration = Illustration::from_model(&model);
-        if matches!(&model.r#type, TypeModel::Ugoira) {
+        if model.r#type == "ugoira" {
             // Real ugoira support: download the frame zip and encode an MP4.
             // Without ffmpeg the post stays unsupported (empty media, like
             // Python) — but a *failed* download/encode is reported instead:

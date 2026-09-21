@@ -10,7 +10,10 @@ pub struct IllustrationModel {
     /// works (`<br />`, `<a href>`, sometimes `<p>`), empty for many.
     #[serde(default)]
     pub caption: String,
-    pub r#type: TypeModel,
+    /// `"illust"` / `"manga"` / `"ugoira"`; only ugoira changes how the
+    /// artwork is fetched (a zip of frames to encode), so the rest is kept as
+    /// the string the API sent rather than as variants nothing matches.
+    pub r#type: String,
     pub image_urls: ImageUrlsModel,
     pub user: UserInfoModel,
     pub tags: Vec<IllustrationTagModel>,
@@ -20,16 +23,6 @@ pub struct IllustrationModel {
     pub illust_ai_type: i32,
     pub meta_single_page: MetaSinglePageModel,
     pub meta_pages: Vec<MetaPageModel>,
-}
-
-#[derive(Deserialize, Debug)]
-pub enum TypeModel {
-    #[serde(rename = "illust")]
-    Illust,
-    #[serde(rename = "manga")]
-    Manga,
-    #[serde(rename = "ugoira")]
-    Ugoira,
 }
 
 #[derive(Deserialize, Debug)]
