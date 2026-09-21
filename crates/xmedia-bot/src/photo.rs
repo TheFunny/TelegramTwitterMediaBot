@@ -88,30 +88,56 @@ async fn reserve(
         .expect("memory budget semaphore closed")
 }
 
-/// The decode buffer a downloaded photo will allocate, from its header alone —
-/// zero when it is already within Telegram's limits and is uploaded as-is, zero
-/// for a format [`prepare_photo`] does not decode. Mirrors the early return and
-/// the guard of the two branches below.
-pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
-    if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
-        if within_limits(w, h, bytes) {
-            return 0;
-        }
-        return decode_bytes(w, h, output_channels(color));
-    }
-    if let Some((w, h)) = jpeg_dims(bytes) {
-        if within_limits(w, h, bytes) {
-            return 0;
-        }
-        return decode_bytes(w, h, 3);
-    }
-    0
+/// The processing decision for one downloaded photo, taken from its header
+/// alone — the one place the within-limits test and the decode-size guard
+/// live, so the memory reservation and the branch that acts on it cannot
+/// drift.
+enum PhotoPlan {
+    /// Already within Telegram's limits (dimension sum and upload cap): the
+    /// downloaded file is uploaded untouched, no decode buffer.
+    AsIs,
+    /// Needs processing: the decode buffer it will allocate, in bytes.
+    Decode(u64),
+    /// Processing would need a decode buffer over [`MAX_DECODE_BYTES`]: the
+    /// caller falls back to the item's smaller URL.
+    TooLarge,
 }
 
-/// Whether a photo is uploaded untouched (Telegram's dimension sum, and the
-/// upload cap its bytes are compared against).
-fn within_limits(w: u32, h: u32, bytes: &[u8]) -> bool {
-    w + h <= PHOTO_MAX_DIMENSION_SUM && bytes.len() as u64 <= MAX_UPLOAD_BYTES
+/// [`PhotoPlan`] for a photo whose header said `w`×`h` in `channels` output
+/// channels, `len` bytes long.
+fn plan_photo(w: u32, h: u32, len: usize, channels: usize) -> PhotoPlan {
+    if w + h <= PHOTO_MAX_DIMENSION_SUM && len as u64 <= MAX_UPLOAD_BYTES {
+        return PhotoPlan::AsIs;
+    }
+    let bytes = decode_bytes(w, h, channels);
+    if bytes > MAX_DECODE_BYTES {
+        PhotoPlan::TooLarge
+    } else {
+        PhotoPlan::Decode(bytes)
+    }
+}
+
+/// [`PhotoPlan`] from the downloaded bytes: the PNG or JPEG header decides
+/// (palette counted as RGB, which `EXPAND` produces); anything else is uploaded
+/// as-is, since [`prepare_photo`] does not decode it.
+fn photo_plan(bytes: &[u8]) -> PhotoPlan {
+    if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
+        return plan_photo(w, h, bytes.len(), output_channels(color));
+    }
+    if let Some((w, h)) = jpeg_dims(bytes) {
+        return plan_photo(w, h, bytes.len(), 3);
+    }
+    PhotoPlan::AsIs
+}
+
+/// The decode buffer a downloaded photo will allocate, from its header alone —
+/// zero when it is already within Telegram's limits and is uploaded as-is, zero
+/// for a format [`prepare_photo`] does not decode.
+pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
+    match photo_plan(bytes) {
+        PhotoPlan::Decode(bytes) => bytes,
+        PhotoPlan::AsIs | PhotoPlan::TooLarge => 0,
+    }
 }
 
 /// JPEG dimensions from the headers, without decoding any pixels.
@@ -314,17 +340,16 @@ fn target_dims(w: u32, h: u32) -> (u32, u32) {
 /// over the upload cap afterwards becomes JPEG.
 fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     let (w, h, _bit_depth, color_type) = parse_png_header(bytes).ok_or("invalid PNG header")?;
-    let size_over = bytes.len() as u64 > MAX_UPLOAD_BYTES;
-    if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
+    let channels = output_channels(color_type);
+    let plan = plan_photo(w, h, bytes.len(), channels);
+    if let PhotoPlan::AsIs = plan {
         return Ok(PhotoPrep::Upload(file));
     }
     log::debug!(
         "photo {w}x{h} ({_bit_depth:?} {color_type:?}, {} bytes) needs processing",
         bytes.len()
     );
-
-    let channels = output_channels(color_type);
-    if decode_bytes(w, h, channels) > MAX_DECODE_BYTES {
+    if let PhotoPlan::TooLarge = plan {
         log::warn!("photo decode buffer exceeds the memory budget; falling back to smaller media");
         return Ok(PhotoPrep::UseFallback);
     }
@@ -391,11 +416,11 @@ fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> 
         .map_err(|e| format!("jpeg headers: {e}"))?;
     let info = decoder.info().ok_or("jpeg info unavailable")?;
     let (w, h) = (info.width as u32, info.height as u32);
-    let size_over = bytes.len() as u64 > MAX_UPLOAD_BYTES;
-    if w + h <= PHOTO_MAX_DIMENSION_SUM && !size_over {
+    let plan = plan_photo(w, h, bytes.len(), 3);
+    if let PhotoPlan::AsIs = plan {
         return Ok(PhotoPrep::Upload(file));
     }
-    if decode_bytes(w, h, 3) > MAX_DECODE_BYTES {
+    if let PhotoPlan::TooLarge = plan {
         log::warn!("photo decode buffer exceeds the memory budget; falling back to smaller media");
         return Ok(PhotoPrep::UseFallback);
     }
