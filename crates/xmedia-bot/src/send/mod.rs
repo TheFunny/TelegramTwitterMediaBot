@@ -1495,7 +1495,7 @@ mod tests {
             *notify_message_id = None;
         }
         let dir_path = dir.path().to_path_buf();
-        KEEP_ALIVE.lock().push(dir);
+        KEEP_ALIVE.lock().push(std::sync::Arc::new(dir));
 
         // No chat to notify → the notify path sends nothing (its mock would
         // have no scripted outcome left).

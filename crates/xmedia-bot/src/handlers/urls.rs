@@ -7,7 +7,7 @@ use crate::link_cache::{CachedMediaKind, CachedPost};
 use crate::media_sender::MediaSender;
 use crate::send::{self, MediaItemPayload, Task};
 use crate::state::ChatData;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::LazyLock;
 use teloxide::RequestError;
@@ -34,6 +34,97 @@ static URL_WORKER_HANDLES: LazyLock<parking_lot::Mutex<Option<Vec<tokio::task::J
 /// Worker count draining URL jobs; keeps the old 8-permit concurrency cap
 /// while bounding how many jobs can be queued at all.
 const URL_WORKERS: usize = 8;
+
+/// One fetch per post at a time, keyed by the normalized cache key. Two chats
+/// posting the same link at the same moment (or a batch forward and a queued
+/// retry) used to run two full fetches: two sets of source requests, and for an
+/// ugoira or a bsky video two ffmpeg encodes of the same post. The first caller
+/// runs it and the rest wait for its result. The entry is dropped the moment
+/// the fetch settles, so this dedupes what is *concurrent* and never answers
+/// from an old result: a repeat later fetches again, and a failure is not
+/// cached (the user may well retry it).
+static IN_FLIGHT_FETCHES: LazyLock<parking_lot::Mutex<HashMap<String, SharedFetch<FetchOutcome>>>> =
+    LazyLock::new(Default::default);
+
+/// A fetched post (or the error that stopped it), shared as-is: the error side
+/// is not `Clone`, so callers read it through the `Arc` — the same shape the
+/// send paths use for `&Fetched`.
+type FetchOutcome = Result<Option<x_media::site::Fetched>, x_media::site::FetchError>;
+
+/// The channel a sharer publishes its result on, and waiters subscribe to.
+type SharedFetch<T> = tokio::sync::broadcast::Sender<std::sync::Arc<T>>;
+
+/// Fetches `url`, sharing one in-flight fetch per `key` (its site cache key)
+/// with every other caller asking for the same post meanwhile.
+async fn fetch_shared(key: &str, url: &str) -> std::sync::Arc<FetchOutcome> {
+    shared_fetch(&IN_FLIGHT_FETCHES, key, || x_media::site::fetch(url)).await
+}
+
+/// [`fetch_shared`]'s core, over the caller's own map so the sharing rules can
+/// be tested without a network fetch.
+///
+/// A caller that finds a live entry subscribes to it and waits; the caller that
+/// created the entry runs `fetch` and publishes the result. Two things keep
+/// that from stranding a request: the entry is removed by a guard (so a
+/// cancelled fetch cannot leave waiters subscribed to a channel nothing will
+/// ever write to), and a waiter whose sharer vanished fetches for itself.
+async fn shared_fetch<T, F, Fut>(
+    map: &parking_lot::Mutex<HashMap<String, SharedFetch<T>>>,
+    key: &str,
+    fetch: F,
+) -> std::sync::Arc<T>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    let (sender, leader) = {
+        let mut map = map.lock();
+        match map.get(key) {
+            Some(sender) => (sender.clone(), false),
+            None => {
+                let (sender, _) = tokio::sync::broadcast::channel(1);
+                map.insert(key.to_string(), sender.clone());
+                (sender, true)
+            }
+        }
+    };
+    if !leader {
+        // `Err` means the entry is gone without a value: the sharer was
+        // cancelled, or it finished just as this caller subscribed (the
+        // message predates the subscription). Fetch for ourselves instead of
+        // failing a link that is perfectly fetchable.
+        let mut receiver = sender.subscribe();
+        // The sender clone taken from the map is dropped first: held, it would
+        // keep the channel open past the sharer's exit (a broadcast channel
+        // closes when *all* senders are gone), and `recv` would wait forever
+        // instead of reporting that the sharer vanished.
+        drop(sender);
+        match receiver.recv().await {
+            Ok(shared) => return shared,
+            Err(_) => return std::sync::Arc::new(fetch().await),
+        }
+    }
+    // Removes the entry on every exit path, cancellation included.
+    let _guard = InFlightFetch { map, key };
+    let outcome = std::sync::Arc::new(fetch().await);
+    // No receiver is the common case, not an error: a lone caller has nobody
+    // to publish to.
+    let _ = sender.send(std::sync::Arc::clone(&outcome));
+    outcome
+}
+
+/// Drops the in-flight entry it was created for, however the fetch ends.
+struct InFlightFetch<'a, T> {
+    map: &'a parking_lot::Mutex<HashMap<String, SharedFetch<T>>>,
+    key: &'a str,
+}
+
+impl<T> Drop for InFlightFetch<'_, T> {
+    fn drop(&mut self) {
+        self.map.lock().remove(self.key);
+    }
+}
 
 /// Starts the URL job workers (called once from main after the queue starts).
 /// teloxide dispatches updates to a per-chat worker that handles them
@@ -585,7 +676,15 @@ async fn url_media_inner(
 
     log::debug!("fetching [key={}]", log_key(url));
     log::trace!("fetching {url}");
-    match x_media::site::fetch(url).await {
+    // One fetch per post at a time: a concurrent duplicate of this link waits
+    // for *this* fetch instead of running its own (see [`fetch_shared`]).
+    let outcome = match x_media::site::cache_key(url) {
+        Some(key) => fetch_shared(&key, url).await,
+        // A URL no site claims (reached only through `/test`): nothing to key
+        // the sharing on, and the dispatcher answers without a request.
+        None => std::sync::Arc::new(x_media::site::fetch(url).await),
+    };
+    match &*outcome {
         // Unsupported links are ignored silently (Python parity).
         Ok(None) => {
             // The URL itself is user data, so only `trace` names the link;
@@ -596,9 +695,9 @@ async fn url_media_inner(
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
             log::error!("fetch [key={}]: {e}", log_key(url));
-            let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(&e)).await;
+            let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(e)).await;
         }
-        Ok(Some(mut fetched)) => {
+        Ok(Some(fetched)) => {
             if fetched.media.is_empty() {
                 let _ = reply(
                     ctx.sender,
@@ -654,8 +753,9 @@ async fn url_media_inner(
             // Hand the keep-alive temp dir (ugoira / bsky remux MP4) to the
             // retry registry: a queued retry runs after this function returns
             // and the fetch's own TempDir is dropped, so without this the
-            // local file would be gone by the time the retry sends it.
-            if let Some(dir) = fetched.take_keep_alive() {
+            // local file would be gone by the time the retry sends it. Shared
+            // (Arc), so a second send of the same post holds its own reference.
+            if let Some(dir) = fetched.keep_alive() {
                 send::KEEP_ALIVE.lock().push(dir);
             }
             dispatch_send(ctx, chat_id, reply_to, &task, url, started).await;
@@ -772,7 +872,7 @@ async fn refetch(
     chat_id: i64,
     url: &str,
 ) -> Result<Option<Refetched>, x_media::site::FetchError> {
-    let Some(mut fetched) = x_media::site::fetch(url).await? else {
+    let Some(fetched) = x_media::site::fetch(url).await? else {
         return Ok(None);
     };
     if fetched.media.is_empty() {
@@ -805,7 +905,7 @@ async fn refetch(
         .collect();
     // The re-fetch may produce a fresh local file (ugoira / bsky remux): hand it
     // to the same keep-alive registry the first fetch uses.
-    if let Some(dir) = fetched.take_keep_alive() {
+    if let Some(dir) = fetched.keep_alive() {
         send::KEEP_ALIVE.lock().push(dir);
     }
     Ok(Some(Refetched {
@@ -962,6 +1062,90 @@ mod tests {
         )
         .await;
         assert_eq!(sender.calls(), vec!["send_chat_action"]);
+    }
+
+    // ── One fetch per post ───────────────────────────────────────────────
+
+    /// Two callers asking for the same post while its fetch is in flight run
+    /// one fetch between them: the duplicate (a second chat, a batch forward
+    /// and a retry) waits for that result instead of paying for its own.
+    #[tokio::test]
+    async fn concurrent_callers_share_one_fetch() {
+        let map = parking_lot::Mutex::new(HashMap::new());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fetch = || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            7u32
+        };
+
+        let (first, second) = tokio::join!(
+            shared_fetch(&map, "twitter:1", fetch),
+            shared_fetch(&map, "twitter:1", fetch)
+        );
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*first, 7);
+        assert!(std::sync::Arc::ptr_eq(&first, &second), "one shared result");
+        assert!(
+            map.lock().is_empty(),
+            "the entry must not outlive the fetch"
+        );
+    }
+
+    /// The dedup is *concurrent* only. A caller arriving after the fetch
+    /// settled fetches again: the source may have changed, and a failure is
+    /// deliberately not cached (the user is told to try again).
+    #[tokio::test]
+    async fn a_later_call_fetches_again() {
+        let map = parking_lot::Mutex::new(HashMap::new());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let counting = |value: u32| {
+            let calls = &calls;
+            async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                value
+            }
+        };
+
+        let first = shared_fetch(&map, "twitter:1", || counting(1)).await;
+        let second = shared_fetch(&map, "twitter:1", || counting(2)).await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!((*first, *second), (1, 2));
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    /// A cancelled fetch must not strand the callers that joined it: a live
+    /// entry whose sharer is gone holds a sender, and the waiters would wait
+    /// for a value that can never come. They fetch for themselves.
+    #[tokio::test]
+    async fn a_cancelled_fetch_does_not_strand_waiters() {
+        let map = parking_lot::Mutex::new(HashMap::new());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        // A fetch that never finishes, cancelled by the timeout below once it
+        // has installed its entry.
+        let slow = shared_fetch(&map, "twitter:1", || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            0u32
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), slow)
+                .await
+                .is_err(),
+            "the sharer must still be waiting when it is cancelled"
+        );
+
+        // Its entry is gone, and the next caller fetches its own value.
+        let value = shared_fetch(&map, "twitter:1", || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            5u32
+        })
+        .await;
+        assert_eq!(*value, 5);
+        assert!(map.lock().is_empty());
     }
 
     // ── Send modes: the URL flow vs `/test` ─────────────────────────────

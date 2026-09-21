@@ -181,7 +181,7 @@ pub struct Illustration {
     pub(crate) media: Vec<Media>,
     nsfw: bool,
     /// Keeps a temp dir (ugoira MP4) alive until the send completes.
-    pub(crate) _keep_alive: Option<tempfile::TempDir>,
+    pub(crate) _keep_alive: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 impl Illustration {

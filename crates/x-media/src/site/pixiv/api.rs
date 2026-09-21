@@ -153,7 +153,7 @@ impl PixivAPI {
                         url: mp4_path,
                         thumbnail_url: model.image_urls.medium.clone(),
                     });
-                    illustration._keep_alive = Some(_keep_alive);
+                    illustration._keep_alive = Some(std::sync::Arc::new(_keep_alive));
                 }
                 Ok(None) => {}
                 Err(e) => {

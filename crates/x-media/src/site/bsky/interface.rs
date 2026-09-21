@@ -81,7 +81,7 @@ pub async fn fetch_from_url(url: &str) -> Result<Fetched, FetchError> {
                     url: mp4_path.to_string_lossy().into_owned(),
                     thumbnail_url,
                 });
-                fetched._keep_alive = Some(keep_alive);
+                fetched._keep_alive = Some(std::sync::Arc::new(keep_alive));
             }
             // No ffmpeg: a deployment gap, not a bad moment — retrying it
             // would only waste the fetch budget, so the post degrades (and an

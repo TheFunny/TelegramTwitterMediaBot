@@ -52,8 +52,11 @@ pub struct Fetched {
     /// Raw values (pre-escaped) for user-customizable caption formats.
     pub(crate) render_data: Option<RenderData>,
     /// Keeps temp files (e.g. an encoded ugoira MP4) alive until the caller
-    /// finishes uploading; not part of the public contract.
-    pub(crate) _keep_alive: Option<tempfile::TempDir>,
+    /// finishes uploading; not part of the public contract. Shared rather than
+    /// owned because one fetched post can serve several sends — the bot shares
+    /// one in-flight fetch between concurrent duplicates of the same link — and
+    /// the files have to outlive every one of them.
+    pub(crate) _keep_alive: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 /// Values for the `{url} {author} {author_url} {title} {content} {tags}`
@@ -133,12 +136,14 @@ impl Fetched {
         })
     }
 
-    /// Hands over the temp dir keeping locally produced media (ugoira MP4,
+    /// A reference to the temp dir keeping locally produced media (ugoira MP4,
     /// bsky remux MP4) alive. The bot keeps it while its task may still be
     /// retried by the queue, which runs after this [`Fetched`] is dropped and
-    /// its temp files would otherwise be gone. `None` when no such dir exists.
-    pub fn take_keep_alive(&mut self) -> Option<tempfile::TempDir> {
-        self._keep_alive.take()
+    /// its temp files would otherwise be gone. `None` when no such dir exists;
+    /// each clone keeps the directory alive for as long as it lives, so two
+    /// sends of one post can each hold the same files.
+    pub fn keep_alive(&self) -> Option<std::sync::Arc<tempfile::TempDir>> {
+        self._keep_alive.clone()
     }
 }
 
@@ -741,6 +746,38 @@ pub async fn download_media_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Locally produced media (ugoira MP4, bsky remux MP4) lives in a temp dir
+    /// whose lifetime is refcounted: one fetch result can serve several sends
+    /// (the bot shares one in-flight fetch between concurrent duplicates), and
+    /// the files must outlive all of them — but no longer than the last one.
+    #[test]
+    fn a_keep_alive_clone_outlives_the_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("media.mp4");
+        std::fs::write(&file, b"mp4").unwrap();
+        let fetched = Fetched {
+            source_url: "https://x.com/u/status/1".into(),
+            caption: String::new(),
+            title: String::new(),
+            content: String::new(),
+            media: Vec::new(),
+            sensitive: false,
+            site_id: "twitter",
+            render_data: None,
+            _keep_alive: Some(std::sync::Arc::new(dir)),
+        };
+
+        let shared = fetched.keep_alive().expect("a temp dir to share");
+        drop(fetched);
+        assert!(file.exists(), "the file must survive the fetched post");
+
+        let second = shared.clone();
+        drop(shared);
+        assert!(file.exists(), "another holder keeps it alive");
+        drop(second);
+        assert!(!file.exists(), "the last holder releases the directory");
+    }
 
     #[test]
     fn cache_key_normalizes_domain_variants() {
