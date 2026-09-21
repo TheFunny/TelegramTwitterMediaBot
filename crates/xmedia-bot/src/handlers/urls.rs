@@ -638,11 +638,7 @@ async fn url_media_inner(
         // Cache keys are prefixed with the site id ("twitter:…"), matching
         // the value a fresh fetch would read from Fetched::site_id.
         let site = x_media::site::site_id_from_key(&key);
-        let format = chat_data
-            .message_format
-            .get(site)
-            .cloned()
-            .unwrap_or_default();
+        let format = chat_data.format_for(site);
         // One call for both: `caption_from_fields` returns the truncated
         // built-in caption itself when the chat has no format for this site.
         let caption = x_media::site::caption_from_fields(
@@ -713,11 +709,7 @@ async fn url_media_inner(
             }
             let chat_data = ctx.chat_store.get(chat_id).await;
             // Per-site caption format override (empty -> built-in caption).
-            let format = chat_data
-                .message_format
-                .get(fetched.site_id)
-                .cloned()
-                .unwrap_or_default();
+            let format = chat_data.format_for(fetched.site_id);
             let caption = fetched.caption_with(&format);
             // Raw render data for the link cache; the send fills in the
             // Telegram file ids and persists the entry.
@@ -862,11 +854,7 @@ async fn refetch(
         return Ok(None);
     }
     let chat_data = ctx.chat_store.get(chat_id).await;
-    let format = chat_data
-        .message_format
-        .get(fetched.site_id)
-        .cloned()
-        .unwrap_or_default();
+    let format = chat_data.format_for(fetched.site_id);
     let caption = fetched.caption_with(&format);
     let cache_data = fetched
         .render_fields()

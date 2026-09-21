@@ -23,6 +23,14 @@ pub struct ChatData {
     pub message_format: HashMap<String, String>,
 }
 
+impl ChatData {
+    /// The chat's caption format for `site`, empty when it has none — the
+    /// built-in caption then applies (`caption_from_fields`).
+    pub fn format_for(&self, site: &str) -> String {
+        self.message_format.get(site).cloned().unwrap_or_default()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct EditMessage {
     pub url: String,

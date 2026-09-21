@@ -626,10 +626,7 @@ pub(crate) async fn execute_command(
                     let format = CHAT_STORE
                         .get(message.chat.id.0)
                         .await
-                        .message_format
-                        .get(fetched.site_id)
-                        .cloned()
-                        .unwrap_or_default();
+                        .format_for(fetched.site_id);
                     let caption = preview_caption(
                         &format,
                         &fetched.caption,
