@@ -14,14 +14,13 @@ mod upload;
 use crate::ctx::AppContext;
 use crate::handlers::log_key;
 use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
-use crate::media_sender::MediaSender;
 use input_media::{build_media_group, input_file_for, item_url};
 use post_send::{cache_animation_send, cache_sent_task};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, InputFile, InputMedia, MessageId};
+use teloxide::types::{ChatId, InputMedia, MessageId};
 use teloxide::{ApiError, RequestError};
 use upload::{FallbackError, PreparedItem, prepare_upload_item, send_batch_via_upload};
 
@@ -683,25 +682,6 @@ pub async fn send_media_sequence(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
     Ok(sent)
 }
 
-async fn send_animation_inner(
-    sender: &dyn MediaSender,
-    chat_id: i64,
-    reply_to: i64,
-    caption: &str,
-    spoiler: bool,
-    file: InputFile,
-) -> Result<Message, RequestError> {
-    sender
-        .send_animation(
-            ChatId(chat_id),
-            MessageId(reply_to as i32),
-            caption,
-            spoiler,
-            file,
-        )
-        .await
-}
-
 /// Sends a lone animation (gif), URL first with the download fallback.
 pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64>, SendError> {
     let Task::SendAnimation {
@@ -737,15 +717,16 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
             });
         }
     };
-    match send_animation_inner(
-        ctx.sender,
-        chat_id,
-        reply_to,
-        &caption,
-        has_spoiler,
-        url_file,
-    )
-    .await
+    match ctx
+        .sender
+        .send_animation(
+            ChatId(chat_id),
+            MessageId(reply_to as i32),
+            &caption,
+            has_spoiler,
+            url_file,
+        )
+        .await
     {
         Ok(message) => {
             let id = message.id.0 as i64;
@@ -772,15 +753,16 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
                     };
                     // Hold the temp file until the request completes.
                     let _keep_alive = keep_alive;
-                    match send_animation_inner(
-                        ctx.sender,
-                        chat_id,
-                        reply_to,
-                        &caption,
-                        has_spoiler,
-                        animation.media,
-                    )
-                    .await
+                    match ctx
+                        .sender
+                        .send_animation(
+                            ChatId(chat_id),
+                            MessageId(reply_to as i32),
+                            &caption,
+                            has_spoiler,
+                            animation.media,
+                        )
+                        .await
                     {
                         Ok(message) => {
                             let id = message.id.0 as i64;
