@@ -220,11 +220,7 @@ mod tests {
             cache_key("https://misskey.io/notes/aotihl10lqrs015s"),
             Some("misskey:aotihl10lqrs015s".to_string())
         );
-        assert_eq!(x_media_site_id("misskey:abc"), "misskey");
-    }
-
-    fn x_media_site_id(key: &str) -> &'static str {
-        crate::site::site_id_from_key(key)
+        assert_eq!(crate::site::site_id_from_key("misskey:abc"), "misskey");
     }
 
     #[test]

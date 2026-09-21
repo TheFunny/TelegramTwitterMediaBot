@@ -960,15 +960,16 @@ pub(crate) async fn repair_lost_local_media(ctx: &AppContext<'_>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::{TestStores, cached_photo};
+    use crate::ctx::test_support::{TestStores, api_error, cached_photo, photo_item};
     use crate::media_sender::test_support::{MockSender, Outcome};
     use std::time::Duration;
-    use teloxide::{ApiError, RequestError};
+    use teloxide::RequestError;
 
+    /// The API error a caption edit that changes nothing answers with — what
+    /// the mocks script for a permanent send failure. A `fn` pointer, so it
+    /// can be handed to `MockSender::scripted` as-is.
     fn permanent_error() -> RequestError {
-        RequestError::Api(ApiError::Unknown(
-            "Bad Request: message is not modified".into(),
-        ))
+        api_error("Bad Request: message is not modified")
     }
 
     #[tokio::test]
@@ -1381,12 +1382,7 @@ mod tests {
             chat_id: 1,
             reply_to_message_id: 2,
             caption: "cap".into(),
-            media_batches: vec![vec![MediaItemPayload::Photo {
-                media: media.to_string(),
-                has_spoiler: false,
-                fallback_url: None,
-                file_id: false,
-            }]],
+            media_batches: vec![vec![photo_item(media, false, false)]],
             batch_index,
             sent_message_ids: sent,
             source_url: "https://x.com/u/status/1".into(),
@@ -1443,12 +1439,7 @@ mod tests {
         let task = queued_task("/nonexistent-ugoira.mp4", 0, vec![]);
         let fresh = Refetched {
             caption: "fresh caption".into(),
-            items: vec![MediaItemPayload::Photo {
-                media: "https://cdn/fresh.jpg".into(),
-                has_spoiler: true,
-                fallback_url: None,
-                file_id: false,
-            }],
+            items: vec![photo_item("https://cdn/fresh.jpg", true, false)],
             cache_data: None,
         };
         match apply_refresh(&task, &fresh).expect("a repairable task") {

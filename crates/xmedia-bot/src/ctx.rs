@@ -50,6 +50,7 @@ pub static CONTEXT: LazyLock<AppContext<'static>> =
 pub(crate) mod test_support {
     use super::*;
     use crate::link_cache::{CachedMedia, CachedMediaKind, CachedPost};
+    use crate::send::MediaItemPayload;
     use crate::state::EditMessage;
     use std::sync::Arc;
     use teloxide::{ApiError, RequestError};
@@ -62,6 +63,18 @@ pub(crate) mod test_support {
     /// A Telegram API error, for the tests that script a failure.
     pub(crate) fn api_error(message: &str) -> RequestError {
         RequestError::Api(ApiError::Unknown(message.to_string()))
+    }
+
+    /// One photo payload item: `media` in the two flags the tests vary (no
+    /// smaller variant, since that is the field most tests leave alone —
+    /// `send`'s own tests build that case directly).
+    pub(crate) fn photo_item(media: &str, has_spoiler: bool, file_id: bool) -> MediaItemPayload {
+        MediaItemPayload::Photo {
+            media: media.to_string(),
+            has_spoiler,
+            fallback_url: None,
+            file_id,
+        }
     }
 
     /// The cached post every test that touches the link cache starts from: one

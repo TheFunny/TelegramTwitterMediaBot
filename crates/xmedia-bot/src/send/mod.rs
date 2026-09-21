@@ -856,7 +856,7 @@ mod tests {
     use super::post_send::{build_edit_markup, cache_sent_task};
     use super::upload::sniff_ext;
     use super::*;
-    use crate::ctx::test_support::{TestStores, cached_photo};
+    use crate::ctx::test_support::{TestStores, cached_photo, photo_item};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -1231,12 +1231,7 @@ mod tests {
 
     #[test]
     fn media_item_payload_serde_tags() {
-        let photo = MediaItemPayload::Photo {
-            media: "https://a/b.jpg".into(),
-            has_spoiler: false,
-            fallback_url: None,
-            file_id: false,
-        };
+        let photo = photo_item("https://a/b.jpg", false, false);
         let json = serde_json::to_value(&photo).unwrap();
         assert_eq!(json["kind"], "photo");
     }
@@ -1272,12 +1267,7 @@ mod tests {
             chat_id: 1,
             reply_to_message_id: 2,
             caption: caption.into(),
-            media_batches: vec![vec![MediaItemPayload::Photo {
-                media: media.to_string(),
-                has_spoiler: false,
-                fallback_url: None,
-                file_id: false,
-            }]],
+            media_batches: vec![vec![photo_item(media, false, false)]],
             batch_index: 0,
             sent_message_ids: vec![],
             source_url: "https://x.com/u/status/1".into(),
@@ -1670,12 +1660,7 @@ mod tests {
             chat_id: 1,
             reply_to_message_id: 2,
             caption: "cap".into(),
-            media_batches: vec![vec![MediaItemPayload::Photo {
-                media: "https://p/1.jpg".into(),
-                has_spoiler: false,
-                fallback_url: None,
-                file_id: false,
-            }]],
+            media_batches: vec![vec![photo_item("https://p/1.jpg", false, false)]],
             batch_index: 0,
             sent_message_ids: vec![],
             source_url: "https://x.com/u/status/1".into(),
@@ -1694,12 +1679,7 @@ mod tests {
             chat_id: 1,
             reply_to_message_id: 2,
             caption: "cap".into(),
-            media_batches: vec![vec![MediaItemPayload::Photo {
-                media: "AgAC-file-id".into(),
-                has_spoiler: false,
-                fallback_url: None,
-                file_id: true,
-            }]],
+            media_batches: vec![vec![photo_item("AgAC-file-id", false, true)]],
             batch_index: 0,
             sent_message_ids: vec![],
             source_url: "https://x.com/u/status/1".into(),
