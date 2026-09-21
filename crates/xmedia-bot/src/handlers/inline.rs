@@ -135,8 +135,10 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
         }
         match answer_inline_query(bot, query).await {
             Ok(true) => {}
-            // No results produced (or nothing to answer): let a repeat of the
-            // same query retry the fetch.
+            // The fetch or the answer call failed: release so a repeat of the
+            // same query may retry it. An *empty* answer is a real answer
+            // (`Ok(true)`), so a link whose media Telegram cannot fetch is not
+            // re-fetched on every keystroke.
             Ok(false) | Err(_) => INLINE_DEBOUNCE_STATE.lock().release(user_id, &query_text),
         }
     });
@@ -233,6 +235,18 @@ async fn answer_inline_query(bot: Bot, query: InlineQuery) -> Result<bool, Reque
                     .await?;
                 return Ok(true);
             }
+            // Every item was skipped: Telegram fetches an inline result's URL
+            // itself, so pixiv's hotlink-protected media (and a local ugoira /
+            // bsky MP4) can never be one. Answer *empty* — the client stops
+            // spinning, and the same query is not re-fetched on every
+            // keystroke: an unanswered query releases the debounce below
+            // (`Ok(false)`), which is what made this re-run the fetch each
+            // time, and the window lets Telegram serve the repeats itself.
+            log::debug!("inline: nothing Telegram can fetch for the query; answering empty");
+            bot.answer_inline_query(query.id, Vec::new())
+                .cache_time(300)
+                .await?;
+            return Ok(true);
         }
         Ok(None) => {}
         Err(e) => log::error!("inline fetch [key={}]: {e}", log_key(&query.query)),
