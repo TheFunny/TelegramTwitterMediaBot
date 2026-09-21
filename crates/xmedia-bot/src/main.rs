@@ -221,7 +221,6 @@ async fn main() {
         .branch(Update::filter_callback_query().branch(endpoint(handlers::callback_query_handler)));
 
     let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![""])
         .enable_ctrlc_handler()
         .build();
 
