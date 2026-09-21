@@ -282,9 +282,29 @@ pub enum FetchError {
 }
 
 /// How long a download may make no progress: the response head, and then each
-/// individual chunk, must arrive within this window. Deliberately *not* a
-/// total timeout — see [`MEDIA_CLIENT`].
+/// individual chunk, must arrive within this window. Not a total timeout — see
+/// [`DOWNLOAD_TOTAL_TIMEOUT`].
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Absolute ceiling for one media download, on top of the idle window. A server
+/// that drips a byte every 29 s keeps [`next_chunk`] satisfied indefinitely, and
+/// on the bot's side each such download holds one of the process-wide upload-prep
+/// slots (`send::upload`'s `PREP_SLOTS`) for as long as it lasts. Generous on
+/// purpose: the legitimate cases are big — an ugoira frame zip runs to hundreds
+/// of MB and an HLS remux pulls a whole video — and a slow link is not an error.
+/// Checked between chunks, so a transfer that completes just over the budget is
+/// kept rather than thrown away.
+const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The error a download reports when it spends its whole budget without
+/// finishing. Retryable: the transfer may simply have been unlucky, and a retry
+/// of the post restarts the download.
+fn download_too_slow() -> FetchError {
+    FetchError::Transient(format!(
+        "download exceeded {}s",
+        DOWNLOAD_TOTAL_TIMEOUT.as_secs()
+    ))
+}
 
 /// Builds a client with the shared configuration (browser User-Agent, the
 /// Bot API's proxy, per-runtime pools under test). `total_timeout` is what
@@ -336,12 +356,14 @@ fn build_client(total_timeout: Option<Duration>) -> reqwest::Client {
 pub(crate) static CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_client(Some(Duration::from_secs(30))));
 
-/// Client for media *downloads*, with no total timeout: a 10 MiB fallback
-/// download, or an ugoira frame zip that may be hundreds of MB, legitimately
-/// takes minutes on a slow link — a 30s total cap made those posts impossible
-/// to deliver at all (the size cap said 512 MiB, the clock said 30s). What a
-/// stalled connection cannot do is hang a worker: the head and every chunk are
-/// bounded by [`DOWNLOAD_IDLE_TIMEOUT`] instead (see [`next_chunk`]).
+/// Client for media *downloads*, with no reqwest-level total timeout: a 10 MiB
+/// fallback download, or an ugoira frame zip that may be hundreds of MB,
+/// legitimately takes minutes on a slow link — a 30s total cap made those posts
+/// impossible to deliver at all (the size cap said 512 MiB, the clock said 30s).
+/// What a stalled connection cannot do is hang a worker: the head and every
+/// chunk are bounded by [`DOWNLOAD_IDLE_TIMEOUT`] (see [`next_chunk`]), and a
+/// transfer that keeps trickling but never finishes is bounded by
+/// [`DOWNLOAD_TOTAL_TIMEOUT`].
 static MEDIA_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| build_client(None));
 
 /// The error a download reports when it stops making progress.
@@ -700,7 +722,11 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
     }
     let mut response = response;
     let mut buf = Vec::new();
+    let started = std::time::Instant::now();
     while let Some(chunk) = next_chunk(&mut response).await? {
+        if started.elapsed() > DOWNLOAD_TOTAL_TIMEOUT {
+            return Err(download_too_slow());
+        }
         buf.extend_from_slice(&chunk);
         if buf.len() as u64 > max_bytes {
             return Err(FetchError::TooLarge);
@@ -733,7 +759,11 @@ pub async fn download_media_to_file(
     }
     let mut response = response;
     let mut total: u64 = 0;
+    let started = std::time::Instant::now();
     while let Some(chunk) = next_chunk(&mut response).await? {
+        if started.elapsed() > DOWNLOAD_TOTAL_TIMEOUT {
+            return Err(download_too_slow());
+        }
         total += chunk.len() as u64;
         if total > max_bytes {
             return Err(FetchError::TooLarge);
