@@ -2,12 +2,12 @@
 //! registration. URL/inline/callback flows live in their own modules.
 
 use super::urls::{PostSend, url_media};
-use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply, reply_html};
+use super::{CHAT_STORE, CONFIG, LINK_CACHE, log_key, reply};
 use crate::ctx::AppContext;
 use crate::state::ChatData;
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, Message, Recipient};
+use teloxide::types::{ChatId, Message, ParseMode, Recipient, ReplyParameters};
 use teloxide::utils::command::{BotCommands, ParseError};
 
 #[derive(BotCommands, Clone)]
@@ -630,7 +630,15 @@ pub(crate) async fn execute_command(
                     );
                     // HTML report: the caption renders inside a <blockquote>
                     // exactly as it will appear in the sent media message.
-                    reply_html(bot, message.chat.id.0, message.id, report).await?;
+                    // `<Bot as Requester>::` disambiguates from the
+                    // MediaSender trait's same-named method (see
+                    // media_sender.rs).
+                    <Bot as Requester>::send_message(bot, ChatId(message.chat.id.0), report)
+                        .parse_mode(ParseMode::Html)
+                        .reply_parameters(
+                            ReplyParameters::new(message.id).allow_sending_without_reply(),
+                        )
+                        .await?;
                 }
             }
         }

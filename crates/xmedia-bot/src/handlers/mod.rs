@@ -27,7 +27,7 @@ use crate::media_sender::MediaSender;
 use commands::{Command, execute_command};
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, Message, MessageId, ParseMode, ReplyParameters};
+use teloxide::types::{ChatId, Message, MessageId};
 use teloxide::utils::command::BotCommands;
 use urls::{URL_JOBS, extract_urls};
 
@@ -43,24 +43,6 @@ pub(crate) async fn reply(
         .send_message(ChatId(chat_id), text.into(), Some(reply_to), None)
         .await
         .map(|_| ())
-}
-
-/// Reply to a message by id with HTML parse mode (same reply decoration as
-/// [`reply`]). Used by `/test`, whose report is an HTML message (the caption
-/// is wrapped in a `<blockquote>` to show it exactly as it will render).
-pub(crate) async fn reply_html(
-    bot: &Bot,
-    chat_id: i64,
-    reply_to: MessageId,
-    text: String,
-) -> Result<i64, RequestError> {
-    // `<Bot as Requester>::` disambiguates from the MediaSender trait's
-    // same-named method (see media_sender.rs).
-    <Bot as Requester>::send_message(bot, ChatId(chat_id), text)
-        .parse_mode(ParseMode::Html)
-        .reply_parameters(ReplyParameters::new(reply_to).allow_sending_without_reply())
-        .await
-        .map(|message| message.id.0 as i64)
 }
 
 /// Log prefix tying the whole lifecycle of one link (fetch → send → cache →
