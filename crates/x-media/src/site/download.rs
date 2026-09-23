@@ -406,17 +406,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_media_pixiv_original_with_referer() {
+    #[ignore = "live network: requires PIXIV_REFRESH_TOKEN and i.pximg.net"]
+    async fn live_download_media_pixiv_original_with_referer() {
         // Proves the Referer header is attached for i.pximg.net: a header-less
-        // GET to a pixiv original URL is rejected with 403.
-        // Empty-string check too: an unset CI secret arrives as "" (GitHub
-        // Actions), which would otherwise run the test tokenless and fail.
+        // GET to a pixiv original URL is rejected with 403. `#[ignore]` as
+        // well as the token gate: this hit the CDN on every `cargo test
+        // --workspace` in a token-exported shell (and flaked on a CDN body
+        // timeout there), and the `live_` name puts it inside the CI live
+        // job's `--ignored live` filter. Empty-string check too: an unset CI
+        // secret arrives as "" (GitHub Actions), which would otherwise run
+        // the test tokenless and fail — the `SKIP` prefix is what the live
+        // job greps to tell a skip from a pass.
         if std::env::var("PIXIV_REFRESH_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
             .is_none()
         {
-            eprintln!("skipping: no PIXIV_REFRESH_TOKEN");
+            eprintln!("SKIP (no PIXIV_REFRESH_TOKEN): not running the pixiv download test");
             return;
         }
         let illustration = pixiv::fetch(126839080).await.unwrap();
