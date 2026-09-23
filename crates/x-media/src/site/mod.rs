@@ -313,14 +313,17 @@ static FFMPEG_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 
 static FFMPEG_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn ffmpeg_available() -> bool {
-    *FFMPEG_AVAILABLE
-}
-
-pub(crate) fn log_once_ffmpeg_missing() {
+/// Whether the encode step must be skipped: no ffmpeg on PATH, logged once
+/// per process. The one gate both encoders check — the probe and the
+/// log-once used to be two functions that only ever appeared together.
+pub(crate) fn ffmpeg_missing() -> bool {
+    if *FFMPEG_AVAILABLE {
+        return false;
+    }
     if !FFMPEG_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
         log::warn!("ffmpeg not found; ugoira and bsky video posts stay unsupported");
     }
+    true
 }
 
 /// Site adapter: one impl per supported site (twitter / bsky / misskey /

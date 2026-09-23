@@ -206,8 +206,7 @@ impl PixivAPI {
         &self,
         illust_id: u64,
     ) -> Result<Option<(String, tempfile::TempDir)>, PixivError> {
-        if !crate::site::ffmpeg_available() {
-            crate::site::log_once_ffmpeg_missing();
+        if crate::site::ffmpeg_missing() {
             return Ok(None);
         }
         let metadata = self.ugoira_metadata(illust_id).await?;

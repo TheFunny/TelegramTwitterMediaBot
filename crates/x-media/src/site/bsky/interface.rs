@@ -153,8 +153,7 @@ async fn fetch_hls(url: &str, cap: u64) -> Result<bytes::Bytes, String> {
 async fn resolve_bsky_video(
     playlist_url: &str,
 ) -> Result<Option<(std::path::PathBuf, tempfile::TempDir)>, String> {
-    if !crate::site::ffmpeg_available() {
-        crate::site::log_once_ffmpeg_missing();
+    if crate::site::ffmpeg_missing() {
         return Ok(None);
     }
     let master = fetch_hls(playlist_url, 1_048_576)
