@@ -1500,6 +1500,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_settle_drops_only_one_shared_keep_alive_holder() {
+        // Two pipelines of the same post (shared fetch) push the same temp
+        // dir once each. One task settling must drop only its own reference —
+        // clearing every holder would delete the file out from under the
+        // other task's queued retry, which would then dead-letter on a local
+        // media that no longer exists.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ugoira.mp4");
+        std::fs::write(&file, b"not-a-real-mp4").unwrap();
+        let task = sequence_task(file.to_str().unwrap());
+        let dir_path = dir.path().to_path_buf();
+        let dir = std::sync::Arc::new(dir);
+        {
+            let mut alive = KEEP_ALIVE.lock();
+            alive.push(std::sync::Arc::clone(&dir));
+            alive.push(std::sync::Arc::clone(&dir));
+        }
+
+        // `Settled::Sent` never talks to the API, so no outcome is scripted.
+        let sender = MockSender::scripted(vec![], media_fetch_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        settle_task(&ctx, &task, Settled::Sent).await;
+
+        let holders = KEEP_ALIVE
+            .lock()
+            .iter()
+            .filter(|d| d.path() == dir_path)
+            .count();
+        // Drop this test's entries so the registry does not outlive it.
+        KEEP_ALIVE.lock().retain(|d| d.path() != dir_path);
+        assert_eq!(holders, 1, "one settle must drop exactly one shared holder");
+    }
+
+    #[tokio::test]
     async fn post_send_opens_and_records_the_edit_prompt() {
         let sender = MockSender::scripted(vec![Outcome::MessageOk], media_fetch_error);
         let stores = TestStores::new();

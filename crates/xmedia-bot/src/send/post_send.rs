@@ -122,24 +122,29 @@ async fn invalidate_cache(ctx: &AppContext<'_>, task: &Task) {
 /// that drop, so without this the local file would be gone by the time the
 /// retry sends it. `Arc` because one fetch can serve several tasks (a
 /// concurrent duplicate of the same link shares it): each holder keeps the
-/// directory alive until its own task settles. Entries are removed when the
+/// directory alive until its own task settles. Its entry is removed when that
 /// task settles (see [`release_keep_alive`]).
 pub(crate) static KEEP_ALIVE: LazyLock<parking_lot::Mutex<Vec<std::sync::Arc<tempfile::TempDir>>>> =
     LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
-/// Drops the keep-alive temp dirs holding media referenced by `task` (matched
-/// by path prefix). Called once a task settles — sent or permanently failed —
-/// so retry-only temp files do not leak; retryable tasks keep them alive.
+/// Drops the keep-alive reference this task's pipeline pushed (one entry,
+/// matched by path prefix). Called once a task settles — sent or permanently
+/// failed — so retry-only temp files do not leak; retryable tasks keep theirs.
+/// Exactly one entry goes per call: a shared fetch pushes one per pipeline, so
+/// clearing every holder would delete the directory out from under a
+/// concurrent duplicate's queued retry.
 pub(crate) fn release_keep_alive(task: &Task) {
     let paths = task.local_media_paths();
     if paths.is_empty() {
         return;
     }
     let mut alive = KEEP_ALIVE.lock();
-    alive.retain(|dir| {
-        let dir_path = dir.path();
-        !paths.iter().any(|p| p.starts_with(dir_path))
-    });
+    if let Some(index) = alive
+        .iter()
+        .position(|dir| paths.iter().any(|p| p.starts_with(dir.path())))
+    {
+        alive.remove(index);
+    }
 }
 
 /// The edit-before-forward prompt's text. It names both controls and the TTL,
@@ -426,7 +431,10 @@ pub(crate) async fn handle_task(
                     });
                 }
                 Err(SendError::Permanent { message, task }) => {
-                    settle_task(ctx, &task, Settled::Failed).await;
+                    // The queue dead-letters this payload into
+                    // `dead_letter_notify`, which settles the task — settling
+                    // here as well would release a shared keep-alive
+                    // directory twice.
                     return Err(QueueError::Permanent {
                         message,
                         payload: serde_json::to_value(task).expect("task serializes"),
@@ -454,7 +462,8 @@ pub(crate) async fn handle_task(
                 payload: serde_json::to_value(task).expect("task serializes"),
             }),
             Err(SendError::Permanent { message, task }) => {
-                settle_task(ctx, &task, Settled::Failed).await;
+                // Settled by `dead_letter_notify`, which the queue invokes for
+                // this payload.
                 Err(QueueError::Permanent {
                     message,
                     payload: serde_json::to_value(task).expect("task serializes"),
