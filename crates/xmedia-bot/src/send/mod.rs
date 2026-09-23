@@ -907,12 +907,21 @@ mod tests {
         // Names are folded, not one per row.
         assert_eq!(keyboard.inline_keyboard[0].len(), 3);
         assert_eq!(keyboard.inline_keyboard.last().unwrap().len(), 2);
-        assert_eq!(super::post_send::hidden_template_count(&templates), 140);
+        assert_eq!(
+            templates
+                .len()
+                .saturating_sub(super::post_send::MAX_TEMPLATE_BUTTONS),
+            140
+        );
         // Under the cap nothing is hidden and every name gets a button.
         let few: HashMap<String, String> = (0..4)
             .map(|i| (format!("t{i}"), "[]".to_string()))
             .collect();
-        assert_eq!(super::post_send::hidden_template_count(&few), 0);
+        assert_eq!(
+            few.len()
+                .saturating_sub(super::post_send::MAX_TEMPLATE_BUTTONS),
+            0
+        );
         assert_eq!(
             build_edit_markup(&few)
                 .inline_keyboard

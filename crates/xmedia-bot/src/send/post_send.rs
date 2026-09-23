@@ -212,11 +212,6 @@ pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKe
     InlineKeyboardMarkup::new(rows)
 }
 
-/// How many templates the markup could not fit, for the prompt text.
-pub(super) fn hidden_template_count(templates: &HashMap<String, String>) -> usize {
-    templates.len().saturating_sub(MAX_TEMPLATE_BUTTONS)
-}
-
 /// Notifies a chat about a dead-lettered task (skips when `notify_chat_id` is
 /// absent).
 pub(crate) async fn notify_failure(
@@ -282,7 +277,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
         let templates = ctx.chat_store.get(chat_id).await.template;
         let keyboard = build_edit_markup(&templates);
         let mut text = edit_prompt_text(ctx.config.edit_message_ttl);
-        let hidden = hidden_template_count(&templates);
+        let hidden = templates.len().saturating_sub(MAX_TEMPLATE_BUTTONS);
         if hidden > 0 {
             // The keyboard is capped; say so instead of silently hiding them.
             text.push_str(&format!(
