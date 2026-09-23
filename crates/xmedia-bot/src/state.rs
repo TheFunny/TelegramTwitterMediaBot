@@ -69,27 +69,39 @@ impl ChatStore {
         let chat_key = chat_id.to_string();
         let payload = self
             .pool
-            .with_conn_or(
-                log::Level::Warn,
-                "chat_state read failed",
-                None,
-                move |conn| {
-                    // Concurrent handler tasks (batch-forwards) may write
-                    // chat_state while this read runs; the shared busy timeout
-                    // handles the write-lock collision instead of failing the
-                    // query.
-                    conn.query_row(
-                        "SELECT payload FROM chat_state WHERE chat_id = ?1",
-                        params![chat_key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                },
-            )
-            .await
-            .unwrap_or_default();
+            .with_conn(move |conn| {
+                // Concurrent handler tasks (batch-forwards) may write
+                // chat_state while this read runs; the shared busy timeout
+                // handles the write-lock collision instead of failing the
+                // query.
+                conn.query_row(
+                    "SELECT payload FROM chat_state WHERE chat_id = ?1",
+                    params![chat_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+            })
+            .await;
+        let payload = match payload {
+            // A row — or its documented absence — is a real answer and may be
+            // cached.
+            Ok(payload) => payload.unwrap_or_default(),
+            Err(e) => {
+                // A failed read must not be cached: the default would become
+                // what every later get returns, and the next update would
+                // write it back over the chat's real settings. The next get
+                // simply retries the DB.
+                log::warn!("chat_state read failed: {e}");
+                return ChatData::default();
+            }
+        };
         let data: ChatData = serde_json::from_str(&payload).unwrap_or_default();
-        self.cache.lock().insert(chat_id, data.clone());
+        // Only fill a miss: an unconditional insert would let this (possibly
+        // stale) snapshot overwrite what a concurrent set just wrote.
+        self.cache
+            .lock()
+            .entry(chat_id)
+            .or_insert_with(|| data.clone());
         data
     }
 
@@ -191,12 +203,20 @@ impl ChatStore {
         }
         if !evicted_chats.is_empty() {
             let mut cache = self.cache.lock();
-            let mut locks = self.locks.lock();
             for chat_id in &evicted_chats {
                 cache.remove(chat_id);
-                locks.remove(chat_id);
             }
         }
+        // Per-chat locks go only while uncontended (the same rule as
+        // rate_limit's prune): pulling a lock out from under an in-flight
+        // update — between its `lock_for` clone and its `lock().await` —
+        // would let a second writer `lock_for` a fresh one and enter the
+        // critical section concurrently. A contended lock stays until a later
+        // sweep, and dropping the uncontended ones also catches chats an
+        // earlier sweep had to skip, so the map stays bounded.
+        self.locks
+            .lock()
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
         if !removed.is_empty() {
             log::info!(
                 "pruned {} expired edit-before-forward record(s)",
@@ -358,6 +378,67 @@ mod tests {
             data.template.get("keep").map(String::as_str),
             Some("[]"),
             "eviction dropped state the DB never received"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_is_not_cached() {
+        // A read that errors (busy, IO, a missing table) answers the default;
+        // caching that answer would make the next get return it blind and the
+        // next update write it back over the chat's real settings.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("DROP TABLE chat_state").unwrap();
+        let store = ChatStore::new(pool);
+
+        let first = store.get(7).await;
+        assert!(first.forward_channel_id.is_none());
+        assert!(
+            !store.cache.lock().contains_key(&7),
+            "a failed read must not poison the cache"
+        );
+
+        // The next get retries the DB and sees the real row.
+        raw.execute_batch(
+            "CREATE TABLE chat_state (chat_id TEXT PRIMARY KEY, payload TEXT NOT NULL)",
+        )
+        .unwrap();
+        let real = ChatData {
+            forward_channel_id: Some(42),
+            ..ChatData::default()
+        };
+        raw.execute(
+            "INSERT INTO chat_state (chat_id, payload) VALUES ('7', ?1)",
+            rusqlite::params![serde_json::to_string(&real).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(store.get(7).await.forward_channel_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn prune_spares_a_lock_someone_still_holds() {
+        // The sweep evicts uncontended locks only: removing one an update
+        // still holds (its `lock_for` clone alive) would let a second writer
+        // create a fresh lock and enter the critical section concurrently.
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open_store(dir.path().join("l.db").to_str().unwrap()).unwrap();
+        let store = ChatStore::new(pool);
+        store.set(1, &ChatData::default()).await;
+
+        let held = store.lock_for(1); // an update between lock_for and lock().await
+        store.prune_expired(Duration::from_secs(60)).await;
+        assert!(
+            store.locks.lock().contains_key(&1),
+            "a contended lock must survive the sweep"
+        );
+
+        drop(held);
+        store.prune_expired(Duration::from_secs(60)).await;
+        assert!(
+            !store.locks.lock().contains_key(&1),
+            "the next sweep drops it once uncontended"
         );
     }
 }
