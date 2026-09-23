@@ -1,7 +1,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, Site, SiteFuture};
-use html_escape::{encode_double_quoted_attribute, encode_text};
+use html_escape::encode_text;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -330,13 +330,7 @@ impl Post {
     }
 
     pub fn caption(&self) -> String {
-        format!(
-            "{url}\n<a href=\"{author_url}\">{author}</a>: {text}",
-            url = encode_double_quoted_attribute(&self.url()),
-            author_url = encode_double_quoted_attribute(&self.author_url()),
-            author = encode_text(&self.author),
-            text = encode_text(&self.text),
-        )
+        crate::site::caption(&self.url(), &self.author_url(), &self.author, &self.text)
     }
 
     pub fn from_json(raw_json: &str, id: String) -> Result<Self, FetchError> {
@@ -393,7 +387,6 @@ impl From<Post> for Fetched {
         let url = post.url();
         let author_url = post.author_url();
         let render_data = Some(crate::site::RenderData {
-            url: url.clone(),
             author: encode_text(&post.author).into_owned(),
             author_url: author_url.clone(),
             // A post has no title: its text is all content.
