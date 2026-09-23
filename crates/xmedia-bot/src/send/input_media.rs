@@ -43,39 +43,6 @@ impl MediaItemPayload {
     }
 }
 
-pub(super) fn photo_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
-    let mut photo = InputMediaPhoto::new(file).parse_mode(ParseMode::Html);
-    if let Some(caption) = caption {
-        photo = photo.caption(caption);
-    }
-    if spoiler {
-        photo = photo.spoiler();
-    }
-    InputMedia::Photo(photo)
-}
-
-pub(super) fn video_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
-    let mut video = InputMediaVideo::new(file).parse_mode(ParseMode::Html);
-    if let Some(caption) = caption {
-        video = video.caption(caption);
-    }
-    if spoiler {
-        video = video.spoiler();
-    }
-    InputMedia::Video(video)
-}
-
-pub(super) fn animation_media(file: InputFile, caption: Option<&str>, spoiler: bool) -> InputMedia {
-    let mut animation = InputMediaAnimation::new(file).parse_mode(ParseMode::Html);
-    if let Some(caption) = caption {
-        animation = animation.caption(caption);
-    }
-    if spoiler {
-        animation = animation.spoiler();
-    }
-    InputMedia::Animation(animation)
-}
-
 /// Builds one media-group item around an already-selected file: the per-kind
 /// `InputMedia` (same spoiler/caption handling) plus the video's thumbnail,
 /// which Telegram takes as a separate upload/URL. The one place that dispatch
@@ -87,10 +54,35 @@ pub(super) fn media_from(
     thumbnail: Option<&str>,
 ) -> Result<InputMedia, String> {
     let media = match item {
-        MediaItemPayload::Photo { has_spoiler, .. } => photo_media(file, caption, *has_spoiler),
-        MediaItemPayload::Video { has_spoiler, .. } => video_media(file, caption, *has_spoiler),
+        MediaItemPayload::Photo { has_spoiler, .. } => {
+            let mut media = InputMediaPhoto::new(file).parse_mode(ParseMode::Html);
+            if let Some(caption) = caption {
+                media = media.caption(caption);
+            }
+            if *has_spoiler {
+                media = media.spoiler();
+            }
+            InputMedia::Photo(media)
+        }
+        MediaItemPayload::Video { has_spoiler, .. } => {
+            let mut media = InputMediaVideo::new(file).parse_mode(ParseMode::Html);
+            if let Some(caption) = caption {
+                media = media.caption(caption);
+            }
+            if *has_spoiler {
+                media = media.spoiler();
+            }
+            InputMedia::Video(media)
+        }
         MediaItemPayload::Animation { has_spoiler, .. } => {
-            animation_media(file, caption, *has_spoiler)
+            let mut media = InputMediaAnimation::new(file).parse_mode(ParseMode::Html);
+            if let Some(caption) = caption {
+                media = media.caption(caption);
+            }
+            if *has_spoiler {
+                media = media.spoiler();
+            }
+            InputMedia::Animation(media)
         }
     };
     match (thumbnail, media) {
