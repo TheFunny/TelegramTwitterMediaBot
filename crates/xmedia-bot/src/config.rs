@@ -130,4 +130,95 @@ mod tests {
         }
         assert_eq!(ids, vec![7, 42]);
     }
+
+    /// The webhook truth table: `Config::load` enables webhook mode only for
+    /// a case-insensitive `true|yes|1`, and everything else — including the
+    /// classic misspelling "on", which an operator would expect to work — is
+    /// polling. Without this pin a typo silently ran a different transport
+    /// (with P0's fail-fast secret check, or with no listener at all).
+    #[test]
+    fn webhook_flag_is_a_case_insensitive_truth_table() {
+        // SAFETY: no other test *mutates* WEBHOOK, the value is restored
+        // before this test returns, and concurrent Config::load callers in
+        // other tests assert fields other than webhook_enabled.
+        let previous = env::var("WEBHOOK").ok();
+        for (value, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("Yes", true),
+            ("1", true),
+            ("false", false),
+            ("on", false),
+            ("", false),
+        ] {
+            unsafe { env::set_var("WEBHOOK", value) };
+            assert_eq!(
+                Config::load().webhook_enabled,
+                expected,
+                "WEBHOOK={value:?}"
+            );
+        }
+        match previous {
+            Some(value) => unsafe { env::set_var("WEBHOOK", value) },
+            None => unsafe { env::remove_var("WEBHOOK") },
+        }
+    }
+
+    /// A malformed TTL warns and falls back to the default instead of being
+    /// parsed as 0 — the difference between a 24h edit-prompt expiry and a
+    /// prompt that expires instantly, which an operator would only notice
+    /// when the buttons stop working.
+    #[test]
+    fn invalid_ttl_falls_back_to_the_default() {
+        // SAFETY: no other test *mutates* EDIT_MESSAGE_TTL_SECONDS; restored
+        // below, and no other test asserts the TTL field.
+        let previous = env::var("EDIT_MESSAGE_TTL_SECONDS").ok();
+        unsafe { env::set_var("EDIT_MESSAGE_TTL_SECONDS", "not-a-number") };
+        let invalid = Config::load().edit_message_ttl;
+        unsafe { env::set_var("EDIT_MESSAGE_TTL_SECONDS", "120") };
+        let valid = Config::load().edit_message_ttl;
+        match previous {
+            Some(value) => unsafe { env::set_var("EDIT_MESSAGE_TTL_SECONDS", value) },
+            None => unsafe { env::remove_var("EDIT_MESSAGE_TTL_SECONDS") },
+        }
+        assert_eq!(
+            invalid,
+            Duration::from_secs(24 * 3600),
+            "an unparseable value falls back to the default"
+        );
+        assert_eq!(
+            valid,
+            Duration::from_secs(120),
+            "a valid value is taken as-is"
+        );
+    }
+
+    /// A blank WEBHOOK_CERT / WEBHOOK_SECRET_TOKEN counts as unset — compose
+    /// injects `${VAR:-}` as an empty string for a commented-out template
+    /// line — while a present value is kept (the `-e VAR=` disable idiom).
+    #[test]
+    fn blank_webhook_cert_and_secret_count_as_unset() {
+        // SAFETY: no other test *mutates* these two, both are restored
+        // below, and no other test asserts them.
+        let prev_cert = env::var("WEBHOOK_CERT").ok();
+        let prev_secret = env::var("WEBHOOK_SECRET_TOKEN").ok();
+        unsafe { env::set_var("WEBHOOK_CERT", "") };
+        unsafe { env::set_var("WEBHOOK_SECRET_TOKEN", "") };
+        let blank = Config::load();
+        unsafe { env::set_var("WEBHOOK_CERT", "/x/cert.pem") };
+        unsafe { env::set_var("WEBHOOK_SECRET_TOKEN", "s3cret") };
+        let present = Config::load();
+        match prev_cert {
+            Some(value) => unsafe { env::set_var("WEBHOOK_CERT", value) },
+            None => unsafe { env::remove_var("WEBHOOK_CERT") },
+        }
+        match prev_secret {
+            Some(value) => unsafe { env::set_var("WEBHOOK_SECRET_TOKEN", value) },
+            None => unsafe { env::remove_var("WEBHOOK_SECRET_TOKEN") },
+        }
+        assert_eq!(blank.webhook_cert, None, "blank must read as unset");
+        assert_eq!(blank.webhook_secret_token, None, "blank must read as unset");
+        assert_eq!(present.webhook_cert.as_deref(), Some("/x/cert.pem"));
+        assert_eq!(present.webhook_secret_token.as_deref(), Some("s3cret"));
+    }
 }
