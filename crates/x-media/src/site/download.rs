@@ -197,8 +197,10 @@ fn media_url_allowed(url: &url::Url) -> bool {
 
 /// Prepares a media download: refuses a URL pointing inside the host's own
 /// network ([`FetchError::Blocked`], permanent — the same URL would be refused
-/// again), then applies the site's media headers. One choke point so every
-/// download path gets the guard.
+/// again), then applies every site's media-header rule (pixiv's `Referer` for
+/// pximg.net hotlink protection; sites contribute via `media_headers(url)`, so
+/// the central download code carries no other per-site logic). One choke
+/// point so every download path gets both.
 fn media_request(url: &str) -> Result<reqwest::RequestBuilder, FetchError> {
     let parsed = url::Url::parse(url).map_err(|e| {
         log::warn!("media url is not a url: {e}");
@@ -208,13 +210,7 @@ fn media_request(url: &str) -> Result<reqwest::RequestBuilder, FetchError> {
         log::warn!("refusing to fetch media from the host's own network");
         return Err(FetchError::Blocked);
     }
-    Ok(apply_media_headers(MEDIA_CLIENT.get(parsed), url))
-}
-
-/// Applies every site's media-header rule to a download request (pixiv's
-/// `Referer` for pximg.net hotlink protection). Sites contribute via their
-/// `media_headers(url)` — the central download code carries no per-site logic.
-fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    let mut request = MEDIA_CLIENT.get(parsed);
     for site in SITES.iter() {
         if let Some(headers) = site.media_headers(url) {
             for (name, value) in headers {
@@ -222,7 +218,7 @@ fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwe
             }
         }
     }
-    request
+    Ok(request)
 }
 
 /// Downloads a media file with a hard size cap: the body is streamed and the
