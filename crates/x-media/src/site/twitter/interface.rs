@@ -1,7 +1,7 @@
 use super::model;
 use crate::media::Media;
 use crate::site::{FetchError, Fetched, Site, SiteFuture};
-use html_escape::{decode_html_entities, encode_double_quoted_attribute, encode_text};
+use html_escape::{decode_html_entities, encode_text};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -199,13 +199,7 @@ impl Tweet {
     }
 
     pub fn caption(&self) -> String {
-        format!(
-            "{url}\n<a href=\"{author_url}\">{author}</a>: {text}",
-            url = encode_double_quoted_attribute(&self.url()),
-            author_url = encode_double_quoted_attribute(&self.author_url()),
-            author = encode_text(&self.author),
-            text = encode_text(&self.text),
-        )
+        crate::site::caption(&self.url(), &self.author_url(), &self.author, &self.text)
     }
 
     /// Builds a tweet from an already-parsed syndication body. Takes the value
@@ -332,7 +326,6 @@ impl From<Tweet> for Fetched {
         let author_url = tweet.author_url();
         // A tweet has no title: its text is all content.
         let render_data = Some(crate::site::RenderData {
-            url: url.clone(),
             author: encode_text(&tweet.author).into_owned(),
             author_url: author_url.clone(),
             title: String::new(),
