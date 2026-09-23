@@ -21,7 +21,10 @@ on:
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/docker.yml
-      - 'crates/**/Cargo.toml'
+      # Any crate source, not just manifests: the stub/touch layering only
+      # breaks against real source structure, which a manifest-only PR never
+      # exercises.
+      - 'crates/**'
 
 env:
   APP_NAME: telegram-twitter-media-bot
