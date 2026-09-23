@@ -119,24 +119,20 @@ fn plan_photo(w: u32, h: u32, len: usize, channels: usize) -> PhotoPlan {
     }
 }
 
-/// [`PhotoPlan`] from the downloaded bytes: the PNG or JPEG header decides
-/// (palette counted as RGB, which `EXPAND` produces); anything else is uploaded
-/// as-is, since [`prepare_photo`] does not decode it.
-fn photo_plan(bytes: &[u8]) -> PhotoPlan {
-    if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
-        return plan_photo(w, h, bytes.len(), output_channels(color));
-    }
-    if let Some((w, h)) = jpeg_dims(bytes) {
-        return plan_photo(w, h, bytes.len(), 3);
-    }
-    PhotoPlan::AsIs
-}
-
 /// The decode buffer a downloaded photo will allocate, from its header alone —
 /// zero when it is already within Telegram's limits and is uploaded as-is, zero
-/// for a format [`prepare_photo`] does not decode.
+/// for a format [`prepare_photo`] does not decode. The PNG or JPEG header
+/// decides (palette counted as RGB, which `EXPAND` produces); anything else is
+/// uploaded as-is, since [`prepare_photo`] does not decode it.
 pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
-    match photo_plan(bytes) {
+    let plan = if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
+        plan_photo(w, h, bytes.len(), output_channels(color))
+    } else if let Some((w, h)) = jpeg_dims(bytes) {
+        plan_photo(w, h, bytes.len(), 3)
+    } else {
+        PhotoPlan::AsIs
+    };
+    match plan {
         PhotoPlan::Decode(bytes) => bytes,
         PhotoPlan::AsIs | PhotoPlan::TooLarge => 0,
     }
