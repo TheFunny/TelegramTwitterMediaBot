@@ -39,6 +39,11 @@ pub enum PixivError {
     Status(u16),
     #[error("pixiv api error: {0}")]
     Api(String),
+    /// A bad moment while preparing media: a transient download status
+    /// (429 / 5xx), a stalled transfer or a temp-file write failure. A retry
+    /// can change the answer, so the pixiv retry policy re-fetches these.
+    #[error("transient pixiv error: {0}")]
+    Transient(String),
 }
 
 /// Native pixiv app-API client.
@@ -228,6 +233,14 @@ impl PixivAPI {
             .await
             .map_err(|e| match e {
                 FetchError::Http(e) => PixivError::Http(e),
+                // A bad moment (429/5xx, a stalled transfer, a temp-file
+                // write failure) must stay retryable: folding it into Api
+                // made one hiccup permanently fail the whole ugoira post,
+                // while the bot's own upload downloads retry the same
+                // classes.
+                transient @ (FetchError::Transient(_) | FetchError::Io(_)) => {
+                    PixivError::Transient(format!("frame zip download failed: {transient}"))
+                }
                 other => PixivError::Api(format!("frame zip download failed: {other}")),
             })?;
         let frame_delays = metadata.frames.iter().map(|f| f.delay).collect::<Vec<_>>();

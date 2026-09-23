@@ -102,7 +102,7 @@ pub fn is_retryable(err: &FetchError) -> bool {
 /// rejected credential is not.
 fn pixiv_error_is_retryable(err: &PixivError) -> bool {
     match err {
-        PixivError::Http(_) => true,
+        PixivError::Http(_) | PixivError::Transient(_) => true,
         PixivError::Status(code) if *code == 429 || *code >= 500 => true,
         PixivError::Status(_) | PixivError::Api(_) | PixivError::Json(_) | PixivError::NoAuth => {
             false
@@ -443,7 +443,11 @@ mod tests {
         // it calls `disable()`, a process-wide flag with no reset, so a test
         // touching it would order-couple every other pixiv test (the predicate
         // it keys on is covered by the table below).
-        for err in [PixivError::Status(429), PixivError::Status(503)] {
+        for err in [
+            PixivError::Status(429),
+            PixivError::Status(503),
+            PixivError::Transient("frame zip download failed: transient".into()),
+        ] {
             let enabled_before = api::enabled();
             let message = startup_validation(Err(err)).unwrap_err();
             assert!(message.contains("stays enabled"), "{message}");
@@ -458,11 +462,15 @@ mod tests {
 
     #[test]
     fn is_retryable_classifies_transient_and_permanent() {
-        // Transient: network errors, explicit transient, pixiv 429/5xx.
+        // Transient: network errors, explicit transient, pixiv 429/5xx, and a
+        // failed media download (the frame zip's own bad moment).
         assert!(is_retryable(&FetchError::Transient("429".into())));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(429))));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(500))));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(503))));
+        assert!(is_retryable(&FetchError::Pixiv(PixivError::Transient(
+            "frame zip download failed: transient: media status 429".into()
+        ))));
         // Permanent: pixiv 4xx (bad/expired token, forbidden, not found),
         // api/auth errors, unparseable bodies, not-found/blocked/sensitive.
         assert!(!is_retryable(&FetchError::Pixiv(PixivError::Status(400))));
