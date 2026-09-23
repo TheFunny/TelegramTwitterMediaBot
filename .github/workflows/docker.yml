@@ -150,9 +150,11 @@ jobs:
       # would give every new tag a cold cache on release builds. PR runs only
       # read it (cache-to is empty) so they cannot evict the release cache.
       #
-      # FFMPEG_URL/FFMPEG_SHA256 come from repository variables when set, so a
-      # release can pin an exact ffmpeg build (the Dockerfile default follows
-      # the project's `/redirect/latest/` URL, which has no sha256 sidecar).
+      # FFMPEG_URL/FFMPEG_SHA256 come from repository variables when set —
+      # both or neither: the Dockerfile checks the sha256 unconditionally, so
+      # a URL without its matching hash fails the build. The fallbacks pin the
+      # same 9.0.2 release the Dockerfile defaults to (keep the three in step
+      # when bumping).
       #
       # Single-arch (amd64) on purpose: adding arm64 means re-adding
       # `docker/setup-qemu-action`, `platforms: linux/amd64,linux/arm64`, and
@@ -164,8 +166,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             APP_NAME=${{ env.APP_NAME }}
-            FFMPEG_URL=${{ vars.FFMPEG_URL || 'https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip' }}
-            FFMPEG_SHA256=${{ vars.FFMPEG_SHA256 }}
+            FFMPEG_URL=${{ vars.FFMPEG_URL || 'https://ffmpeg.martin-riedl.de/download/linux/amd64/1789931100_9.0.2/ffmpeg.zip' }}
+            FFMPEG_SHA256=${{ vars.FFMPEG_SHA256 || 'fa8ecf4abbd290d98f7d188b8649cc6b391ae209a98452be955a15aab1909d7f' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=tgxmb-build

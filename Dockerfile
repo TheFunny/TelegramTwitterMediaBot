@@ -8,20 +8,36 @@ ARG APP_NAME=telegram-twitter-media-bot
 # encoding. Served from https://ffmpeg.martin-riedl.de (Cloudflare CDN,
 # built on Debian 12 — glibc-compatible with the bookworm-slim runtime).
 # johnvansickle.com throttles datacenter IPs and served garbage from GitHub
-# runners. `/redirect/latest/` floats to the newest release build; each build
-# also ships a .sha256. Swap `amd64` for `arm64` when building arm64 images.
-ARG FFMPEG_URL=https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip
-# Arm64 images need this URL swapped for the `linux/arm64` build (currently
-# hardcoded amd64; the workflow builds amd64 only — see docker.yml).
-# Optional sha256 of ffmpeg.zip (pinned releases only): set to verify the
-# download. The mirror publishes .sha256 sidecars next to pinned builds, e.g.
-# https://ffmpeg.martin-riedl.de/download/linux/amd64/<id>_9.0/ffmpeg.zip.sha256
-# (the /redirect/latest/ URL itself has no sidecar — pin the effective URL).
-ARG FFMPEG_SHA256=
+# runners.
+#
+# Pinned to one release build instead of `/redirect/latest/`: the floating
+# URL changes under every build and ships no sha256 sidecar, while this pair
+# (zip + the sha256 the mirror publishes beside it, `<url>.sha256`) is
+# verified on every run. Bump both together — the site lists the current
+# ids, e.g. https://ffmpeg.martin-riedl.de. Swap `amd64` for `arm64` when
+# building arm64 images (the workflow builds amd64 only — see docker.yml).
+ARG FFMPEG_URL=https://ffmpeg.martin-riedl.de/download/linux/amd64/1789931100_9.0.2/ffmpeg.zip
+# sha256 of that zip, checked unconditionally: an FFMPEG_URL override must
+# pair with the new zip's sha256 or the build fails here, so an unverifiable
+# binary never reaches the image.
+ARG FFMPEG_SHA256=fa8ecf4abbd290d98f7d188b8649cc6b391ae209a98452be955a15aab1909d7f
 
 WORKDIR /build
 
-# 1. Rust dependencies first: only the manifests plus stub sources, so the
+# 1. Static ffmpeg first: only the two ARGs above invalidate this layer, so a
+#    manifest or source edit never re-downloads it. The zip contains a single
+#    `ffmpeg` binary at the root. `unzip -t` verifies the archive before
+#    extraction so a bad download fails loudly here instead of a cryptic
+#    later error.
+RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
+    && echo "$FFMPEG_SHA256  /tmp/ffmpeg.zip" | sha256sum -c - \
+    && unzip -tq /tmp/ffmpeg.zip \
+    && unzip -q /tmp/ffmpeg.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/ffmpeg \
+    && rm /tmp/ffmpeg.zip \
+    && /usr/local/bin/ffmpeg -version >/dev/null
+
+# 2. Rust dependencies next: only the manifests plus stub sources, so the
 #    expensive dependency fetch + compile lives in a layer invalidated only by
 #    manifest/lock changes.
 COPY Cargo.toml Cargo.lock ./
@@ -32,21 +48,9 @@ RUN mkdir -p crates/x-media/src crates/xmedia-bot/src \
     && : > crates/x-media/src/lib.rs \
     && cargo build --release --locked -p xmedia-bot
 
-# 2. Static ffmpeg next (cached unless FFMPEG_URL changes), so source edits
-#    never re-download it. The zip contains a single `ffmpeg` binary at the
-#    root. `unzip -t` verifies the archive before extraction so a bad
-#    download fails loudly here instead of a cryptic later error.
-RUN wget -q -O /tmp/ffmpeg.zip "$FFMPEG_URL" \
-    && if [ -n "$FFMPEG_SHA256" ]; then echo "$FFMPEG_SHA256  /tmp/ffmpeg.zip" | sha256sum -c -; fi \
-    && unzip -tq /tmp/ffmpeg.zip \
-    && unzip -q /tmp/ffmpeg.zip -d /usr/local/bin \
-    && chmod +x /usr/local/bin/ffmpeg \
-    && rm /tmp/ffmpeg.zip \
-    && /usr/local/bin/ffmpeg -version >/dev/null
-
 # 3. Real sources last: only our crates recompile on source changes. Cargo's
 #    freshness check is mtime-based; the COPY'd host files usually predate the
-#    step-1 stub build, so cargo would consider the stub up to date and never
+#    stub build, so cargo would consider the stub up to date and never
 #    compile the real sources. `touch` makes every .rs newer than the stub
 #    artifacts, forcing a rebuild of just the two crates while the compiled
 #    dependency layer stays cached. (`cargo clean -p` does NOT work here — it
