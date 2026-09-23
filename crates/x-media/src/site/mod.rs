@@ -385,23 +385,14 @@ pub(crate) static SITES: LazyLock<Vec<Box<dyn Site>>> = LazyLock::new(|| {
     ]
 });
 
-/// The first enabled site whose pattern matches `url`, in dispatch order.
-fn find_site(url: &str) -> Option<&'static dyn Site> {
+/// The first site whose pattern matches `url`, in dispatch order — enabled
+/// or not. The caller decides what a disabled match means; no match at all is
+/// the "unsupported link" case.
+fn matching_site(url: &str) -> Option<&'static dyn Site> {
     SITES
         .iter()
-        .find(|site| site.enabled() && site.pattern().is_match(url))
+        .find(|site| site.pattern().is_match(url))
         .map(|site| site.as_ref())
-}
-
-/// The site whose pattern matches `url` but which is disabled right now.
-/// `None` when no site matches the URL at all, or when the matching site is
-/// enabled. Lets the dispatcher tell "unsupported link" (silently ignored)
-/// apart from "this bot has that site switched off" (reported to the user).
-fn disabled_site(url: &str) -> Option<&'static str> {
-    SITES
-        .iter()
-        .find(|site| !site.enabled() && site.pattern().is_match(url))
-        .map(|site| site.id())
 }
 
 /// Every supported site id, in dispatch order. The bot's SetFormat whitelist
@@ -467,17 +458,18 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
     // Wall time of the whole fetch, retry backoff included: the ugoira encode
     // and the HLS remux live inside it, so this is where a slow fetch shows.
     let started = std::time::Instant::now();
-    let Some(site) = find_site(url) else {
-        // A registered-but-disabled site (pixiv without a token) is not an
-        // unsupported link: report it, so the bot answers the user instead of
-        // ignoring the message.
-        return match disabled_site(url) {
-            Some(site) => Err(FetchError::Disabled { site }),
-            None => Ok(None),
-        };
+    let Some(site) = matching_site(url) else {
+        return Ok(None); // unsupported link: silently ignored
     };
-    // Unsupported and disabled links answer above without touching the gate;
-    // from here on every attempt counts against FETCH_SLOTS (see above).
+    // A registered-but-disabled site (pixiv without a token) is not an
+    // unsupported link: report it, so the bot answers the user instead of
+    // ignoring the message. One match is the whole lookup — the site patterns
+    // are disjoint (one domain each), so "first enabled match" and "first
+    // match, then check" never disagree.
+    if !site.enabled() {
+        return Err(FetchError::Disabled { site: site.id() });
+    }
+    // Gate every network attempt process-wide (see FETCH_SLOTS).
     let _permit = FETCH_SLOTS.acquire().await.expect("fetch gate closed");
     for attempt in 0..attempts.max(1) {
         match site.fetch_from_url(url).await {
@@ -584,11 +576,11 @@ mod tests {
             site_ids(),
             vec!["twitter", "bsky", "misskey", "pixiv", "bilibili"]
         );
-        // Enabled sites dispatch; unsupported URLs never match.
-        assert!(find_site("https://x.com/u/status/1").is_some());
-        assert!(find_site("https://misskey.io/notes/abc").is_some());
-        assert!(find_site("https://t.bilibili.com/1245284537985925159").is_some());
-        assert!(find_site("https://example.com/x").is_none());
+        // Patterns dispatch; unsupported URLs never match.
+        assert!(matching_site("https://x.com/u/status/1").is_some());
+        assert!(matching_site("https://misskey.io/notes/abc").is_some());
+        assert!(matching_site("https://t.bilibili.com/1245284537985925159").is_some());
+        assert!(matching_site("https://example.com/x").is_none());
         // Cache keys are pattern-driven, independent of the enabled() gate
         // (pixiv is disabled in tests without PIXIV_REFRESH_TOKEN).
         assert_eq!(
