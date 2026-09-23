@@ -200,31 +200,15 @@ pub fn prepare_photo(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, Str
     }
 }
 
-/// Parses the PNG IHDR (bytes 8..26: signature + length + "IHDR" + width +
-/// height + bit depth + color type).
+/// The PNG's IHDR as the crate reads it (signature through the first IDAT):
+/// width/height/depth/color decide the plan and the decode channels, without
+/// decoding any pixels.
 fn parse_png_header(bytes: &[u8]) -> Option<(u32, u32, png::BitDepth, png::ColorType)> {
-    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.len() < 26 {
-        return None;
-    }
-    let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
-    let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
-    let depth = match *bytes.get(24)? {
-        1 => png::BitDepth::One,
-        2 => png::BitDepth::Two,
-        4 => png::BitDepth::Four,
-        8 => png::BitDepth::Eight,
-        16 => png::BitDepth::Sixteen,
-        _ => return None,
-    };
-    let color = match *bytes.get(25)? {
-        0 => png::ColorType::Grayscale,
-        2 => png::ColorType::Rgb,
-        3 => png::ColorType::Indexed,
-        4 => png::ColorType::GrayscaleAlpha,
-        6 => png::ColorType::Rgba,
-        _ => return None,
-    };
-    Some((w, h, depth, color))
+    let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .ok()?;
+    let info = reader.info();
+    Some((info.width, info.height, info.bit_depth, info.color_type))
 }
 
 /// Output channels of a decoded frame for the given color type (post
@@ -453,7 +437,26 @@ mod tests {
         bytes.extend(w.to_be_bytes());
         bytes.extend(h.to_be_bytes());
         bytes.extend([depth, color, 0, 0, 0]);
+        // A correct IHDR CRC plus an IDAT chunk header: `png::Decoder` verifies
+        // the CRC and `read_info` stops at the first IDAT — all the header
+        // read needs. The hand-rolled parser this fixture used to feed stopped
+        // four bytes earlier and checked neither.
+        bytes.extend(crc32(&bytes[12..]).to_be_bytes());
+        bytes.extend(0u32.to_be_bytes()); // IDAT payload length (never read)
+        bytes.extend(b"IDAT");
         bytes
+    }
+
+    /// CRC-32 as PNG chunks use it (IEEE, reflected).
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+        !crc
     }
 
     /// The budget is a *process-wide* memory bound: `PREP_SLOTS` (6) caps how
