@@ -123,14 +123,25 @@ async fn download_to_temp(
         .map_err(|e| FallbackError::Permanent {
             message: format!("temp file failed: {e}"),
         })?;
-    use std::io::Write;
-    // A write failure is resource exhaustion far more often than a broken temp
+    // The write runs on a blocking thread: up to 50 MiB of sync disk I/O on
+    // an executor thread would stall whatever else that worker runs (six prep
+    // tasks could stall six threads at once on a slow volume). A write
+    // failure is resource exhaustion far more often than a broken temp
     // dir (ENOSPC / EDQUOT), and that clears on its own — worth an attempt
     // instead of dropping the post on the first try. Creating the file (above)
     // stays permanent: a temp dir that cannot be created at all is a
     // deployment fault that should fail loudly and immediately. `Retryable`
     // carries no message, so the cause is logged here.
-    file.as_file_mut().write_all(&bytes).map_err(|e| {
+    let (written, file, bytes) = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let written = file.as_file_mut().write_all(&bytes);
+        (written, file, bytes)
+    })
+    .await
+    .map_err(|e| FallbackError::Permanent {
+        message: format!("upload write worker panicked: {e}"),
+    })?;
+    written.map_err(|e| {
         log::error!("temp file write failed: {e}");
         FallbackError::Retryable {
             delay_seconds: retry_delay_seconds(0),
