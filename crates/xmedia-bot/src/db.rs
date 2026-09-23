@@ -17,9 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Upper bound on pooled (reused) connections and on concurrent DB
-/// operations per store. Small on purpose: the queue's `BEGIN IMMEDIATE`
-/// leases serialize writes anyway, and WAL readers rarely need more.
-const POOL_SIZE: usize = 4;
+/// operations. Sized to cover every consumer at once — 4 queue workers +
+/// 8 URL workers, plus dispatcher handlers and the sweep — so the semaphore
+/// stops queueing operations behind each other; SQLite's single writer
+/// serializes writes regardless, and WAL readers rarely block.
+const POOL_SIZE: usize = 16;
 
 /// A tiny connection pool for one SQLite file. Connections are checked out
 /// on a blocking thread and returned afterwards; `acquire` opens a new
