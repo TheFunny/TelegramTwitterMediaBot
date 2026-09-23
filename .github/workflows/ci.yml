@@ -140,15 +140,29 @@ jobs:
     env:
       PIXIV_REFRESH_TOKEN: ${{ secrets.PIXIV_REFRESH_TOKEN }}
       TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+      BILIBILI_COOKIE: ${{ secrets.BILIBILI_COOKIE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # Everything network- or secret-gated lives in x-media, and the bot
-      # crate's suite (MockSender + tempdir stores, no network) already ran in
-      # the `test` job — rebuilding it here bought nothing.
-      - name: Run token-gated tests
-        run: cargo test -p x-media --locked
-      # The live-network tests, by the "live" name filter (all #[ignore]d).
-      - name: Run live-network tests
-        run: cargo test -p x-media --locked -- --ignored live
+      # All #[ignore]d live tests, by the "live" name filter, in both crates:
+      # the bot crate has two of its own (repair refetch, text-only link)
+      # whose fetches are network-bound but whose sends go through MockSender.
+      # --show-output keeps each test's stdout — the SKIP lines printed by a
+      # skipped test are what the summary step below greps, so a skip stays
+      # distinguishable from a pass.
+      - name: Run live-network tests (x-media)
+        run: cargo test -p x-media --locked -- --ignored live --show-output 2>&1 | tee live-x-media.log
+      - name: Run live-network tests (xmedia-bot)
+        run: cargo test -p xmedia-bot --locked -- --ignored live --show-output 2>&1 | tee live-bot.log
+      # A green live run must not be able to mean "nothing actually ran"
+      # (pixiv without its secret, bilibili risk-controlling the runner IP):
+      # collect every SKIP line into the run summary.
+      - name: Surface skipped live tests
+        if: always()
+        run: |
+          skips=$(grep -h '^SKIP ' live-*.log 2>/dev/null || true)
+          if [ -n "$skips" ]; then
+            echo "::warning::live job skipped tests, see the job summary"
+            { echo "### Live tests skipped"; echo "$skips" | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi

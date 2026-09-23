@@ -1007,13 +1007,14 @@ mod tests {
     /// Fetches a live dynamic, skipping the assertion when bilibili
     /// risk-controls this IP (the site blocks datacenter/over-used addresses
     /// with `-352` regardless of cookies — a real failure would surface as a
-    /// parse error or a not-found instead). Mirrors the token-gated pixiv
-    /// tests' "skipping: …" convention.
+    /// parse error or a not-found instead). Mirrors the pixiv download
+    /// test's `SKIP …` convention — CI's live job greps that prefix to list
+    /// the skips in the run summary instead of showing a silently green run.
     async fn live_fetch(url: &str) -> Option<Fetched> {
         match fetch_from_url(url).await {
             Ok(fetched) => Some(fetched),
             Err(e) if e.to_string().contains("risk control") => {
-                eprintln!("skipping: {e}");
+                eprintln!("SKIP (bilibili risk control): {e}");
                 None
             }
             Err(e) => panic!("{e}"),
