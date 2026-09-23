@@ -69,13 +69,14 @@ pub struct Fetched {
 ///
 /// `author`, `title`, `content` and `tags` come from the site API (post
 /// text, display names, descriptions) and are HTML-escaped at construction.
-/// `url` and `author_url` stay raw: they are canonical URLs the adapter
-/// builds from numeric ids and API-constrained handles/DIDs, so they carry
-/// no escapable character — the bot's `/test` report relies on that when it
-/// embeds them.
+/// `author_url` stays raw: it is a canonical URL the adapter builds from
+/// numeric ids and API-constrained handles/DIDs, so it carries no escapable
+/// character — the bot's `/test` report relies on that when it embeds it.
+/// `{url}` needs no copy here: [`Fetched::source_url`] is the same canonical
+/// URL every adapter would have handed this struct, and `caption_with` reads
+/// it from there.
 #[derive(Debug)]
 pub(crate) struct RenderData {
-    pub url: String,
     pub author: String,
     pub author_url: String,
     pub title: String,
@@ -125,7 +126,7 @@ impl Fetched {
             (Some(data), false) => caption_from_fields(
                 format,
                 "",
-                &data.url,
+                &self.source_url,
                 &data.author,
                 &data.author_url,
                 &data.title,

@@ -289,7 +289,6 @@ impl From<Illustration> for Fetched {
             .collect::<Vec<_>>()
             .join(" ");
         let render_data = Some(crate::site::RenderData {
-            url: url.clone(),
             author: encode_text(&illustration.author).into_owned(),
             author_url: author_url.clone(),
             title: encode_text(&illustration.title).into_owned(),

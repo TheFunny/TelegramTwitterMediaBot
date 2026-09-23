@@ -289,7 +289,6 @@ impl From<model::Item> for Fetched {
             sensitive: false,
             site_id: "bilibili",
             render_data: Some(RenderData {
-                url,
                 author: encode_text(&author).into_owned(),
                 author_url,
                 title: encode_text(&title).into_owned(),

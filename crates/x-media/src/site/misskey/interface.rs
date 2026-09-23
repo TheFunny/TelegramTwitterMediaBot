@@ -133,7 +133,6 @@ impl From<model::Note> for Fetched {
             sensitive,
             site_id: "misskey",
             render_data: Some(RenderData {
-                url,
                 author: encode_text(&author).into_owned(),
                 author_url: author_url.clone(),
                 title: String::new(),
