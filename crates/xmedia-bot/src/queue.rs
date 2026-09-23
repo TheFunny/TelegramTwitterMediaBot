@@ -179,6 +179,15 @@ impl PersistentTaskQueue {
             loop {
                 let notified = sweep_notify.notified();
                 tokio::pin!(notified);
+                // Register before re-checking stop (same rule as the worker
+                // loop): a stop() landing between the previous iteration and
+                // here would wake nobody, and the sweep would sit out a full
+                // 30s tick — long enough for the shutdown timeout to treat the
+                // drain as stuck.
+                notified.as_mut().enable();
+                if sweep_stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 tokio::select! {
                     _ = &mut notified => {}
                     _ = interval.tick() => {}
@@ -379,6 +388,18 @@ impl QueueWorker {
                     let wait_until = self.earliest_run_after().await;
                     let notified = self.notify.notified();
                     tokio::pin!(notified);
+                    // Register before re-checking stop: a stop() between the
+                    // loop-top check and this point fires notify_waiters with
+                    // no waiter registered, and this worker would then sleep
+                    // until the next enqueue (the same hazard enqueue's
+                    // notify_one comment names). enable() closes it — either
+                    // the stop already happened and the recheck below returns,
+                    // or the waiter is registered and stop's notify_waiters
+                    // reaches it.
+                    notified.as_mut().enable();
+                    if self.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
                     match wait_until {
                         Some(until) => {
                             let delay = (until - now_f64()).max(0.0);
