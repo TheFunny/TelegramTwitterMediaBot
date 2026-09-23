@@ -189,7 +189,7 @@ fn media_from_file(
     path: std::path::PathBuf,
     caption: Option<&str>,
 ) -> Result<InputMedia, String> {
-    media_from(item, InputFile::file(path), caption, item.thumbnail_url())
+    media_from(item, InputFile::file(path), caption)
 }
 
 /// Builds the media group item from a (smaller) URL.
@@ -198,7 +198,7 @@ fn media_from_url(
     url: &str,
     caption: Option<&str>,
 ) -> Result<InputMedia, String> {
-    media_from(item, input_file_for(url)?, caption, item.thumbnail_url())
+    media_from(item, input_file_for(url)?, caption)
 }
 
 /// One item prepared for the upload fallback: the ready-to-send media plus

@@ -51,7 +51,6 @@ pub(super) fn media_from(
     item: &MediaItemPayload,
     file: InputFile,
     caption: Option<&str>,
-    thumbnail: Option<&str>,
 ) -> Result<InputMedia, String> {
     let media = match item {
         MediaItemPayload::Photo { has_spoiler, .. } => {
@@ -85,7 +84,10 @@ pub(super) fn media_from(
             InputMedia::Animation(media)
         }
     };
-    match (thumbnail, media) {
+    // The thumbnail comes off the item itself — every caller passed exactly
+    // that, and only a video uses it (Telegram takes it as a separate
+    // upload/URL).
+    match (item.thumbnail_url(), media) {
         (Some(thumb), InputMedia::Video(video)) => {
             Ok(InputMedia::Video(video.thumbnail(input_file_for(thumb)?)))
         }
@@ -104,7 +106,7 @@ pub(super) fn build_media_group(
         .enumerate()
         .map(|(i, item)| {
             let item_caption = if i == 0 { caption } else { None };
-            media_from(item, item.input_file()?, item_caption, item.thumbnail_url())
+            media_from(item, item.input_file()?, item_caption)
         })
         .collect()
 }
