@@ -464,6 +464,18 @@ pub async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
 /// Total attempts of the retried [`fetch`] (3: the initial try plus two).
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 
+/// How many fetches may run at once, process-wide. The URL workers already
+/// bound their own path (8 workers on a bounded channel), but inline queries,
+/// `/debug` and `/test` reach [`fetch`]/[`fetch_once`] straight from handler
+/// and debounce tasks with no limit at all — and the heavy part runs *inside*
+/// the fetch: a ugoira encode is a 512 MiB download plus ffmpeg, a bsky video
+/// an HLS remux, so N users meant N encodes. Every entry waits on this one
+/// gate instead; the count matches `URL_WORKERS` so the bot's own pipeline
+/// keeps its full width. A retry's backoff (1s, then 2s) holds its permit —
+/// deliberately simple: the wait is bounded by the same retries.
+static FETCH_SLOTS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(8));
+
 async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>, FetchError> {
     // Wall time of the whole fetch, retry backoff included: the ugoira encode
     // and the HLS remux live inside it, so this is where a slow fetch shows.
@@ -477,6 +489,9 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
             None => Ok(None),
         };
     };
+    // Unsupported and disabled links answer above without touching the gate;
+    // from here on every attempt counts against FETCH_SLOTS (see above).
+    let _permit = FETCH_SLOTS.acquire().await.expect("fetch gate closed");
     for attempt in 0..attempts.max(1) {
         match site.fetch_from_url(url).await {
             Ok(fetched) => {
