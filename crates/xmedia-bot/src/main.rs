@@ -231,12 +231,15 @@ async fn main() {
         // secret token included) — no explicit registration here.
         let listen = CONFIG.webhook_listen.expect("WEBHOOK_LISTEN is not set");
         let port = CONFIG.webhook_port.expect("WEBHOOK_PORT is not set");
-        let mut options = webhooks::Options::new((listen, port).into(), url);
+        // No secret, no webhook: without one the axum listener accepts any
+        // POST, and a forged update can impersonate anyone — admins included.
+        let secret = CONFIG
+            .webhook_secret_token
+            .clone()
+            .expect("WEBHOOK_SECRET_TOKEN is not set (required in webhook mode)");
+        let mut options = webhooks::Options::new((listen, port).into(), url).secret_token(secret);
         if let Some(cert) = &CONFIG.webhook_cert {
             options = options.certificate(InputFile::file(cert));
-        }
-        if let Some(secret) = &CONFIG.webhook_secret_token {
-            options = options.secret_token(secret.clone());
         }
 
         let mut listener = webhooks::axum(bot.clone(), options)
