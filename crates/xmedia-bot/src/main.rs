@@ -21,7 +21,7 @@ mod send;
 mod state;
 
 use ctx::CONTEXT;
-use handlers::{CHAT_STORE, CONFIG, LINK_CACHE, TASK_QUEUE};
+use handlers::{CONFIG, TASK_QUEUE};
 
 /// Docker `stop` / `compose down` delivers SIGTERM, which teloxide's ctrlc
 /// handler (SIGINT only) never sees — without this the process would die
@@ -203,15 +203,7 @@ async fn main() {
     {
         let bot = bot.clone();
         tokio::spawn(async move {
-            periodic_sweep(
-                &bot,
-                &CHAT_STORE,
-                &LINK_CACHE,
-                &TASK_QUEUE,
-                &CONFIG,
-                stop_rx,
-            )
-            .await;
+            periodic_sweep(crate::ctx::AppContext::from_statics(&bot), stop_rx).await;
         });
     }
 
@@ -301,24 +293,21 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// link cache, the idle rate-limit buckets and the idle inline-query entries,
 /// and reports the queue only when it is not empty.
 ///
-/// Takes its collaborators instead of reaching for the statics so a test can
-/// drive a tick with a paused clock: a sleeping task nothing drives is how the
-/// queue's own sweep kept a missing worker wake-up.
-async fn periodic_sweep(
-    sender: &dyn crate::media_sender::MediaSender,
-    chat_store: &crate::state::ChatStore,
-    link_cache: &crate::link_cache::LinkCache,
-    task_queue: &crate::queue::PersistentTaskQueue,
-    config: &crate::config::Config,
-    mut stop: watch::Receiver<bool>,
-) {
+/// Takes the shared [`crate::ctx::AppContext`] — the collaborators as one
+/// bundle, production assembling it from the statics and tests from tempdir
+/// stores — so a test can drive a tick with a paused clock: a sleeping task
+/// nothing drives is how the queue's own sweep kept a missing worker wake-up.
+async fn periodic_sweep(ctx: crate::ctx::AppContext<'_>, mut stop: watch::Receiver<bool>) {
     loop {
         tokio::select! {
             _ = stop.changed() => break,
             _ = tokio::time::sleep(SWEEP_INTERVAL) => {}
         }
-        let removed = chat_store.prune_expired(config.edit_message_ttl).await;
-        let pruned = link_cache.prune(config.link_cache_ttl).await;
+        let removed = ctx
+            .chat_store
+            .prune_expired(ctx.config.edit_message_ttl)
+            .await;
+        let pruned = ctx.link_cache.prune(ctx.config.link_cache_ttl).await;
         if pruned > 0 {
             log::info!("link cache: pruned {pruned} expired entr(ies)");
         }
@@ -336,7 +325,7 @@ async fn periodic_sweep(
         // Only speaks up when the queue is not empty: a healthy bot has nothing
         // to report, and a periodic "0 pending" line is noise that hides the
         // lines that matter.
-        if let Some((pending, oldest_run_after)) = task_queue.pending_backlog().await {
+        if let Some((pending, oldest_run_after)) = ctx.task_queue.pending_backlog().await {
             let overdue = crate::db::now_f64() - oldest_run_after;
             if overdue >= 0.0 {
                 log::info!("queue: {pending} pending task(s), oldest {overdue:.0}s overdue");
@@ -353,7 +342,8 @@ async fn periodic_sweep(
             // later about a prompt the user already walked away from. The edit
             // drops the buttons too. If the prompt was already deleted this
             // fails with a 400 "message to edit not found" — log and ignore.
-            if let Err(e) = sender
+            if let Err(e) = ctx
+                .sender
                 .edit_message_text(
                     ChatId(chat_id),
                     MessageId(prompt_message_id as i32),
@@ -460,14 +450,7 @@ mod tests {
             .await;
 
         let (stop_tx, stop_rx) = watch::channel(false);
-        let sweep = periodic_sweep(
-            &sender,
-            stores.chat_store(),
-            stores.link_cache(),
-            stores.task_queue(),
-            &config,
-            stop_rx,
-        );
+        let sweep = periodic_sweep(stores.ctx(&sender), stop_rx);
         tokio::pin!(sweep);
 
         // One second short of the interval: nothing has been touched. The
