@@ -224,12 +224,23 @@ impl PixivAPI {
         // Stream the frame zip to a temp file instead of buffering it in
         // memory: ugoira zips can be hundreds of MB, and the old
         // download_media_limited path spiked RAM up to the size cap.
-        let mut zip_file = tempfile::Builder::new()
+        let zip_file = tempfile::Builder::new()
             .prefix(crate::TEMP_FILE_PREFIX)
             .suffix(".zip")
             .tempfile()
             .map_err(|e| PixivError::Api(format!("temp zip failed: {e}")))?;
-        crate::site::download_media_to_file(&zip_url, 512 * 1024 * 1024, zip_file.as_file_mut())
+        // Stream through a tokio handle: a sync write per chunk would stall
+        // an executor thread for the whole (up to 512 MiB) download. The
+        // clone shares the file offset with `zip_file`, so the extraction
+        // below reads what was written, and dropping it after the download
+        // hands every byte to the OS.
+        let mut zip_out = tokio::fs::File::from_std(
+            zip_file
+                .as_file()
+                .try_clone()
+                .map_err(|e| PixivError::Api(format!("temp zip clone failed: {e}")))?,
+        );
+        crate::site::download_media_to_file(&zip_url, 512 * 1024 * 1024, &mut zip_out)
             .await
             .map_err(|e| match e {
                 FetchError::Http(e) => PixivError::Http(e),
@@ -243,6 +254,7 @@ impl PixivAPI {
                 }
                 other => PixivError::Api(format!("frame zip download failed: {other}")),
             })?;
+        drop(zip_out);
         let frame_delays = metadata.frames.iter().map(|f| f.delay).collect::<Vec<_>>();
         let result =
             tokio::task::spawn_blocking(move || -> Result<(String, tempfile::TempDir), String> {

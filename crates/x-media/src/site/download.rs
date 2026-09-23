@@ -29,11 +29,8 @@ const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 /// The error a download reports when it spends its whole budget without
 /// finishing. Retryable: the transfer may simply have been unlucky, and a retry
 /// of the post restarts the download.
-fn download_too_slow() -> FetchError {
-    FetchError::Transient(format!(
-        "download exceeded {}s",
-        DOWNLOAD_TOTAL_TIMEOUT.as_secs()
-    ))
+fn download_too_slow(total: Duration) -> FetchError {
+    FetchError::Transient(format!("download exceeded {}s", total.as_secs()))
 }
 
 /// Builds a client with the shared configuration (browser User-Agent, the
@@ -247,7 +244,7 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
     let started = std::time::Instant::now();
     while let Some(chunk) = next_chunk(&mut response).await? {
         if started.elapsed() > DOWNLOAD_TOTAL_TIMEOUT {
-            return Err(download_too_slow());
+            return Err(download_too_slow(DOWNLOAD_TOTAL_TIMEOUT));
         }
         buf.extend_from_slice(&chunk);
         if buf.len() as u64 > max_bytes {
@@ -261,14 +258,15 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
 /// moment the body crosses `max_bytes` (or when a declared Content-Length
 /// already exceeds it). Unlike [`download_media_limited`] the body is never
 /// buffered in memory — used for large files (e.g. the pixiv ugoira frame
-/// zip, which can be hundreds of MB) that would otherwise spike RAM.
-/// Returns the number of bytes written.
+/// zip, which can be hundreds of MB) that would otherwise spike RAM. Writes
+/// go through the tokio handle so a sync write never stalls an executor
+/// thread for the length of the download. Returns the number of bytes written.
 pub async fn download_media_to_file(
     url: &str,
     max_bytes: u64,
-    out: &mut std::fs::File,
+    out: &mut tokio::fs::File,
 ) -> Result<u64, FetchError> {
-    use std::io::Write;
+    use tokio::io::AsyncWriteExt;
     let response = send_download(media_request(url)?).await?;
     if let Some(len) = response.content_length()
         && len > max_bytes
@@ -280,13 +278,13 @@ pub async fn download_media_to_file(
     let started = std::time::Instant::now();
     while let Some(chunk) = next_chunk(&mut response).await? {
         if started.elapsed() > DOWNLOAD_TOTAL_TIMEOUT {
-            return Err(download_too_slow());
+            return Err(download_too_slow(DOWNLOAD_TOTAL_TIMEOUT));
         }
         total += chunk.len() as u64;
         if total > max_bytes {
             return Err(FetchError::TooLarge);
         }
-        out.write_all(&chunk).map_err(FetchError::Io)?;
+        out.write_all(&chunk).await.map_err(FetchError::Io)?;
     }
     Ok(total)
 }
