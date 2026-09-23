@@ -51,7 +51,8 @@ pub fn cache_key(url: &str) -> Option<String> {
 
 /// Fetches a note from misskey.io by id. The API answers client failures
 /// with HTTP 400 + `{"error":{"code":...}}` (NO_SUCH_NOTE → NotFound);
-/// everything else non-success is transient and retried by [`crate::site::fetch`].
+/// every other non-success status falls through to the shared classes in
+/// [`crate::site::status_error`] — persistent 4xx permanent, 429/5xx retried.
 pub async fn fetch(note_id: &str) -> Result<model::Note, FetchError> {
     let response = crate::site::CLIENT
         .post(API_URL)
@@ -62,9 +63,10 @@ pub async fn fetch(note_id: &str) -> Result<model::Note, FetchError> {
     if !status.is_success() {
         return Err(match status.as_u16() {
             400 => not_found_or_invalid(response).await,
-            // A refusal or an auth demand is not a bad moment.
-            401 | 403 => FetchError::Blocked,
-            _ => FetchError::Transient(format!("misskey status {status}")),
+            // The local fallback used to disagree with the center: a misskey
+            // 404 came back Transient here and was fetched three more times
+            // for a note that is simply gone.
+            _ => crate::site::status_error("misskey", status),
         });
     }
     response.json().await.map_err(|e| FetchError::Site {

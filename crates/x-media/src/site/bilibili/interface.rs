@@ -213,10 +213,11 @@ pub async fn fetch(dynamic_id: &str) -> Result<model::Item, FetchError> {
     if !status.is_success() {
         return Err(match status.as_u16() {
             412 => risk_control("412"),
-            // A refusal or an auth demand is not a bad moment (412 above is
-            // bilibili's risk control, which does clear on its own).
-            401 | 403 => FetchError::Blocked,
-            _ => FetchError::Transient(format!("bilibili status {status}")),
+            // Everything else shares the central classes (refusals and gone
+            // posts permanent, 429/5xx retried). The local fallback used to
+            // disagree: a bilibili 404 came back Transient here. 412 above is
+            // bilibili's risk control, which does clear on its own.
+            _ => crate::site::status_error("bilibili", status),
         });
     }
     let detail: model::Detail = response.json().await.map_err(|e| FetchError::Site {

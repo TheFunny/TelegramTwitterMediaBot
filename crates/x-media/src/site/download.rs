@@ -105,7 +105,11 @@ fn download_stalled() -> FetchError {
 }
 
 /// Sends a media-download request: the response head must arrive within the
-/// idle window, and a non-2xx status is classified by [`download_status_error`].
+/// idle window, and a non-2xx status is classified by
+/// [`super::status_error`] with `"media"` as the name — the same table the
+/// site adapters use, so a dead URL and a bad moment read the same everywhere.
+/// A transport error never reaches that table — it fails in `send()` and
+/// stays [`FetchError::Http`].
 async fn send_download(request: reqwest::RequestBuilder) -> Result<reqwest::Response, FetchError> {
     let response = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, request.send()).await {
         Ok(Ok(response)) => response,
@@ -115,7 +119,7 @@ async fn send_download(request: reqwest::RequestBuilder) -> Result<reqwest::Resp
     if response.status().is_success() {
         Ok(response)
     } else {
-        Err(download_status_error(response.status()))
+        Err(super::status_error("media", response.status()))
     }
 }
 
@@ -219,19 +223,6 @@ fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwe
         }
     }
     request
-}
-
-/// Maps a media download's HTTP status onto the same classes the site
-/// adapters use, so callers can tell "try again" from "this URL is dead":
-/// 4xx is a property of the media (gone, refused by the host), while 429/5xx
-/// is a property of the moment. A transport error never reaches this — it
-/// fails in `send()` and stays [`FetchError::Http`].
-fn download_status_error(status: reqwest::StatusCode) -> FetchError {
-    match status.as_u16() {
-        401 | 403 => FetchError::Blocked,
-        404 | 410 => FetchError::NotFound,
-        _ => FetchError::Transient(format!("media status {status}")),
-    }
 }
 
 /// Downloads a media file with a hard size cap: the body is streamed and the

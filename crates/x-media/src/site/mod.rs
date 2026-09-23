@@ -296,17 +296,18 @@ pub enum FetchError {
     Io(std::io::Error),
 }
 
-/// The error class for a non-success HTTP status, as the site adapters that
-/// share this mapping classify it: 404/410 mean the post is gone and 401/403 a
-/// refusal or an auth demand — both permanent, since retrying cannot change
-/// either — while everything else (429, 5xx) is transient and retried by
-/// [`fetch`]. `site` only names the adapter in the transient message; a site
-/// whose statuses mean something else (bilibili's 412 risk control, misskey's
-/// 400 with `NO_SUCH_NOTE`) maps those before falling back here.
+/// The error class for a non-success HTTP status, shared by the site
+/// adapters, the media downloads and twitter's auth fallback: 404/410 mean
+/// the post is gone (permanent), any other client error the source answers
+/// on sight is a refusal (permanent too — three retries only delay the same
+/// answer), and only 408/429/5xx are a bad moment, retried by [`fetch`].
+/// `site` only names the adapter in the message (`"media"` for downloads);
+/// a site whose statuses mean something else (bilibili's 412 risk control,
+/// misskey's 400 with `NO_SUCH_NOTE`) maps those before falling back here.
 pub fn status_error(site: &'static str, status: reqwest::StatusCode) -> FetchError {
     match status.as_u16() {
         404 | 410 => FetchError::NotFound,
-        401 | 403 => FetchError::Blocked,
+        code if status.is_client_error() && !matches!(code, 408 | 429) => FetchError::Blocked,
         _ => FetchError::Transient(format!("{site} status {status}")),
     }
 }
@@ -731,6 +732,44 @@ mod tests {
         ] {
             assert!(!needs_media_headers(url), "{url}");
         }
+    }
+
+    #[test]
+    fn persistent_client_statuses_are_permanent() {
+        use reqwest::StatusCode;
+        // The one table every caller shares now: only 408, 429 and 5xx can
+        // answer differently on a retry. A 400 used to be Transient here and
+        // in two local fallbacks — twitter syndication's broken-token 400, for
+        // one, burned three retries per link before saying the same thing.
+        assert!(matches!(
+            status_error("x", StatusCode::NOT_FOUND),
+            FetchError::NotFound
+        ));
+        assert!(matches!(
+            status_error("x", StatusCode::BAD_REQUEST),
+            FetchError::Blocked
+        ));
+        assert!(matches!(
+            status_error("x", StatusCode::PAYLOAD_TOO_LARGE),
+            FetchError::Blocked
+        ));
+        assert!(matches!(
+            status_error("x", StatusCode::REQUEST_TIMEOUT),
+            FetchError::Transient(_)
+        ));
+        assert!(matches!(
+            status_error("x", StatusCode::TOO_MANY_REQUESTS),
+            FetchError::Transient(_)
+        ));
+        assert!(matches!(
+            status_error("x", StatusCode::INTERNAL_SERVER_ERROR),
+            FetchError::Transient(_)
+        ));
+        // The download path delegates under its own name, same classes.
+        assert!(matches!(
+            status_error("media", StatusCode::BAD_REQUEST),
+            FetchError::Blocked
+        ));
     }
 
     #[tokio::test]
