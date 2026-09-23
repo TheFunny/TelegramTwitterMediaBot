@@ -219,7 +219,11 @@ async fn answer_inline_query(
                     .unwrap_or(url);
                 results.push(url_result(
                     i.to_string(),
-                    inline_kind(media),
+                    match media {
+                        Media::Illustration { .. } => CachedMediaKind::Photo,
+                        Media::Video { .. } => CachedMediaKind::Video,
+                        Media::Animated { .. } => CachedMediaKind::Animation,
+                    },
                     url,
                     thumbnail,
                     fetched.title.clone(),
@@ -252,26 +256,10 @@ fn inline_caption(cached: &CachedPost, quote_chars: usize) -> String {
     .into_owned()
 }
 
-/// Which inline result kind a payload maps to.
-fn inline_kind(media: &Media) -> InlineKind {
-    match media {
-        Media::Illustration { .. } => InlineKind::Photo,
-        Media::Video { .. } => InlineKind::Video,
-        Media::Animated { .. } => InlineKind::Gif,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum InlineKind {
-    Photo,
-    Video,
-    Gif,
-}
-
 /// One inline result pointing Telegram at a URL it fetches itself.
 fn url_result(
     id: String,
-    kind: InlineKind,
+    kind: CachedMediaKind,
     url: url::Url,
     thumbnail: url::Url,
     title: String,
@@ -279,12 +267,12 @@ fn url_result(
 ) -> InlineQueryResult {
     let parse_mode = ParseMode::Html;
     match kind {
-        InlineKind::Photo => InlineQueryResult::Photo(
+        CachedMediaKind::Photo => InlineQueryResult::Photo(
             InlineQueryResultPhoto::new(id, url, thumbnail)
                 .caption(caption)
                 .parse_mode(parse_mode),
         ),
-        InlineKind::Video => InlineQueryResult::Video(
+        CachedMediaKind::Video => InlineQueryResult::Video(
             InlineQueryResultVideo::new(
                 id,
                 url,
@@ -295,7 +283,7 @@ fn url_result(
             .caption(caption)
             .parse_mode(parse_mode),
         ),
-        InlineKind::Gif => InlineQueryResult::Mpeg4Gif(
+        CachedMediaKind::Animation => InlineQueryResult::Mpeg4Gif(
             InlineQueryResultMpeg4Gif::new(id, url, thumbnail)
                 .caption(caption)
                 .parse_mode(parse_mode),
@@ -360,20 +348,16 @@ fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryR
                 return None;
             }
             let url = url::Url::parse(&media.url).ok()?;
-            // A photo or gif is an image, so its own URL serves as the
-            // thumbnail; a video needs a real poster, and a degraded entry has
-            // none — Telegram would try to render the video as an image.
-            let kind = match media.kind {
-                CachedMediaKind::Photo => InlineKind::Photo,
-                CachedMediaKind::Video => {
-                    log::debug!("inline: skipping a cached video with no thumbnail {i}");
-                    return None;
-                }
-                CachedMediaKind::Animation => InlineKind::Gif,
-            };
+            // A degraded entry has no poster, and Telegram would try to render
+            // a video URL as its own thumbnail — skip it. A photo or gif is an
+            // image, so its own URL serves as the thumbnail.
+            if matches!(media.kind, CachedMediaKind::Video) {
+                log::debug!("inline: skipping a cached video with no thumbnail {i}");
+                return None;
+            }
             Some(url_result(
                 id,
-                kind,
+                media.kind,
                 url.clone(),
                 url,
                 cached.title.clone(),
