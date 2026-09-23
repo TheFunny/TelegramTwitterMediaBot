@@ -64,7 +64,7 @@ services:
       WEBHOOK_URL: '${WEBHOOK_URL:-}'
       WEBHOOK_SECRET_TOKEN: '${WEBHOOK_SECRET_TOKEN:-}'
       # Defaults, listed so they are discoverable; override in .env when needed.
-      LOCAL_USER_ID: '${LOCAL_USER_ID:-1000}'
+      LOCAL_USER_ID: '${LOCAL_USER_ID:-9001}'
       RUST_LOG: '${RUST_LOG:-info}'
       EDIT_MESSAGE_TTL_SECONDS: '${EDIT_MESSAGE_TTL_SECONDS:-86400}'
       LINK_CACHE_TTL_SECONDS: '${LINK_CACHE_TTL_SECONDS:-604800}'
@@ -88,11 +88,12 @@ services:
       - nginx-proxy
     container_name: tgxmb
     logging: *default-logging
-    # Webhook mode only (in polling mode there is no listener, so drop this
-    # block or set WEBHOOK=true): the bot listens on WEBHOOK_PORT; nginx-proxy
-    # shows 502s while this is down, so surface it to the orchestrator.
+    # Probes the listener only when WEBHOOK=true (compose interpolates the
+    # value from .env); a polling deployment has no listener and must not be
+    # reported unhealthy. nginx-proxy shows 502s while webhook mode is down,
+    # so surface that to the orchestrator.
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/${WEBHOOK_PORT:-8443}'"]
+      test: ["CMD-SHELL", "test '${WEBHOOK:-true}' != true || exec 3<>/dev/tcp/127.0.0.1/${WEBHOOK_PORT:-8443}"]
       interval: 30s
       timeout: 5s
       retries: 3
