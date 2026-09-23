@@ -809,11 +809,17 @@ fn debug_report(
     lines.push(format!("sensitive: {sensitive}"));
     // The caption is wrapped in a <blockquote> so the report (an HTML
     // message) shows it exactly as it will render in the sent media caption
-    // — escaped text and links included.
-    lines.push(format!(
-        "caption: <blockquote>{}</blockquote>",
-        x_media::site::truncate_caption(caption)
-    ));
+    // — escaped text and links included. A long post's caption already
+    // carries quote_long_caption's expandable blockquote and the API rejects
+    // nested ones (the same rule quote_long_caption applies), so that caption
+    // is shown unwrapped instead of failing to send.
+    let caption = x_media::site::truncate_caption(caption);
+    let caption = if caption.contains("<blockquote") {
+        caption
+    } else {
+        format!("<blockquote>{caption}</blockquote>")
+    };
+    lines.push(format!("caption: {caption}"));
     lines.push(format!("media ({}):", media.len()));
     for (i, item) in media.iter().enumerate() {
         let kind = match item {
@@ -1088,6 +1094,34 @@ mod tests {
                 "caption: <blockquote><a href=\"https://x.com/u\">A &amp; B</a>: C &lt;D&gt; &amp; E</blockquote>"
             ),
             "{report}"
+        );
+    }
+
+    #[test]
+    fn debug_report_does_not_nest_a_quoted_caption() {
+        // A long post's preview_caption already carries quote_long_caption's
+        // <blockquote expandable>; wrapping it again produced nested
+        // blockquotes, which the API rejects — /debug on any long post 400'd.
+        let quoted = "intro <blockquote expandable>long text</blockquote>";
+        let report = debug_report(
+            "https://x.com/u/status/1",
+            "twitter",
+            "https://x.com/u/status/1",
+            "t",
+            "c",
+            None,
+            false,
+            quoted,
+            &[],
+        );
+        assert!(
+            report.contains(&format!("caption: {quoted}")),
+            "the quoted caption must be shown as-is: {report}"
+        );
+        assert_eq!(
+            report.matches("<blockquote").count(),
+            1,
+            "no outer wrapper may be added: {report}"
         );
     }
 
