@@ -354,16 +354,23 @@ impl PixivAPI {
     }
 }
 
-/// pixiv3-rs replacement: `None` when `PIXIV_REFRESH_TOKEN` is unset.
-static PIXIV_CLIENT: LazyLock<Option<PixivAPI>> =
-    LazyLock::new(|| env::var("PIXIV_REFRESH_TOKEN").ok().map(PixivAPI::new));
+/// pixiv3-rs replacement: `None` when `PIXIV_REFRESH_TOKEN` is unset or empty
+/// (compose injects an empty string for a blank `.env` value; an empty token
+/// must mean "not configured" instead of being sent to OAuth).
+static PIXIV_CLIENT: LazyLock<Option<PixivAPI>> = LazyLock::new(|| {
+    env::var("PIXIV_REFRESH_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(PixivAPI::new)
+});
 
 /// Set at startup when the login validation fails; pixiv stays disabled until
 /// the next process start.
 static DISABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled() -> bool {
-    !DISABLED.load(Ordering::Relaxed) && env::var("PIXIV_REFRESH_TOKEN").is_ok()
+    !DISABLED.load(Ordering::Relaxed)
+        && env::var("PIXIV_REFRESH_TOKEN").is_ok_and(|token| !token.is_empty())
 }
 
 /// Permanently disables pixiv until the next process start.
@@ -396,6 +403,29 @@ pub async fn fetch(illust_id: u64) -> Result<Illustration, FetchError> {
 mod tests {
     use super::*;
     use dotenv::dotenv;
+
+    /// An empty `PIXIV_REFRESH_TOKEN` (what compose injects for a blank
+    /// `.env` value, and what an unset GitHub secret looks like) must read as
+    /// "not configured", exactly like unset — otherwise a default deployment
+    /// sends an empty refresh token to OAuth and fails login validation on
+    /// every boot.
+    #[test]
+    fn empty_refresh_token_reads_as_unset() {
+        // SAFETY: the value is restored before returning; `enabled()` keys on
+        // this variable alone and no other test mutates it. Concurrent readers
+        // see unset or empty, which this very fix makes the same answer.
+        let previous = env::var("PIXIV_REFRESH_TOKEN").ok();
+        unsafe { env::set_var("PIXIV_REFRESH_TOKEN", "") };
+        let empty = enabled();
+        unsafe { env::remove_var("PIXIV_REFRESH_TOKEN") };
+        let unset = enabled();
+        match previous {
+            Some(value) => unsafe { env::set_var("PIXIV_REFRESH_TOKEN", value) },
+            None => unsafe { env::remove_var("PIXIV_REFRESH_TOKEN") },
+        }
+        assert!(!empty, "an empty token must not enable pixiv");
+        assert_eq!(empty, unset, "empty must read exactly like unset");
+    }
 
     #[tokio::test]
     #[ignore = "live network: requires outbound HTTPS to oauth.secure.pixiv.net"]
