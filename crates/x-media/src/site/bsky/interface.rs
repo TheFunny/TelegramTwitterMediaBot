@@ -131,10 +131,10 @@ fn concat_list(files: &mut [(usize, std::path::PathBuf)]) -> String {
 /// the end of a 500-segment video meant downloading the entire thing twice
 /// more, so the second attempt belongs on the request that actually failed.
 async fn fetch_hls(url: &str, cap: u64) -> Result<bytes::Bytes, String> {
-    match crate::site::download_media_limited(url, cap).await {
+    match crate::site::download_media_limited(url, cap, crate::site::DOWNLOAD_TOTAL_TIMEOUT).await {
         Err(FetchError::Http(_) | FetchError::Transient(_)) => {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            crate::site::download_media_limited(url, cap)
+            crate::site::download_media_limited(url, cap, crate::site::DOWNLOAD_TOTAL_TIMEOUT)
                 .await
                 .map_err(|e| e.to_string())
         }

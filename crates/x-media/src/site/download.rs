@@ -16,15 +16,18 @@ use std::time::Duration;
 /// [`DOWNLOAD_TOTAL_TIMEOUT`].
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Absolute ceiling for one media download, on top of the idle window. A server
-/// that drips a byte every 29 s keeps [`next_chunk`] satisfied indefinitely, and
-/// on the bot's side each such download holds one of the process-wide upload-prep
-/// slots (`send::upload`'s `PREP_SLOTS`) for as long as it lasts. Generous on
-/// purpose: the legitimate cases are big — an ugoira frame zip runs to hundreds
-/// of MB and an HLS remux pulls a whole video — and a slow link is not an error.
-/// Checked between chunks, so a transfer that completes just over the budget is
-/// kept rather than thrown away.
-const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+/// Absolute ceiling for one media download, on top of the idle window: a
+/// server that drips a byte every 29 s keeps [`next_chunk`] satisfied
+/// indefinitely, and a transfer that trickles forever holds whatever the
+/// caller pinned to it — a fetch permit for an in-flight post, a prep slot
+/// for the bot's upload fallback. Generous on purpose: the legitimate cases
+/// are big — an ugoira frame zip runs to hundreds of MB and an HLS remux
+/// pulls a whole video — so this is the budget for downloads *inside a
+/// fetch*, while the slot-holding fallback passes its own shorter one (see
+/// [`download_media_limited`]'s `total`). Checked between chunks, so a
+/// transfer that completes just over the budget is kept rather than thrown
+/// away.
+pub(crate) const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The error a download reports when it spends its whole budget without
 /// finishing. Retryable: the transfer may simply have been unlucky, and a retry
@@ -89,8 +92,8 @@ pub(crate) static CLIENT: LazyLock<reqwest::Client> =
 /// impossible to deliver at all (the size cap said 512 MiB, the clock said 30s).
 /// What a stalled connection cannot do is hang a worker: the head and every
 /// chunk are bounded by [`DOWNLOAD_IDLE_TIMEOUT`] (see [`next_chunk`]), and a
-/// transfer that keeps trickling but never finishes is bounded by
-/// [`DOWNLOAD_TOTAL_TIMEOUT`].
+/// transfer that keeps trickling but never finishes is bounded by the
+/// caller's total budget (see [`download_media_limited`]).
 static MEDIA_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| build_client(None));
 
 /// The error a download reports when it stops making progress.
@@ -232,7 +235,16 @@ fn apply_media_headers(mut request: reqwest::RequestBuilder, url: &str) -> reqwe
 /// cannot fetch a media URL itself (hotlink protection), the bot downloads
 /// the file and uploads it via multipart. Site-appropriate headers come from
 /// each site's `media_headers` (pixiv image hosts need `Referer`).
-pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::Bytes, FetchError> {
+///
+/// `total` is this caller's whole-transfer budget. The bot's upload fallback
+/// holds a prep slot (and its memory reservation) while this runs, so it
+/// passes a shorter one of its own; bsky's in-fetch segments take the
+/// generous [`super::DOWNLOAD_TOTAL_TIMEOUT`].
+pub async fn download_media_limited(
+    url: &str,
+    max_bytes: u64,
+    total: Duration,
+) -> Result<bytes::Bytes, FetchError> {
     let response = send_download(media_request(url)?).await?;
     if let Some(len) = response.content_length()
         && len > max_bytes
@@ -243,8 +255,8 @@ pub async fn download_media_limited(url: &str, max_bytes: u64) -> Result<bytes::
     let mut buf = Vec::new();
     let started = std::time::Instant::now();
     while let Some(chunk) = next_chunk(&mut response).await? {
-        if started.elapsed() > DOWNLOAD_TOTAL_TIMEOUT {
-            return Err(download_too_slow(DOWNLOAD_TOTAL_TIMEOUT));
+        if started.elapsed() > total {
+            return Err(download_too_slow(total));
         }
         buf.extend_from_slice(&chunk);
         if buf.len() as u64 > max_bytes {
@@ -358,7 +370,10 @@ mod tests {
     #[ignore = "live network: requires outbound HTTPS to httpbin.org"]
     async fn live_redirect_into_the_hosts_network_is_refused() {
         let url = "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/";
-        match download_media_limited(url, u64::MAX).await.unwrap_err() {
+        match download_media_limited(url, u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
+            .await
+            .unwrap_err()
+        {
             // A policy refusal reaches the caller wrapped by reqwest.
             FetchError::Http(e) => assert!(e.is_redirect(), "got {e}"),
             FetchError::Blocked => {}
@@ -375,13 +390,15 @@ mod tests {
             "http://169.254.169.254/latest/meta-data/",
             "http://127.0.0.1:9/secret",
         ] {
-            let err = download_media_limited(url, u64::MAX).await.unwrap_err();
+            let err = download_media_limited(url, u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
+                .await
+                .unwrap_err();
             assert!(matches!(err, FetchError::Blocked), "{url}: got {err:?}");
         }
         // A malformed URL is refused the same way instead of becoming a
         // retryable transport error.
         assert!(matches!(
-            download_media_limited("not a url", u64::MAX)
+            download_media_limited("not a url", u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
                 .await
                 .unwrap_err(),
             FetchError::Blocked
@@ -409,7 +426,9 @@ mod tests {
             other => panic!("expected illustration media, got {other:?}"),
         };
         assert!(url.contains("i.pximg.net"));
-        let bytes = download_media_limited(&url, u64::MAX).await.unwrap();
+        let bytes = download_media_limited(&url, u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
+            .await
+            .unwrap();
         assert!(!bytes.is_empty());
     }
 }

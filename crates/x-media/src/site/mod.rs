@@ -22,7 +22,7 @@ pub mod twitter;
 
 pub use pixiv::PixivError;
 
-pub(crate) use download::CLIENT;
+pub(crate) use download::{CLIENT, DOWNLOAD_TOTAL_TIMEOUT};
 pub use download::{download_media_limited, download_media_to_file};
 
 /// The result of fetching a post: canonical URL, HTML caption, the post's

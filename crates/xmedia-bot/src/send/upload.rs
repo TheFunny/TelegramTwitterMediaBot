@@ -34,6 +34,17 @@ static PREP_SLOTS: LazyLock<tokio::sync::Semaphore> =
 /// post was lost.
 pub(super) const MAX_MEDIA_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Whole-transfer budget for one fallback download. The prep slot (and the
+/// non-photo memory reservation) is held while this runs, and the idle window
+/// alone lets a server drip one byte every 29 s forever — so this path caps
+/// its own transfers well below the in-fetch default: 50 MiB in 300 s needs
+/// about 1.4 Mbit/s, and a much slower link is better served by the retry
+/// path toward the item's smaller fallback URL than by pinning a slot for
+/// ten minutes.
+/// ponytail: if slow-link reports show up, move the download out of the prep
+/// slot (slot = decode/upload only) instead of raising this again.
+const FALLBACK_DOWNLOAD_TOTAL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Infers a file extension from magic bytes so Telegram detects the mime type
 /// on multipart uploads.
 pub(super) fn sniff_ext(bytes: &[u8]) -> &'static str {
@@ -111,7 +122,13 @@ async fn download_to_temp(
     } else {
         Some(photo::reserve_memory(MAX_MEDIA_UPLOAD_BYTES).await)
     };
-    let bytes = match x_media::site::download_media_limited(media_url, limit).await {
+    let bytes = match x_media::site::download_media_limited(
+        media_url,
+        limit,
+        FALLBACK_DOWNLOAD_TOTAL,
+    )
+    .await
+    {
         Ok(bytes) => bytes,
         Err(e) => return Err(classify_download_error(e)),
     };
