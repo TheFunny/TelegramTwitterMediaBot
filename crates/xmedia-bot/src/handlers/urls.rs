@@ -554,8 +554,10 @@ async fn url_media_inner(
         log::debug!("link cache hit for {key}");
         let chat_data = ctx.chat_store.get(chat_id).await;
         // Cache keys are prefixed with the site id ("twitter:…"), matching
-        // the value a fresh fetch would read from Fetched::site_id.
-        let site = x_media::site::site_id_from_key(&key);
+        // the value a fresh fetch would read from Fetched::site_id. The key
+        // came out of cache_key, so its prefix is a registered id by
+        // construction — splitting it off is the whole lookup.
+        let site = key.split(':').next().unwrap_or("");
         let format = chat_data.format_for(site);
         // One call for both: `caption_from_fields` returns the truncated
         // built-in caption itself when the chat has no format for this site.

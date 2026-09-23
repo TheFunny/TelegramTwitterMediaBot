@@ -231,19 +231,6 @@ pub fn cache_key(url: &str) -> Option<String> {
     SITES.iter().find_map(|site| site.cache_key(url))
 }
 
-/// The site id carried by a cache key (`"twitter:123"` → `"twitter"`).
-/// Unknown prefixes fall back to `"unknown"`. The bot uses this on the
-/// link-cache hit path, where no [`Fetched`] is available — the same value
-/// a fresh fetch would read from [`Fetched::site_id`].
-pub fn site_id_from_key(key: &str) -> &'static str {
-    let prefix = key.split(':').next().unwrap_or("");
-    SITES
-        .iter()
-        .map(|site| site.id())
-        .find(|id| *id == prefix)
-        .unwrap_or("unknown")
-}
-
 #[derive(Debug, Error)]
 pub enum FetchError {
     #[error("http error: {0}")]
@@ -589,16 +576,6 @@ mod tests {
             Some("bilibili:1245284537985925159".into())
         );
         assert_eq!(cache_key("https://example.com/not-a-post"), None);
-    }
-
-    #[test]
-    fn site_id_from_key_parses_prefix() {
-        assert_eq!(site_id_from_key("twitter:123"), "twitter");
-        assert_eq!(site_id_from_key("pixiv:123"), "pixiv");
-        assert_eq!(site_id_from_key("bsky:handle.example/3lorem"), "bsky");
-        assert_eq!(site_id_from_key("bilibili:123"), "bilibili");
-        assert_eq!(site_id_from_key("unknown:1"), "unknown");
-        assert_eq!(site_id_from_key("no-colon"), "unknown");
     }
 
     #[test]
