@@ -4,7 +4,7 @@
 
 Telegram bot (teloxide) that turns post links from X/Twitter, Pixiv, Bluesky, Misskey (misskey.io), and Bilibili dynamics into media messages (images, video, GIF) with the post's title, author, and tags. It supports batch media splitting, retry with persistence, inline queries, forward-channel rebinding with caption templates, and Pixiv ugoira→MP4 transcoding. README is in Chinese; user-facing bot strings are in English. The project is a Rust port of a Python predecessor (see `queue.rs` comments referencing `utils/task_queue.py`).
 
-Two-crate Cargo workspace (both v1.9.1, edition 2024, resolver 3):
+Two-crate Cargo workspace (both v1.9.2, edition 2024, resolver 3):
 
 - **`crates/x-media`** — library that fetches and normalizes media from the four sites. Pure, no Telegram knowledge.
 - **`crates/xmedia-bot`** — the bot binary: teloxide dispatcher, SQLite-backed chat state, persistent task queue.
