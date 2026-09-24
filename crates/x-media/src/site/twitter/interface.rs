@@ -89,7 +89,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     if !status.is_success() {
         return Err(crate::site::status_error("twitter", &response));
     }
-    let text = response.text().await?;
+    let text = crate::site::response_text(response, "twitter").await?;
     // Classify before building the tweet (see [`parse_syndication_body`]), and
     // build it from the value that classification already parsed: this used to
     // scan and allocate the whole body twice.

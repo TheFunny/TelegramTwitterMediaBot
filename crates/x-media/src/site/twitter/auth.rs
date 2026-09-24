@@ -132,7 +132,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
         log::warn!("twitter auth fetch {id}: HTTP {status}");
         return Err(crate::site::status_error("twitter auth", &response));
     }
-    let text = response.text().await?;
+    let text = crate::site::response_text(response, "twitter auth").await?;
     let json: Value = serde_json::from_str(&text)?;
     let result = parse_tweet_result(&json, id)?;
     let syndication_shape = to_syndication_shape(&result).ok_or_else(|| {

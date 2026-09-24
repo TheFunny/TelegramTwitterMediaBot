@@ -224,6 +224,36 @@ pub fn caption_from_fields(
     )
 }
 
+/// Maximum decoded JSON response accepted from a site API. Metadata is
+/// expected to be much smaller; this keeps a compromised or malformed API
+/// from growing an unbounded `String` before serde gets a chance to reject it.
+pub(crate) const MAX_SITE_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+/// Reads a successful site response as a bounded UTF-8 JSON value.
+pub(crate) async fn response_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    site: &'static str,
+) -> Result<T, FetchError> {
+    let body = crate::site::download::send_json_response(response, site).await?;
+    serde_json::from_slice(&body).map_err(|e| FetchError::Site {
+        site,
+        error: Box::new(e),
+    })
+}
+
+/// Same bounded response reader for endpoints that need a text body before
+/// classification or parsing.
+pub(crate) async fn response_text(
+    response: reqwest::Response,
+    site: &'static str,
+) -> Result<String, FetchError> {
+    let body = crate::site::download::send_json_response(response, site).await?;
+    String::from_utf8(body.to_vec()).map_err(|e| FetchError::Site {
+        site,
+        error: Box::new(e),
+    })
+}
+
 /// Stable per-post cache key derived from any supported URL, so variant
 /// domains (x.com / twitter.com / fxtwitter.com, mobile, `/photo/N`
 /// suffixes) map to the same post. Delegates to each registered site's

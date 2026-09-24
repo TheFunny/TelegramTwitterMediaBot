@@ -69,16 +69,13 @@ pub async fn fetch(note_id: &str) -> Result<model::Note, FetchError> {
             _ => crate::site::status_error("misskey", &response),
         });
     }
-    response.json().await.map_err(|e| FetchError::Site {
-        site: "misskey",
-        error: Box::new(e),
-    })
+    crate::site::response_json(response, "misskey").await
 }
 
 /// Maps a 400 response: NO_SUCH_NOTE is permanent NotFound, any other 400 is
 /// a site error (permanent — retrying a rejected request cannot succeed).
 async fn not_found_or_invalid(response: reqwest::Response) -> FetchError {
-    match response.json::<serde_json::Value>().await {
+    match crate::site::response_json::<serde_json::Value>(response, "misskey").await {
         Ok(v) if v["error"]["code"] == "NO_SUCH_NOTE" => FetchError::NotFound,
         _ => FetchError::Site {
             site: "misskey",

@@ -329,7 +329,7 @@ pub async fn fetch(handle: &str, rkey: &str) -> Result<Post, FetchError> {
     if !status.is_success() {
         return Err(crate::site::status_error("bsky", &response));
     }
-    let text = response.text().await?;
+    let text = crate::site::response_text(response, "bsky").await?;
     Post::from_json(&text, rkey.to_string())
 }
 

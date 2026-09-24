@@ -59,6 +59,15 @@ pub enum PixivError {
     Transient(String),
 }
 
+fn map_response_error(error: FetchError) -> PixivError {
+    match error {
+        FetchError::Http(e) => PixivError::Http(e),
+        FetchError::Transient(message) => PixivError::Transient(message),
+        FetchError::RateLimited { .. } => PixivError::Transient("rate limited".into()),
+        other => PixivError::Api(other.to_string()),
+    }
+}
+
 /// Native pixiv app-API client.
 pub struct PixivAPI {
     refresh_token: String,
@@ -94,14 +103,12 @@ impl PixivAPI {
             .header("User-Agent", AUTH_USER_AGENT)
             .send()
             .await?;
-        // Check the status *before* reading the body: a 429/5xx from the
-        // token endpoint is worth retrying (the class comes from
-        // `is_retryable`), while parsing a maintenance page as JSON turned it
-        // into a permanent `Api`/`Json` error with no retry at all.
         if !response.status().is_success() {
             return Err(PixivError::Status(response.status().as_u16()));
         }
-        let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+        let json: serde_json::Value = crate::site::response_json(response, "pixiv")
+            .await
+            .map_err(map_response_error)?;
         let access_token = json
             .get("access_token")
             .and_then(|v| v.as_str())
@@ -140,7 +147,9 @@ impl PixivAPI {
         if !response.status().is_success() {
             return Err(PixivError::Status(response.status().as_u16()));
         }
-        let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+        let json: serde_json::Value = crate::site::response_json(response, "pixiv")
+            .await
+            .map_err(map_response_error)?;
         if json.get("error").is_some() {
             let message = json
                 .get("message")
@@ -198,7 +207,9 @@ impl PixivAPI {
         if !response.status().is_success() {
             return Err(PixivError::Status(response.status().as_u16()));
         }
-        let json: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+        let json: serde_json::Value = crate::site::response_json(response, "pixiv")
+            .await
+            .map_err(map_response_error)?;
         if json.get("error").is_some() {
             let message = json
                 .get("message")
@@ -482,6 +493,12 @@ mod tests {
             matches!(result, Err(PixivError::Status(code)) if (400..500).contains(&code)),
             "got {result:?}"
         );
+    }
+
+    #[test]
+    fn response_read_transport_errors_stay_retryable() {
+        let mapped = map_response_error(FetchError::Transient("reset".into()));
+        assert!(matches!(mapped, PixivError::Transient(_)));
     }
 
     #[test]

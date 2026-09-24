@@ -133,6 +133,32 @@ async fn next_chunk(response: &mut reqwest::Response) -> Result<Option<bytes::By
     }
 }
 
+/// Reads a successful API response body with a hard byte cap.
+pub(crate) async fn send_json_response(
+    mut response: reqwest::Response,
+    site: &'static str,
+) -> Result<bytes::Bytes, FetchError> {
+    if let Some(len) = response.content_length()
+        && len > crate::site::MAX_SITE_JSON_BYTES as u64
+    {
+        return Err(FetchError::Site {
+            site,
+            error: "site response exceeds JSON size cap".into(),
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = next_chunk(&mut response).await? {
+        if body.len().saturating_add(chunk.len()) > crate::site::MAX_SITE_JSON_BYTES {
+            return Err(FetchError::Site {
+                site,
+                error: "site response exceeds JSON size cap".into(),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(bytes::Bytes::from(body))
+}
+
 /// Whether an address must never be fetched. Media URLs come from a site's own
 /// API response and the bytes are uploaded to Telegram, so following one into
 /// the host's own network would turn the bot into a proxy for it: a cloud

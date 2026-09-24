@@ -174,10 +174,7 @@ async fn cookie() -> Option<String> {
 /// requests go out without a cookie.
 async fn fetch_buvid() -> Result<Option<String>, FetchError> {
     let response = crate::site::CLIENT.get(SPI_URL).send().await?;
-    let fingerprint: model::Fingerprint = response.json().await.map_err(|e| FetchError::Site {
-        site: "bilibili",
-        error: Box::new(e),
-    })?;
+    let fingerprint: model::Fingerprint = crate::site::response_json(response, "bilibili").await?;
     Ok(buvid_cookie(&fingerprint))
 }
 
@@ -213,17 +210,10 @@ pub async fn fetch(dynamic_id: &str) -> Result<model::Item, FetchError> {
     if !status.is_success() {
         return Err(match status.as_u16() {
             412 => risk_control("412"),
-            // Everything else shares the central classes (refusals and gone
-            // posts permanent, 429/5xx retried). The local fallback used to
-            // disagree: a bilibili 404 came back Transient here. 412 above is
-            // bilibili's risk control, which does clear on its own.
             _ => crate::site::status_error("bilibili", &response),
         });
     }
-    let detail: model::Detail = response.json().await.map_err(|e| FetchError::Site {
-        site: "bilibili",
-        error: Box::new(e),
-    })?;
+    let detail: model::Detail = crate::site::response_json(response, "bilibili").await?;
     if let Some(err) = code_error(detail.code, detail.message.as_deref().unwrap_or_default()) {
         return Err(err);
     }
