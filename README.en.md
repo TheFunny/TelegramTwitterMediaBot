@@ -122,7 +122,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `/set_forward_channel <channel>` | Set the forward channel: `@channel` or channel ID; media messages are forwarded to it automatically afterwards |
 | `/remove_forward_channel` | Remove the forward channel |
 | `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or tapping a template button applies one), then `↩️ Confirm` forwards and `🛑 Skip` drops this forward; the prompt states its expiry and is marked expired in place when it lapses (nothing is forwarded) |
-| `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward") |
+| `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward"). Names are limited to 55 UTF-8 bytes, bodies to 1024 escaped characters, and 50 templates per chat |
 | `/remove_template <name>` | Remove a template (names are listed by `/settings`; the prompt's keyboard shows at most 60) |
 | `/settings` | Show this chat's configuration: forward channel, edit-before-forward, per-site caption formats, saved templates |
 | `/set_format <site> <format>` | Customize the caption format for one site. Sites: `twitter` / `bsky` / `pixiv` / `misskey` / `bilibili`. Placeholders: `{url}` `{author}` `{author_url}` `{title}` `{content}` `{tags}`; unknown placeholders are rejected with the list of valid ones, and `-` restores the site's built-in format (preview with `/debug <link>`) |
