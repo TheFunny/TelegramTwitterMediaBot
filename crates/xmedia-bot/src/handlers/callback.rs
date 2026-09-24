@@ -71,7 +71,7 @@ async fn handle_callback(
         return;
     }
 
-    log::info!(
+    log::debug!(
         "callback from {chat_id} on prompt {prompt_message_id}: {}",
         super::log_escape(data)
     );

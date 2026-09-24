@@ -511,7 +511,7 @@ pub async fn send_media_sequence(ctx: &AppContext<'_>, task: &Task) -> Result<Ve
                 sent.extend(messages.into_iter().map(|m| m.id.0 as i64));
             }
             Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
-                log::info!(
+                log::warn!(
                     "Telegram could not fetch media for batch {idx} ({}), downloading and reuploading",
                     batch
                         .first()
@@ -604,7 +604,7 @@ pub async fn send_animation(ctx: &AppContext<'_>, task: &Task) -> Result<Vec<i64
             Ok(vec![id])
         }
         Err(RequestError::Api(api)) if is_media_fetch_failure(&api) || is_size_error(&api) => {
-            log::info!(
+            log::warn!(
                 "Telegram could not fetch animation URL, downloading and reuploading: [key={}]",
                 log_key(media_url)
             );

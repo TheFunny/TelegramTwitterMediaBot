@@ -212,7 +212,7 @@ async fn set_forward_channel_handler(
     }
     let chat = match bot.get_chat(channel.clone()).await {
         Err(e) => {
-            log::error!(
+            log::warn!(
                 "Failed to get channel {}: {}",
                 super::log_escape(&channel.to_string()),
                 e
@@ -227,13 +227,13 @@ async fn set_forward_channel_handler(
     let channel_id = chat.id.0;
     // The sender must be a channel administrator. Compare against the
     // sender's user id, NOT the chat id (they only coincide in private
-    // chats, so the old check broke group usage).
+    // chats), so the old check broke group usage).
     let Some(sender) = message.from.as_ref() else {
         return Err(SetForwardChannelError::NotAdmin);
     };
     match bot.get_chat_administrators(channel.clone()).await {
         Err(e) => {
-            log::error!(
+            log::warn!(
                 "Failed to get channel administrators {}: {}",
                 super::log_escape(&channel.to_string()),
                 e
