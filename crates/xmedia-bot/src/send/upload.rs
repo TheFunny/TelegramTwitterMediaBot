@@ -89,17 +89,10 @@ pub(super) enum FallbackError {
 /// errors are not.
 async fn download_to_temp(
     item: &MediaItemPayload,
+    media_url: &str,
 ) -> Result<(NamedTempFile, bytes::Bytes), FallbackError> {
-    // Only a URL/path item is ever downloaded: a file id is sent as-is (see
-    // `MediaItemPayload::input_file`), so this path cannot see one.
-    let media_url = match item.media_ref() {
-        MediaRef::Source(media) => media,
-        MediaRef::FileId(id) => {
-            return Err(FallbackError::Permanent {
-                message: format!("file id reached the download path: {id}"),
-            });
-        }
-    };
+    // The caller narrows the media to a source URL before calling (its entry
+    // guard rejects a file id), so there is nothing to match on here.
     // Photos are downloaded even over the upload cap so `prepare_photo` can
     // downscale / transcode them, up to their own download cap; videos and
     // animations are refused as soon as the declared size crosses their own
@@ -177,9 +170,11 @@ async fn download_to_temp(
 /// retry could only ask the same URL again.
 fn classify_download_error(err: FetchError) -> FallbackError {
     match err {
-        FetchError::Http(_) | FetchError::Transient(_) => FallbackError::Retryable {
-            delay_seconds: retry_delay_seconds(0),
-        },
+        FetchError::Http(_) | FetchError::Transient(_) | FetchError::RateLimited { .. } => {
+            FallbackError::Retryable {
+                delay_seconds: retry_delay_seconds(0),
+            }
+        }
         FetchError::TooLarge => FallbackError::MediaTooLarge,
         e => FallbackError::Permanent {
             message: format!("download failed: {e}"),
@@ -222,6 +217,15 @@ pub(super) async fn prepare_upload_item(
     index: usize,
     caption: Option<&str>,
 ) -> Result<PreparedItem, FallbackError> {
+    // A file id is already Telegram's copy of an uploaded file: there is no
+    // URL to re-fetch, and without this guard `item_url` presents the id as
+    // a *path*, which fails at upload time with a confusing open error
+    // instead of a classification. Re-upload cannot apply to it.
+    if matches!(item.media_ref(), MediaRef::FileId(_)) {
+        return Err(FallbackError::Permanent {
+            message: "file id reached the upload fallback".into(),
+        });
+    }
     // Locally produced files (ugoira / bsky remux MP4): nothing to download
     // or shrink — upload the file directly. The send is a multipart upload,
     // so the only remaining failure is an upload-cap error, which is
@@ -243,7 +247,7 @@ pub(super) async fn prepare_upload_item(
     // the match below. A separate size probe used to issue a second GET of the
     // same URL for an answer this path already has (and issued it for photos,
     // whose answer was discarded one line later).
-    match download_to_temp(&item).await {
+    match download_to_temp(&item, media_url).await {
         Ok((file, bytes)) => {
             if matches!(item, MediaItemPayload::Photo { .. }) {
                 // Telegram rejects photos wider+taller than 10000 px combined
@@ -421,5 +425,19 @@ mod download_class_tests {
             classify_download_error(FetchError::TooLarge),
             FallbackError::MediaTooLarge
         ));
+    }
+
+    #[tokio::test]
+    async fn a_file_id_item_is_refused_before_any_download() {
+        let item = MediaItemPayload::Photo {
+            media: MediaRef::FileId("AgACAgIAAx".into()),
+            has_spoiler: false,
+            fallback_url: None,
+        };
+        match prepare_upload_item(item, 0, None).await {
+            Err(FallbackError::Permanent { .. }) => {}
+            Err(_) => panic!("expected a permanent classification, got a different error"),
+            Ok(_) => panic!("a file id must be refused, not prepared"),
+        }
     }
 }
