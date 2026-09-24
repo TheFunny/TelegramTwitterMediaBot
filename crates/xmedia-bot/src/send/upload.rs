@@ -112,16 +112,20 @@ async fn download_to_temp(
     } else {
         MAX_MEDIA_UPLOAD_BYTES
     };
-    // A non-photo body is buffered whole and can now be 50 MB, so it charges
-    // the process-wide budget for as long as this function holds it (one
-    // 64 MiB unit covers the cap): `PREP_SLOTS` bounds how many are in flight,
-    // this bounds what they add up to. Photos charge their real buffer after
-    // the download, once their header predicts it.
-    let _budget = if is_photo {
-        None
-    } else {
-        Some(photo::reserve_memory(MAX_MEDIA_UPLOAD_BYTES).await)
-    };
+    // A non-photo body is buffered whole and charges the process-wide budget
+    // for as long as this function holds it (one 64 MiB unit covers the cap):
+    // `PREP_SLOTS` bounds how many are in flight, this bounds what they add
+    // up to. Photos charge their own download cap for the same window — their
+    // real cost (header probe + decode buffer) is charged again by the
+    // prepare step right after, where both are actually held together.
+    let _budget = Some(
+        photo::reserve_memory(if is_photo {
+            photo::MAX_PHOTO_DOWNLOAD_BYTES
+        } else {
+            MAX_MEDIA_UPLOAD_BYTES
+        })
+        .await,
+    );
     let bytes = match x_media::site::download_media_limited(
         media_url,
         limit,
