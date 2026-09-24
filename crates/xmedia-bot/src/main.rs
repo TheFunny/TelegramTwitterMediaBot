@@ -263,18 +263,19 @@ async fn main() {
             .await;
     }
 
-    // Graceful stop (Ctrl+C / SIGTERM): stop the sweep, notify the admin,
-    // drain the queue. Bounded: a worker mid-download (30 s timeout) or a
-    // long ugoira encode must not hold the shutdown hostage forever.
+    // Graceful stop (Ctrl+C / SIGTERM): stop the queue first so no new
+    // persistent task is leased while the URL workers drain. The two drains
+    // share the bounded shutdown budget; URL work may legitimately outlive it,
+    // but the queue must not be left running until process exit.
     log::info!("Stopping bot");
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let shutdown = async {
         let _ = stop_tx.send(true);
+        TASK_QUEUE.stop().await;
         handlers::stop_url_workers().await;
         if let Some(admin) = CONFIG.admin_ids.first() {
             let _ = bot.send_message(ChatId(*admin), "Shutting down...").await;
         }
-        TASK_QUEUE.stop().await;
     };
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown)
         .await
