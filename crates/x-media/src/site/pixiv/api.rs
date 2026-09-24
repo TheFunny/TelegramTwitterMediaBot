@@ -333,7 +333,7 @@ impl PixivAPI {
                 let framerate = 1000.0 / median as f64;
 
                 let output = out_dir.path().join("ugoira.mp4");
-                let status = std::process::Command::new("ffmpeg")
+                let mut child = std::process::Command::new("ffmpeg")
                     .args([
                         "-y",
                         "-framerate",
@@ -357,10 +357,27 @@ impl PixivAPI {
                     ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
-                    .status()
+                    .spawn()
                     .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
-                if !status.success() {
-                    return Err(format!("ffmpeg exited with {status}"));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                loop {
+                    match child
+                        .try_wait()
+                        .map_err(|e| format!("ffmpeg wait failed: {e}"))?
+                    {
+                        Some(status) => {
+                            if !status.success() {
+                                return Err(format!("ffmpeg exited with {status}"));
+                            }
+                            break;
+                        }
+                        None if std::time::Instant::now() >= deadline => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err("ffmpeg exceeded 300s".to_string());
+                        }
+                        None => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    }
                 }
                 Ok((output.to_string_lossy().into_owned(), out_dir))
             })

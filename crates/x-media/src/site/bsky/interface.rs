@@ -263,7 +263,7 @@ async fn resolve_bsky_video(
     let list_str = list_path.to_string_lossy().into_owned();
     let output_str = output.to_string_lossy().into_owned();
     let status = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("ffmpeg")
+        let mut child = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
                 "-f",
@@ -280,15 +280,30 @@ async fn resolve_bsky_video(
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
+            .spawn()
+            .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            match child
+                .try_wait()
+                .map_err(|e| format!("ffmpeg wait failed: {e}"))?
+            {
+                Some(status) => break Ok(status),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err("ffmpeg exceeded 300s".to_string());
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     })
     .await
-    .map_err(|e| format!("bsky remux worker panicked: {e}"))?;
-    match status {
-        Ok(s) if s.success() => Ok(Some((output, out_dir))),
-        Ok(s) => Err(format!("ffmpeg exited with {s}")),
-        Err(e) => Err(format!("ffmpeg spawn failed: {e}")),
+    .map_err(|e| format!("bsky remux worker panicked: {e}"))??;
+    if !status.success() {
+        return Err(format!("ffmpeg exited with {status}"));
     }
+    Ok(Some((output, out_dir)))
 }
 
 /// Fetches a post thread by handle or DID (`at://` URIs work for both).
