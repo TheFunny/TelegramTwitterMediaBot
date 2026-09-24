@@ -323,7 +323,7 @@ pub(crate) async fn execute_command(
         }
         Command::RemoveForwardChannel => {
             let chat_id = message.chat.id.0;
-            let text = ctx
+            let (text, _) = ctx
                 .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_some() {
@@ -338,7 +338,7 @@ pub(crate) async fn execute_command(
         }
         Command::EditBeforeForward => {
             let chat_id = message.chat.id.0;
-            let text = ctx
+            let (text, _) = ctx
                 .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_none() {
@@ -393,7 +393,7 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            let removed = ctx
+            let (removed, _) = ctx
                 .chat_store
                 .update(chat_id, |data| data.template.remove(&name).is_some())
                 .await;
@@ -461,7 +461,8 @@ pub(crate) async fn execute_command(
             // set a format once could never get back to the default (the
             // built-in format string is not something a user can retype).
             if format == "-" {
-                ctx.chat_store
+                let (_, saved) = ctx
+                    .chat_store
                     .update(chat_id, |data| {
                         data.message_format.remove(site);
                     })
@@ -470,7 +471,11 @@ pub(crate) async fn execute_command(
                     ctx.sender,
                     message.chat.id.0,
                     message.id,
-                    "Format reset to the built-in one.",
+                    if saved {
+                        "Format reset to the built-in one.".to_string()
+                    } else {
+                        "Reset in memory only: the database write failed, so it will be lost on restart.".to_string()
+                    },
                 )
                 .await?;
                 return Ok(());
@@ -495,7 +500,8 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            ctx.chat_store
+            let (_, saved) = ctx
+                .chat_store
                 .update(chat_id, |data| {
                     data.message_format.insert(site.to_string(), format);
                 })
@@ -504,7 +510,11 @@ pub(crate) async fn execute_command(
                 ctx.sender,
                 message.chat.id.0,
                 message.id,
-                "Format set. Use /debug <link> to preview the caption.",
+                if saved {
+                    "Format set. Use /debug <link> to preview the caption.".to_string()
+                } else {
+                    "Set in memory only: the database write failed, so it will be lost on restart. Use /debug <link> to preview the caption.".to_string()
+                },
             )
             .await?;
         }

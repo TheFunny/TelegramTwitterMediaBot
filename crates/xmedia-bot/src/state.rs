@@ -105,8 +105,11 @@ impl ChatStore {
         data
     }
 
-    /// Write-through: update the cache and the DB.
-    pub async fn set(&self, chat_id: i64, data: &ChatData) {
+    /// Write-through: update the cache and the DB. Returns whether the DB
+    /// write landed: the cache is updated either way, so `false` means the
+    /// change lives only until the next restart and the caller has to say so
+    /// instead of reporting a save that did not happen.
+    pub async fn set(&self, chat_id: i64, data: &ChatData) -> bool {
         self.cache.lock().insert(chat_id, data.clone());
         let payload = serde_json::to_string(data).expect("chat state serializes");
         let chat_id = chat_id.to_string();
@@ -114,16 +117,16 @@ impl ChatStore {
             .with_conn_or(
                 log::Level::Warn,
                 "chat_state write failed",
-                (),
+                false,
                 move |conn| {
                     conn.execute(
                         "INSERT OR REPLACE INTO chat_state (chat_id, payload) VALUES (?1, ?2)",
                         params![chat_id, payload],
                     )?;
-                    Ok(())
+                    Ok(true)
                 },
             )
-            .await;
+            .await
     }
 
     /// The per-chat async lock serializing get→mutate→set cycles.
@@ -139,14 +142,15 @@ impl ChatStore {
     /// (the batch-forward design spawns several per chat) each snapshot the
     /// same `ChatData` and last-writer-wins would silently drop mutations,
     /// e.g. a second `edit_message` record. The per-chat lock makes the
-    /// cycle atomic. Returns the closure's result.
-    pub async fn update<R>(&self, chat_id: i64, f: impl FnOnce(&mut ChatData) -> R) -> R {
+    /// cycle atomic. Returns the closure's result plus whether the DB write
+    /// landed (see [`Self::set`]); callers that do not care ignore the flag.
+    pub async fn update<R>(&self, chat_id: i64, f: impl FnOnce(&mut ChatData) -> R) -> (R, bool) {
         let lock = self.lock_for(chat_id);
         let _guard = lock.lock().await;
         let mut data = self.get(chat_id).await;
         let r = f(&mut data);
-        self.set(chat_id, &data).await;
-        r
+        let saved = self.set(chat_id, &data).await;
+        (r, saved)
     }
 
     /// Removes edit-before-forward records whose `created_at + ttl` is in the
