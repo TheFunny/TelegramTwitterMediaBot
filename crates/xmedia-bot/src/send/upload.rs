@@ -170,11 +170,14 @@ async fn download_to_temp(
 /// retry could only ask the same URL again.
 fn classify_download_error(err: FetchError) -> FallbackError {
     match err {
-        FetchError::Http(_) | FetchError::Transient(_) | FetchError::RateLimited { .. } => {
-            FallbackError::Retryable {
-                delay_seconds: retry_delay_seconds(0),
-            }
-        }
+        FetchError::RateLimited {
+            retry_after_secs, ..
+        } => FallbackError::Retryable {
+            delay_seconds: retry_after_secs as f64,
+        },
+        FetchError::Http(_) | FetchError::Transient(_) => FallbackError::Retryable {
+            delay_seconds: retry_delay_seconds(0),
+        },
         FetchError::TooLarge => FallbackError::MediaTooLarge,
         e => FallbackError::Permanent {
             message: format!("download failed: {e}"),
@@ -425,6 +428,17 @@ mod download_class_tests {
             classify_download_error(FetchError::TooLarge),
             FallbackError::MediaTooLarge
         ));
+    }
+
+    #[test]
+    fn rate_limited_media_keeps_the_server_delay() {
+        match classify_download_error(FetchError::RateLimited {
+            site: "media",
+            retry_after_secs: 60,
+        }) {
+            FallbackError::Retryable { delay_seconds } => assert_eq!(delay_seconds, 60.0),
+            _ => panic!("expected retryable rate limit"),
+        }
     }
 
     #[tokio::test]
