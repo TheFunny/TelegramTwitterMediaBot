@@ -23,6 +23,19 @@ const APP_USER_AGENT: &str = "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)";
 /// Token refresh safe margin (seconds).
 const TOKEN_REFRESH_SAFE_MARGIN: u64 = 300;
 
+const MAX_UGOIRA_FRAMES: usize = 5_000;
+const MAX_UGOIRA_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
+
+fn check_ugoira_archive_size(entries: usize, unpacked: u64) -> Result<(), &'static str> {
+    if entries > MAX_UGOIRA_FRAMES {
+        return Err("ugoira has too many frames");
+    }
+    if unpacked > MAX_UGOIRA_UNPACKED_BYTES {
+        return Err("ugoira exceeds total unpacked size cap");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum PixivError {
     /// No refresh token available (PIXIV_REFRESH_TOKEN unset).
@@ -210,17 +223,11 @@ impl PixivAPI {
             return Ok(None);
         }
         let metadata = self.ugoira_metadata(illust_id).await?;
-        const MAX_UGOIRA_FRAMES: usize = 5_000;
-        const MAX_UGOIRA_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
         if metadata.frames.is_empty() {
             return Ok(None);
         }
-        if metadata.frames.len() > MAX_UGOIRA_FRAMES {
-            return Err(PixivError::Api(format!(
-                "ugoira has too many frames: {}",
-                metadata.frames.len()
-            )));
-        }
+        check_ugoira_archive_size(metadata.frames.len(), 0)
+            .map_err(|e| PixivError::Api(e.to_string()))?;
         let zip_url = metadata
             .zip_url
             .clone()
@@ -282,9 +289,7 @@ impl PixivAPI {
                 if archive.is_empty() {
                     return Err("empty frame zip".to_string());
                 }
-                if archive.len() > MAX_UGOIRA_FRAMES {
-                    return Err("ugoira frame zip has too many entries".to_string());
-                }
+                check_ugoira_archive_size(archive.len(), 0)?;
 
                 let mut count = 0usize;
                 let mut unpacked = 0u64;
@@ -305,9 +310,7 @@ impl PixivAPI {
                     unpacked = unpacked
                         .checked_add(bytes.len() as u64)
                         .ok_or_else(|| "ugoira unpacked size overflow".to_string())?;
-                    if unpacked > MAX_UGOIRA_UNPACKED_BYTES {
-                        return Err("ugoira exceeds total unpacked size cap".to_string());
-                    }
+                    check_ugoira_archive_size(archive.len(), unpacked)?;
                     if i == 0 {
                         extension = if bytes.starts_with(&[0xFF, 0xD8]) {
                             "jpg"
@@ -473,16 +476,23 @@ mod tests {
     #[ignore = "live network: requires outbound HTTPS to oauth.secure.pixiv.net"]
     async fn live_validate_with_bogus_token_fails() {
         dotenv().ok();
-        // A rejected credential must surface as a permanent status, not a panic
-        // and not a retryable class: the exchange answers 4xx and the status is
-        // checked before the body is read (api.rs, `get_access_token`). This
-        // used to assert `Api`, which that check made unreachable — `Api` is
-        // only reached from a 2xx body without an `access_token`.
         let client = PixivAPI::new("bogus_token_for_testing".to_string());
         let result = client.get_access_token().await;
         assert!(
             matches!(result, Err(PixivError::Status(code)) if (400..500).contains(&code)),
             "got {result:?}"
         );
+    }
+
+    #[test]
+    fn ugoira_budget_rejects_too_many_frames() {
+        assert!(check_ugoira_archive_size(MAX_UGOIRA_FRAMES, 0).is_ok());
+        assert!(check_ugoira_archive_size(MAX_UGOIRA_FRAMES + 1, 0).is_err());
+    }
+
+    #[test]
+    fn ugoira_budget_rejects_too_many_unpacked_bytes() {
+        assert!(check_ugoira_archive_size(1, MAX_UGOIRA_UNPACKED_BYTES).is_ok());
+        assert!(check_ugoira_archive_size(1, MAX_UGOIRA_UNPACKED_BYTES + 1).is_err());
     }
 }
