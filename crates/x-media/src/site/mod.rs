@@ -518,29 +518,44 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
     }
     // Gate every network attempt process-wide (see FETCH_SLOTS).
     let _permit = FETCH_SLOTS.acquire().await.expect("fetch gate closed");
-    for attempt in 0..attempts.max(1) {
-        match site.fetch_from_url(url).await {
-            Ok(fetched) => {
-                // Per-request detail: debug only, keyed by the post id.
-                log::debug!(
-                    "fetched [key={}]: site {} returned {} media in {}ms",
-                    cache_key(url).unwrap_or_else(|| "?".into()),
-                    fetched.site_id,
-                    fetched.media.len(),
-                    started.elapsed().as_millis()
-                );
-                return Ok(Some(fetched));
-            }
-            Err(err) => {
-                if site.is_retryable(&err) && attempt + 1 < attempts {
-                    tokio::time::sleep(retry_wait(attempt, rand::random::<u64>(), &err)).await;
-                } else {
-                    return Err(err);
+    let fetch = async {
+        // One hard ceiling for the whole fetch, backoff naps included (the
+        // timeout below): the idle timeouts restart on every chunk, so a
+        // drip-feeding URL could otherwise pin one fetch slot effectively
+        // forever. Generous for a genuinely large ugoira zip on a slow link
+        // — minutes, not hours — and the deadline the audit's low finding
+        // asked for.
+        for attempt in 0..attempts.max(1) {
+            match site.fetch_from_url(url).await {
+                Ok(fetched) => {
+                    // Per-request detail: debug only, keyed by the post id.
+                    log::debug!(
+                        "fetched [key={}]: site {} returned {} media in {}ms",
+                        cache_key(url).unwrap_or_else(|| "?".into()),
+                        fetched.site_id,
+                        fetched.media.len(),
+                        started.elapsed().as_millis()
+                    );
+                    return Ok(Some(fetched));
+                }
+                Err(err) => {
+                    if site.is_retryable(&err) && attempt + 1 < attempts {
+                        tokio::time::sleep(retry_wait(attempt, rand::random::<u64>(), &err)).await;
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         }
+        unreachable!("retry loop always returns")
+    };
+    match tokio::time::timeout(Duration::from_secs(900), fetch).await {
+        Ok(result) => result,
+        Err(_) => Err(FetchError::Transient(format!(
+            "fetch exceeded its 900s total budget [key={}]",
+            cache_key(url).unwrap_or_else(|| "?".into())
+        ))),
     }
-    unreachable!("retry loop always returns")
 }
 
 /// How long to sleep before retrying `attempt` (0-based) after `err`: the
