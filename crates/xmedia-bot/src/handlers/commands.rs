@@ -598,11 +598,7 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            // The ordinary link pipeline with the chat's post-send actions
-            // suppressed: the media is sent (and cached) like a normal link,
-            // but nothing is forwarded to the channel and no
-            // edit-before-forward prompt opens. Info level echoes the
-            // normalized key (never the raw URL) per the logging convention.
+            let _command_fetch = x_media::site::acquire_command_fetch_slot().await;
             log::info!("test: sending [key={}]", log_key(url));
             url_media(
                 ctx,
@@ -612,6 +608,7 @@ pub(crate) async fn execute_command(
                 PostSend::Suppressed,
             )
             .await;
+            drop(_command_fetch);
         }
         Command::Debug(arg) => {
             let url = arg.trim();
@@ -625,8 +622,7 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            // Debug tool: report the parse result only — nothing is sent,
-            // cached or forwarded.
+            let _command_fetch = x_media::site::acquire_command_fetch_slot().await;
             log::info!("debug: parsing [key={}]", log_key(url));
             match x_media::site::fetch(url).await {
                 Ok(None) => {

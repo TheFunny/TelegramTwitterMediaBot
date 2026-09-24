@@ -516,6 +516,15 @@ pub async fn fetch_once(url: &str) -> Result<Option<Fetched>, FetchError> {
     fetch_with_attempts(url, 1).await
 }
 
+/// A small admission gate for `/test` and `/debug`, which run directly in
+/// dispatcher handlers instead of the URL worker pool.
+pub async fn acquire_command_fetch_slot() -> tokio::sync::OwnedSemaphorePermit {
+    std::sync::Arc::clone(&COMMAND_FETCH_SLOTS)
+        .acquire_owned()
+        .await
+        .expect("command fetch gate closed")
+}
+
 /// Total attempts of the retried [`fetch`] (3: the initial try plus two).
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 
@@ -530,6 +539,8 @@ const MAX_FETCH_ATTEMPTS: u32 = 3;
 /// deliberately simple: the wait is bounded by the same retries.
 static FETCH_SLOTS: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(8));
+static COMMAND_FETCH_SLOTS: LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)));
 
 async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>, FetchError> {
     // Wall time of the whole fetch, retry backoff included: the ugoira encode
