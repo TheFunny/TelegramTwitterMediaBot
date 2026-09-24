@@ -193,9 +193,7 @@ impl MediaSender for Bot {
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<i64, RequestError>> {
         Box::pin(async move {
-            // Plain messages never met a bucket: a dead-letter storm (or one
-            // error reply per failed item) could burst past Telegram's
-            // per-bot ceiling with only 429s left to absorb it.
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
             crate::rate_limit::acquire_global(1.0).await;
             let mut request = <Bot as Requester>::send_message(self, chat_id, text);
             if let Some(reply_to) = reply_to {
@@ -216,6 +214,7 @@ impl MediaSender for Bot {
         reply_to: Option<MessageId>,
     ) -> BoxFuture<'_, Result<i64, RequestError>> {
         Box::pin(async move {
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
             crate::rate_limit::acquire_global(1.0).await;
             let mut request =
                 <Bot as Requester>::send_message(self, chat_id, text).parse_mode(ParseMode::Html);
@@ -262,13 +261,14 @@ impl MediaSender for Bot {
         text: String,
     ) -> BoxFuture<'_, Result<(), RequestError>> {
         Box::pin(async move {
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
+            crate::rate_limit::acquire_global(1.0).await;
             <Bot as Requester>::edit_message_text(self, chat_id, message_id, text)
                 .reply_markup(InlineKeyboardMarkup::default())
                 .await
                 .map(|_| ())
         })
     }
-
     fn edit_message_caption(
         &self,
         chat_id: ChatId,
@@ -276,6 +276,8 @@ impl MediaSender for Bot {
         caption: String,
     ) -> BoxFuture<'_, Result<(), RequestError>> {
         Box::pin(async move {
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
+            crate::rate_limit::acquire_global(1.0).await;
             <Bot as Requester>::edit_message_caption(self, chat_id, message_id)
                 .caption(caption)
                 .parse_mode(ParseMode::Html)
@@ -290,6 +292,8 @@ impl MediaSender for Bot {
         message_id: MessageId,
     ) -> BoxFuture<'_, Result<(), RequestError>> {
         Box::pin(async move {
+            crate::rate_limit::limiter_for(chat_id.0).acquire(1.0).await;
+            crate::rate_limit::acquire_global(1.0).await;
             <Bot as Requester>::delete_message(self, chat_id, message_id)
                 .await
                 .map(|_| ())
