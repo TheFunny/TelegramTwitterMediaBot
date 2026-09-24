@@ -278,24 +278,63 @@ pub enum FetchError {
     /// A transient server-side failure (429 / 5xx); [`fetch`] retries these.
     #[error("transient: {0}")]
     Transient(String),
+    /// The source answered 429 *with* a `Retry-After` and named its own
+    /// delay: [`fetch`] sleeps at least that long instead of guessing one
+    /// (capped by [`MAX_RETRY_AFTER_SECS`] — the header is server-supplied
+    /// and must not park one of the fetch slots).
+    #[error("{site} rate limited, retry after {retry_after_secs}s")]
+    RateLimited {
+        site: &'static str,
+        retry_after_secs: u64,
+    },
     /// A local I/O failure while streaming a download to disk
     /// (see [`download_media_to_file`]).
     #[error("io error: {0}")]
     Io(std::io::Error),
 }
 
+/// Cap on a server-supplied `Retry-After`: honored so a retry stops hammering
+/// a source that asked for air, bounded so the same untrusted header cannot
+/// park a fetch slot for an hour.
+pub const MAX_RETRY_AFTER_SECS: u64 = 60;
+
 /// The error class for a non-success HTTP status, shared by the site
 /// adapters, the media downloads and twitter's auth fallback: 404/410 mean
 /// the post is gone (permanent), any other client error the source answers
 /// on sight is a refusal (permanent too — three retries only delay the same
-/// answer), and only 408/429/5xx are a bad moment, retried by [`fetch`].
+/// answer), 408/429/5xx are a bad moment retried by [`fetch`], and a 429
+/// that carries `Retry-After` keeps the delay the source asked for (the
+/// seconds form only — a HTTP-date value parses to `None` and falls back to
+/// the plain transient path).
 /// `site` only names the adapter in the message (`"media"` for downloads);
 /// a site whose statuses mean something else (bilibili's 412 risk control,
 /// misskey's 400 with `NO_SUCH_NOTE`) maps those before falling back here.
-pub fn status_error(site: &'static str, status: reqwest::StatusCode) -> FetchError {
+pub fn status_error(site: &'static str, response: &reqwest::Response) -> FetchError {
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    classify_status(site, response.status(), retry_after)
+}
+
+/// [`status_error`]'s table, split out so tests reach it without building an
+/// HTTP response — the retry delay only ever shapes the 429 arm.
+pub(crate) fn classify_status(
+    site: &'static str,
+    status: reqwest::StatusCode,
+    retry_after: Option<u64>,
+) -> FetchError {
     match status.as_u16() {
         404 | 410 => FetchError::NotFound,
         code if status.is_client_error() && !matches!(code, 408 | 429) => FetchError::Blocked,
+        429 => match retry_after {
+            Some(retry_after_secs) => FetchError::RateLimited {
+                site,
+                retry_after_secs: retry_after_secs.min(MAX_RETRY_AFTER_SECS),
+            },
+            None => FetchError::Transient(format!("{site} status {status}")),
+        },
         _ => FetchError::Transient(format!("{site} status {status}")),
     }
 }
@@ -354,9 +393,13 @@ pub trait Site: Send + Sync {
     fn cache_key(&self, url: &str) -> Option<String>;
     /// Fetches and normalizes a post.
     fn fetch_from_url<'a>(&'a self, url: &'a str) -> SiteFuture<'a, Fetched>;
-    /// Retry policy for fetch errors: transient classes only.
+    /// Retry policy for fetch errors: transient classes only (a 429's
+    /// named `Retry-After` included — it is a bad moment, just a louder one).
     fn is_retryable(&self, err: &FetchError) -> bool {
-        matches!(err, FetchError::Http(_) | FetchError::Transient(_))
+        matches!(
+            err,
+            FetchError::Http(_) | FetchError::Transient(_) | FetchError::RateLimited { .. }
+        )
     }
     /// Extra headers for downloading this site's media (hotlink protection,
     /// e.g. pixiv's Referer for pximg.net). Matched on the media URL, not
@@ -490,7 +533,7 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
             }
             Err(err) => {
                 if site.is_retryable(&err) && attempt + 1 < attempts {
-                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                    tokio::time::sleep(retry_wait(attempt, rand::random::<u64>(), &err)).await;
                 } else {
                     return Err(err);
                 }
@@ -498,6 +541,23 @@ async fn fetch_with_attempts(url: &str, attempts: u32) -> Result<Option<Fetched>
         }
     }
     unreachable!("retry loop always returns")
+}
+
+/// How long to sleep before retrying `attempt` (0-based) after `err`: the
+/// doubling base plus a random slice of it (roll in [0, base) → [base, 2×base))
+/// so workers that failed together do not recover together, floored at the
+/// delay a 429's `Retry-After` named — already capped by the classifier at
+/// [`MAX_RETRY_AFTER_SECS`], so an untrusted server cannot park a slot.
+pub(crate) fn retry_wait(attempt: u32, roll: u64, err: &FetchError) -> Duration {
+    let base = 1u64 << attempt.min(16);
+    let mut secs = base + roll % base;
+    if let FetchError::RateLimited {
+        retry_after_secs, ..
+    } = err
+    {
+        secs = secs.max(*retry_after_secs);
+    }
+    Duration::from_secs(secs)
 }
 
 /// Whether fetching `url` requires site-specific headers (pixiv's `Referer`
@@ -730,34 +790,76 @@ mod tests {
         // in two local fallbacks — twitter syndication's broken-token 400, for
         // one, burned three retries per link before saying the same thing.
         assert!(matches!(
-            status_error("x", StatusCode::NOT_FOUND),
+            classify_status("x", StatusCode::NOT_FOUND, None),
             FetchError::NotFound
         ));
         assert!(matches!(
-            status_error("x", StatusCode::BAD_REQUEST),
+            classify_status("x", StatusCode::BAD_REQUEST, None),
             FetchError::Blocked
         ));
         assert!(matches!(
-            status_error("x", StatusCode::PAYLOAD_TOO_LARGE),
+            classify_status("x", StatusCode::PAYLOAD_TOO_LARGE, None),
             FetchError::Blocked
         ));
         assert!(matches!(
-            status_error("x", StatusCode::REQUEST_TIMEOUT),
+            classify_status("x", StatusCode::REQUEST_TIMEOUT, None),
             FetchError::Transient(_)
         ));
         assert!(matches!(
-            status_error("x", StatusCode::TOO_MANY_REQUESTS),
+            classify_status("x", StatusCode::TOO_MANY_REQUESTS, None),
             FetchError::Transient(_)
         ));
         assert!(matches!(
-            status_error("x", StatusCode::INTERNAL_SERVER_ERROR),
+            classify_status("x", StatusCode::INTERNAL_SERVER_ERROR, None),
             FetchError::Transient(_)
         ));
         // The download path delegates under its own name, same classes.
         assert!(matches!(
-            status_error("media", StatusCode::BAD_REQUEST),
+            classify_status("media", StatusCode::BAD_REQUEST, None),
             FetchError::Blocked
         ));
+        // A 429 that named its delay keeps it — and the cap means the
+        // (server-supplied) header cannot park a fetch slot for an hour.
+        assert!(matches!(
+            classify_status("x", StatusCode::TOO_MANY_REQUESTS, Some(12)),
+            FetchError::RateLimited {
+                retry_after_secs: 12,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_status("x", StatusCode::TOO_MANY_REQUESTS, Some(9999)),
+            FetchError::RateLimited {
+                retry_after_secs: crate::site::MAX_RETRY_AFTER_SECS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_wait_jitters_and_respects_a_named_delay() {
+        // Doubling base plus a random slice: attempt 0 → exactly 1 s (any
+        // slice of 1 is 0), attempt 2 with roll 3 → 4 + 3 s.
+        assert_eq!(
+            retry_wait(0, 0, &FetchError::Transient("x".into())),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry_wait(2, 3, &FetchError::Transient("x".into())),
+            Duration::from_secs(7)
+        );
+        // A named delay floors the wait: roll 0 would sleep 1 s, the source said 60.
+        assert_eq!(
+            retry_wait(
+                0,
+                0,
+                &FetchError::RateLimited {
+                    site: "x",
+                    retry_after_secs: 60
+                }
+            ),
+            Duration::from_secs(60)
+        );
     }
 
     #[tokio::test]

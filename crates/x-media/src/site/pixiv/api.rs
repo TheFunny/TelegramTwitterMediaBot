@@ -248,7 +248,9 @@ impl PixivAPI {
                 // made one hiccup permanently fail the whole ugoira post,
                 // while the bot's own upload downloads retry the same
                 // classes.
-                transient @ (FetchError::Transient(_) | FetchError::Io(_)) => {
+                transient @ (FetchError::Transient(_)
+                | FetchError::RateLimited { .. }
+                | FetchError::Io(_)) => {
                     PixivError::Transient(format!("frame zip download failed: {transient}"))
                 }
                 other => PixivError::Api(format!("frame zip download failed: {other}")),

@@ -217,7 +217,7 @@ pub async fn fetch(dynamic_id: &str) -> Result<model::Item, FetchError> {
             // posts permanent, 429/5xx retried). The local fallback used to
             // disagree: a bilibili 404 came back Transient here. 412 above is
             // bilibili's risk control, which does clear on its own.
-            _ => crate::site::status_error("bilibili", status),
+            _ => crate::site::status_error("bilibili", &response),
         });
     }
     let detail: model::Detail = response.json().await.map_err(|e| FetchError::Site {

@@ -132,7 +132,7 @@ fn concat_list(files: &mut [(usize, std::path::PathBuf)]) -> String {
 /// more, so the second attempt belongs on the request that actually failed.
 async fn fetch_hls(url: &str, cap: u64) -> Result<bytes::Bytes, String> {
     match crate::site::download_media_limited(url, cap, crate::site::DOWNLOAD_TOTAL_TIMEOUT).await {
-        Err(FetchError::Http(_) | FetchError::Transient(_)) => {
+        Err(FetchError::Http(_) | FetchError::Transient(_) | FetchError::RateLimited { .. }) => {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             crate::site::download_media_limited(url, cap, crate::site::DOWNLOAD_TOTAL_TIMEOUT)
                 .await
@@ -304,7 +304,7 @@ pub async fn fetch(handle: &str, rkey: &str) -> Result<Post, FetchError> {
     // 404/410 = gone (permanent); 429/5xx = transient and retried by fetch.
     let status = response.status();
     if !status.is_success() {
-        return Err(crate::site::status_error("bsky", status));
+        return Err(crate::site::status_error("bsky", &response));
     }
     let text = response.text().await?;
     Post::from_json(&text, rkey.to_string())

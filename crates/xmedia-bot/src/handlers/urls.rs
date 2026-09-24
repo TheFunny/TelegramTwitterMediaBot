@@ -507,7 +507,7 @@ fn fetch_error_message(err: &x_media::site::FetchError) -> String {
         FetchError::Disabled { site } => {
             format!("{} support is disabled on this bot.", site_title(site))
         }
-        FetchError::Transient(_) | FetchError::Http(_) => {
+        FetchError::RateLimited { .. } | FetchError::Transient(_) | FetchError::Http(_) => {
             "The source site is unavailable right now (tried 3 times). Try again later.".to_string()
         }
         FetchError::MediaPrep(_) => concat!(

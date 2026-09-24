@@ -87,7 +87,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     // 404/410 = gone (permanent); 429/5xx = transient and retried by fetch.
     let status = response.status();
     if !status.is_success() {
-        return Err(crate::site::status_error("twitter", status));
+        return Err(crate::site::status_error("twitter", &response));
     }
     let text = response.text().await?;
     // Classify before building the tweet (see [`parse_syndication_body`]), and

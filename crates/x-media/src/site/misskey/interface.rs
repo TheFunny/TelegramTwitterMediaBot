@@ -66,7 +66,7 @@ pub async fn fetch(note_id: &str) -> Result<model::Note, FetchError> {
             // The local fallback used to disagree with the center: a misskey
             // 404 came back Transient here and was fetched three more times
             // for a note that is simply gone.
-            _ => crate::site::status_error("misskey", status),
+            _ => crate::site::status_error("misskey", &response),
         });
     }
     response.json().await.map_err(|e| FetchError::Site {

@@ -91,7 +91,7 @@ pub fn cache_key(url: &str) -> Option<String> {
 /// API/auth errors, unparseable bodies and missing auth are not retried.
 pub fn is_retryable(err: &FetchError) -> bool {
     match err {
-        FetchError::Http(_) | FetchError::Transient(_) => true,
+        FetchError::Http(_) | FetchError::Transient(_) | FetchError::RateLimited { .. } => true,
         FetchError::Pixiv(e) => pixiv_error_is_retryable(e),
         _ => false,
     }
@@ -464,6 +464,10 @@ mod tests {
         // Transient: network errors, explicit transient, pixiv 429/5xx, and a
         // failed media download (the frame zip's own bad moment).
         assert!(is_retryable(&FetchError::Transient("429".into())));
+        assert!(is_retryable(&FetchError::RateLimited {
+            site: "pixiv",
+            retry_after_secs: 30
+        }));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(429))));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(500))));
         assert!(is_retryable(&FetchError::Pixiv(PixivError::Status(503))));

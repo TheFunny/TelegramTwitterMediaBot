@@ -119,7 +119,7 @@ async fn send_download(request: reqwest::RequestBuilder) -> Result<reqwest::Resp
     if response.status().is_success() {
         Ok(response)
     } else {
-        Err(super::status_error("media", response.status()))
+        Err(super::status_error("media", &response))
     }
 }
 

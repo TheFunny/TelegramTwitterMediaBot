@@ -130,7 +130,7 @@ pub async fn fetch(id: &str) -> Result<Tweet, FetchError> {
     let status = response.status();
     if !status.is_success() {
         log::warn!("twitter auth fetch {id}: HTTP {status}");
-        return Err(crate::site::status_error("twitter auth", status));
+        return Err(crate::site::status_error("twitter auth", &response));
     }
     let text = response.text().await?;
     let json: Value = serde_json::from_str(&text)?;
