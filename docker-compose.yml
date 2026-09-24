@@ -35,7 +35,7 @@ services:
     logging: *default-logging
 
   acme-companion:
-    image: nginxproxy/acme-companion
+    image: nginxproxy/acme-companion:2.8.2
     restart: always
     environment:
       DEFAULT_EMAIL: '${DEFAULT_EMAIL:-}'
