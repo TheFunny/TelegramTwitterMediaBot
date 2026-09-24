@@ -106,6 +106,16 @@ Links are handled in private chats only; in a group use inline mode.";
 /// Cap on template names echoed by `/settings`: a chat with hundreds of
 /// templates must not produce a message Telegram rejects for length.
 const MAX_SETTINGS_TEMPLATE_NAMES: usize = 30;
+/// Telegram's callback data limit is 64 bytes. Reserve the `template|` prefix
+/// so a name can always be carried by a prompt button.
+const MAX_TEMPLATE_NAME_BYTES: usize = 64 - "template|".len();
+/// Keep the persisted map bounded well below the prompt keyboard's 60-button
+/// cap so every stored template remains usable in a prompt.
+const MAX_TEMPLATES: usize = 50;
+/// Keep the persisted template body within a caption-sized value. It is
+/// escaped before storage, so validate the user's reply text before encoding.
+const MAX_TEMPLATE_BODY_CHARS: usize = x_media::site::MAX_CAPTION_CHARS;
+const MAX_SETTINGS_CHARS: usize = 4000;
 
 /// Sorted template names: the order `/settings`, `/remove_template` and the
 /// prompt's buttons all show.
@@ -162,7 +172,7 @@ fn settings_text(data: &ChatData) -> String {
             }
         ),
     });
-    lines.join("\n")
+    cap_text(lines.join("\n"), MAX_SETTINGS_CHARS)
 }
 
 /// The first `{…}` token in a caption format that is not a known placeholder
@@ -372,6 +382,7 @@ pub(crate) async fn execute_command(
         }
         Command::SetTemplate(name) => {
             let chat_id = message.chat.id.0;
+            let name = name.trim().to_string();
             let text = match message.reply_to_message() {
                 None => "Please reply to a message to set as template.".to_string(),
                 Some(reply) => {
@@ -380,22 +391,37 @@ pub(crate) async fn execute_command(
                         "Please reply to a message with [] to set as template.".to_string()
                     } else if name.is_empty() {
                         "Please provide a name for the template.".to_string()
+                    } else if name.len() > MAX_TEMPLATE_NAME_BYTES {
+                        format!("Template name is too long (max {MAX_TEMPLATE_NAME_BYTES} bytes).")
                     } else {
-                        match ctx
-                            .chat_store
-                            .update(chat_id, |data| {
-                                data.template.insert(
-                                    name,
-                                    html_escape::encode_text(reply_text).into_owned(),
-                                );
-                            })
-                            .await
-                        {
-                            Ok((_, true)) => "Template set.".to_string(),
-                            Ok((_, false)) => {
-                                "Template set only in memory; retry later.".to_string()
+                        let template = html_escape::encode_text(reply_text);
+                        if template.chars().count() > MAX_TEMPLATE_BODY_CHARS {
+                            format!(
+                                "Template is too long (max {MAX_TEMPLATE_BODY_CHARS} characters)."
+                            )
+                        } else {
+                            match ctx
+                                .chat_store
+                                .update(chat_id, |data| {
+                                    if data.template.len() >= MAX_TEMPLATES
+                                        && !data.template.contains_key(&name)
+                                    {
+                                        return Err(());
+                                    }
+                                    data.template.insert(name.clone(), template.into_owned());
+                                    Ok(())
+                                })
+                                .await
+                            {
+                                Ok((Ok(()), true)) => "Template set.".to_string(),
+                                Ok((Ok(()), false)) => {
+                                    "Template set only in memory; retry later.".to_string()
+                                }
+                                Ok((Err(()), _)) => format!(
+                                    "This chat already has the maximum of {MAX_TEMPLATES} templates."
+                                ),
+                                Err(()) => CHAT_STATE_READ_ERROR.to_string(),
                             }
-                            Err(()) => CHAT_STATE_READ_ERROR.to_string(),
                         }
                     }
                 }
@@ -749,10 +775,9 @@ const MAX_DEBUG_REPORT_CHARS: usize = 4000;
 /// message, so it must stay under Telegram's 4096-char limit.
 const MAX_DEBUG_DUMP_CHARS: usize = 3500;
 
-/// Truncates `text` to at most `max` characters (the cut lands on a byte
-/// boundary, and the byte before `max` is left free for the ellipsis, so the
-/// result never exceeds `max`). Both callers stay under Telegram's 4096-char
-/// message limit this way.
+/// Truncates `text` to at most `max` characters. The byte boundary keeps the
+/// result valid UTF-8; Telegram's message limit is character-based, so this
+/// remains conservative for non-ASCII text.
 fn cap_text(text: String, max: usize) -> String {
     if text.len() <= max {
         return text;
@@ -1209,6 +1234,91 @@ mod tests {
         assert!(text.contains("twitter => {author}: {content}"), "{text}");
         // Sorted, so the same chat always reports the same thing.
         assert!(text.contains("Templates (2): a, b"), "{text}");
+    }
+
+    #[test]
+    fn settings_text_is_capped_before_telegram_limit() {
+        use crate::state::ChatData;
+
+        let data = ChatData {
+            message_format: [("twitter", "x".repeat(4000))]
+                .into_iter()
+                .map(|(site, format)| (site.to_string(), format))
+                .collect(),
+            template: (0..super::MAX_TEMPLATES)
+                .map(|i| (format!("t{i}"), "[]".to_string()))
+                .collect(),
+            ..ChatData::default()
+        };
+        let text = settings_text(&data);
+        assert!(
+            text.chars().count() <= super::MAX_SETTINGS_CHARS,
+            "{}",
+            text.chars().count()
+        );
+        assert!(text.ends_with('…'), "{text}");
+    }
+
+    #[tokio::test]
+    async fn template_limits_reject_unusable_names_bodies_and_overflow() {
+        let sender = MockSender::scripted(vec![Outcome::MessageOk; 4], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let bot = Bot::new("42:TEST");
+        let message = |reply: &str| {
+            serde_json::from_value::<Message>(serde_json::json!({
+                "message_id": 2,
+                "date": 0,
+                "chat": { "id": 1, "type": "private" },
+                "from": { "id": 5, "is_bot": false, "first_name": "u" },
+                "reply_to_message": {
+                    "message_id": 1,
+                    "date": 0,
+                    "chat": { "id": 1, "type": "private" },
+                    "text": reply,
+                },
+                "text": "/set_template x",
+            }))
+            .unwrap()
+        };
+        let short = message("before [] after");
+
+        execute_command(&ctx, &bot, &short, Command::SetTemplate("漢".repeat(22)))
+            .await
+            .unwrap();
+        assert!(sender.messages()[0].contains("name is too long"));
+        assert!(stores.chat_store().get(1).await.template.is_empty());
+
+        let long_body = message(&format!(
+            "{} []",
+            "<".repeat(super::MAX_TEMPLATE_BODY_CHARS)
+        ));
+        execute_command(&ctx, &bot, &long_body, Command::SetTemplate("long".into()))
+            .await
+            .unwrap();
+        assert!(sender.messages()[1].contains("Template is too long"));
+        assert!(stores.chat_store().get(1).await.template.is_empty());
+
+        execute_command(&ctx, &bot, &short, Command::SetTemplate("ok".into()))
+            .await
+            .unwrap();
+        stores
+            .chat_store()
+            .update(1, |data| {
+                for i in 0..super::MAX_TEMPLATES - 1 {
+                    data.template.insert(format!("t{i}"), "[]".into());
+                }
+            })
+            .await
+            .unwrap();
+        execute_command(&ctx, &bot, &short, Command::SetTemplate("overflow".into()))
+            .await
+            .unwrap();
+        assert!(sender.messages().last().unwrap().contains("maximum"));
+        assert_eq!(
+            stores.chat_store().get(1).await.template.len(),
+            super::MAX_TEMPLATES
+        );
     }
 
     #[test]

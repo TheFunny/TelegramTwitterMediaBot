@@ -13,7 +13,10 @@ use crate::queue::{PersistentTaskQueue, QueueError};
 use crate::state::EditMessage;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId};
+use teloxide::types::{
+    ChatId, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup, Message,
+    MessageId,
+};
 
 /// Persists a successful send under the post's cache key. Skips a send that was
 /// served from the cache — its entry already holds the file ids the next repeat
@@ -182,13 +185,19 @@ fn coarsest_unit(ttl: std::time::Duration) -> String {
 pub(super) const TEMPLATE_BUTTONS_PER_ROW: usize = 3;
 /// Hard cap on template buttons; the prompt text names the ones not shown.
 pub(super) const MAX_TEMPLATE_BUTTONS: usize = 60;
+const MAX_CALLBACK_DATA_BYTES: usize = 64;
+const TEMPLATE_CALLBACK_PREFIX: &str = "template|";
 
 /// Template buttons ([`TEMPLATE_BUTTONS_PER_ROW`] per row, at most
 /// [`MAX_TEMPLATE_BUTTONS`]), then the confirm/skip pair. Sorted by name: the
 /// templates live in a `HashMap`, so an unsorted walk would reshuffle the
-/// buttons between prompts.
+/// buttons between prompts. A name that cannot fit Telegram's callback-data
+/// limit is omitted; legacy/imported state cannot poison the whole prompt.
 pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKeyboardMarkup {
-    let mut names: Vec<&String> = templates.keys().collect();
+    let mut names: Vec<&String> = templates
+        .keys()
+        .filter(|name| TEMPLATE_CALLBACK_PREFIX.len() + name.len() <= MAX_CALLBACK_DATA_BYTES)
+        .collect();
     names.sort();
     let shown = names.len().min(MAX_TEMPLATE_BUTTONS);
     let mut rows = Vec::with_capacity(shown / TEMPLATE_BUTTONS_PER_ROW + 2);
@@ -197,14 +206,14 @@ pub(super) fn build_edit_markup(templates: &HashMap<String, String>) -> InlineKe
             chunk
                 .iter()
                 .map(|name| {
-                    InlineKeyboardButton::callback(name.as_str(), format!("template|{name}"))
+                    InlineKeyboardButton::callback(
+                        name.as_str(),
+                        format!("{TEMPLATE_CALLBACK_PREFIX}{name}"),
+                    )
                 })
                 .collect(),
         );
     }
-    // Skip exists because the prompt holds the forward hostage until Confirm:
-    // without it the only escape was deleting the message and waiting out the
-    // TTL for a forward that then never happens.
     rows.push(vec![
         InlineKeyboardButton::callback("↩️ Confirm", "forward"),
         InlineKeyboardButton::callback("🛑 Skip", "skip"),
@@ -277,7 +286,15 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
         let templates = ctx.chat_store.get(chat_id).await.template;
         let keyboard = build_edit_markup(&templates);
         let mut text = edit_prompt_text(ctx.config.edit_message_ttl);
-        let hidden = templates.len().saturating_sub(MAX_TEMPLATE_BUTTONS);
+        let shown = keyboard
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .filter(|button| {
+                matches!(&button.kind, InlineKeyboardButtonKind::CallbackData(data) if data.starts_with(TEMPLATE_CALLBACK_PREFIX))
+            })
+            .count();
+        let hidden = templates.len().saturating_sub(shown);
         if hidden > 0 {
             // The keyboard is capped; say so instead of silently hiding them.
             text.push_str(&format!(

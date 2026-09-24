@@ -937,6 +937,21 @@ mod tests {
     }
 
     #[test]
+    fn edit_markup_omits_names_that_exceed_callback_data() {
+        let allowed: HashMap<String, String> =
+            [("x".repeat(55), "[]".to_string())].into_iter().collect();
+        let allowed_markup = build_edit_markup(&allowed);
+        assert_eq!(allowed_markup.inline_keyboard.len(), 2);
+        assert_eq!(allowed_markup.inline_keyboard[0].len(), 1);
+
+        let too_long: HashMap<String, String> =
+            [("x".repeat(56), "[]".to_string())].into_iter().collect();
+        let rejected_markup = build_edit_markup(&too_long);
+        assert_eq!(rejected_markup.inline_keyboard.len(), 1);
+        assert_eq!(rejected_markup.inline_keyboard[0].len(), 2);
+    }
+
+    #[test]
     fn failure_text_names_the_post_and_the_cause() {
         // A send failure names the post (the cache key) and the cause, so the
         // user knows which of their links died.
