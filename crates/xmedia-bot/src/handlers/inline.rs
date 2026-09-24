@@ -192,7 +192,7 @@ async fn answer_inline_query(
                 ctx.config.caption_quote_text_chars,
             );
             let mut results: Vec<InlineQueryResult> = Vec::new();
-            for (i, media) in fetched.media.iter().enumerate().take(50) {
+            for (i, media) in fetched.media.iter().enumerate() {
                 // Telegram fetches an inline result's URL itself and cannot
                 // send site-specific headers, so hotlink-protected media
                 // (pixiv's pximg.net) would render as a broken file there.
