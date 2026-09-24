@@ -370,19 +370,21 @@ impl QueueWorker {
     async fn run_loop(self) {
         while !self.stop.load(Ordering::Relaxed) {
             match self.lease_next().await {
-                Ok(Some(row)) => self.process(row).await,
+                Ok(Some(row)) => {
+                    let id = row.id.clone();
+                    let token = row.lease_token.clone();
+                    let payload: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
+                    let attempts = row.attempts;
+                    let worker = self.clone();
+                    if let Err(e) = tokio::spawn(async move { worker.process(row).await }).await {
+                        self.recover_panicked_row(&id, &token, payload, attempts, e)
+                            .await;
+                    }
+                }
                 Ok(None) => {
                     let wait_until = self.earliest_run_after().await;
                     let notified = self.notify.notified();
                     tokio::pin!(notified);
-                    // Register before re-checking stop: a stop() between the
-                    // loop-top check and this point fires notify_waiters with
-                    // no waiter registered, and this worker would then sleep
-                    // until the next enqueue (the same hazard enqueue's
-                    // notify_one comment names). enable() closes it — either
-                    // the stop already happened and the recheck below returns,
-                    // or the waiter is registered and stop's notify_waiters
-                    // reaches it.
                     notified.as_mut().enable();
                     if self.stop.load(Ordering::Relaxed) {
                         return;
@@ -395,18 +397,44 @@ impl QueueWorker {
                                 _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
                             }
                         }
-                        None => {
-                            notified.await;
-                        }
+                        None => notified.await,
                     }
                 }
-                // A lease failure while rows are due would otherwise loop
-                // with sleep(0) and hammer SQLite; back off briefly.
                 Err(e) => {
                     log::error!("queue lease failed: {e}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
+        }
+    }
+
+    /// Turns a handler panic into one normal attempt outcome: retry with the
+    /// same parsed JSON payload while budget remains, then delete and dead-letter
+    /// it. Keeping the payload as a JSON value preserves cache/source fields
+    /// used by the dead-letter callback.
+    async fn recover_panicked_row(
+        &self,
+        id: &str,
+        lease_token: &str,
+        payload: Value,
+        attempts: i32,
+        error: tokio::task::JoinError,
+    ) {
+        log::error!("queue task {id} panicked: {error}");
+        if attempts as u32 >= MAX_RETRIES {
+            let message = "queue worker panicked".to_string();
+            if self.delete_row(id, lease_token).await {
+                (self.dead_letter)(payload, message).await;
+            }
+        } else {
+            self.reschedule(
+                id,
+                lease_token,
+                payload,
+                scaled_retry_delay(1.0, attempts),
+                attempts + 1,
+            )
+            .await;
         }
     }
 
@@ -934,9 +962,6 @@ mod tests {
             .enqueue(serde_json::json!({"chat_id": 2}), due + 600.0)
             .await
             .unwrap();
-        // Hold the first row in the handler so it is leased, not pending: a
-        // health line that reported work already in flight as backlog would be
-        // lying about the queue.
         let release = Arc::new(tokio::sync::Notify::new());
         let held = release.clone();
         queue
@@ -960,9 +985,43 @@ mod tests {
         let (_, oldest) = queue.pending_backlog().await.unwrap();
         assert!(
             (oldest - (due + 600.0)).abs() < 1.0,
-            "oldest is the earliest run_after: {oldest}"
+            "oldest is earliest: {oldest}"
         );
         release.notify_one();
+        queue.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_panicking_handler_is_dead_lettered_after_retry_budget() {
+        let (queue, _dir) = new_queue().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dead_calls = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        let d = Arc::clone(&dead_calls);
+        queue
+            .start(
+                move |_payload| {
+                    c.fetch_add(1, AtomicOrdering::SeqCst);
+                    Box::pin(async { panic!("handler panic") })
+                },
+                move |_payload, message| {
+                    assert!(message.contains("panicked"), "{message}");
+                    d.fetch_add(1, AtomicOrdering::SeqCst);
+                    Box::pin(async {})
+                },
+            )
+            .await;
+        queue
+            .enqueue(serde_json::json!({"panic": true}), now_f64())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(dead_calls.load(AtomicOrdering::SeqCst), 0);
+        tokio::time::sleep(Duration::from_millis(3_200)).await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), MAX_RETRIES as usize + 1);
+        assert_eq!(dead_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(queue.pending_backlog().await, None);
         queue.stop().await;
     }
 
