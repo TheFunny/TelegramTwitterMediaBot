@@ -253,6 +253,7 @@ mod tests {
             from_chat_id: 1,
             to_chat_id: 2,
             message_ids: vec![3],
+            forward_offset: 0,
             notify_chat_id: None,
             notify_message_id: None,
         }));

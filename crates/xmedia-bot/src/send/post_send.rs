@@ -363,6 +363,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
             from_chat_id: chat_id,
             to_chat_id: channel_id,
             message_ids,
+            forward_offset: 0,
             notify_chat_id,
             notify_message_id,
         };

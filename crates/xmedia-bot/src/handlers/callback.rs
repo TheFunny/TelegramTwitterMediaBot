@@ -107,6 +107,7 @@ async fn handle_callback(
                     from_chat_id: edit.chat_id,
                     to_chat_id: channel_id,
                     message_ids: edit.forward_message_ids.clone(),
+                    forward_offset: 0,
                     notify_chat_id: Some(chat_id),
                     notify_message_id: Some(prompt_message_id),
                 };

@@ -150,6 +150,8 @@ pub enum Task {
         from_chat_id: i64,
         to_chat_id: i64,
         message_ids: Vec<i64>,
+        #[serde(default)]
+        forward_offset: usize,
         notify_chat_id: Option<i64>,
         notify_message_id: Option<i64>,
     },
@@ -698,46 +700,45 @@ pub(crate) async fn send_text_post(
     }
 }
 
-/// Copies already-sent messages to the forward channel. No download fallback:
-/// the files are already on Telegram's servers.
 pub async fn forward_messages(ctx: &AppContext<'_>, task: &Task) -> Result<(), SendError> {
     let Task::ForwardMessages {
         from_chat_id,
         to_chat_id,
         message_ids,
+        forward_offset,
         ..
     } = task
     else {
         unreachable!("forward_messages requires a ForwardMessages task")
     };
-    let message_ids = message_ids
-        .iter()
-        .map(|id| MessageId(*id as i32))
-        .collect::<Vec<_>>();
-    match ctx
-        .sender
-        .copy_messages(
-            ChatId(*to_chat_id),
-            ChatId(*from_chat_id),
-            message_ids.clone(),
-        )
-        .await
-    {
-        Ok(_) => {
-            log::info!(
-                "copied {} message(s) from {} to {}",
-                message_ids.len(),
-                from_chat_id,
-                to_chat_id
-            );
-            Ok(())
+    let mut offset = (*forward_offset).min(message_ids.len());
+    while offset < message_ids.len() {
+        let end = (offset + 100).min(message_ids.len());
+        let ids = message_ids[offset..end]
+            .iter()
+            .copied()
+            .map(|id| MessageId(id as i32))
+            .collect();
+        if let Err(e) = ctx
+            .sender
+            .copy_messages(ChatId(*to_chat_id), ChatId(*from_chat_id), ids)
+            .await
+        {
+            let mut retry_task = task.clone();
+            if let Task::ForwardMessages { forward_offset, .. } = &mut retry_task {
+                *forward_offset = offset;
+            }
+            return Err(classify_to_send_error(&e, retry_task, "media fetch failed"));
         }
-        Err(e) => Err(classify_to_send_error(
-            &e,
-            task.clone(),
-            "media fetch failed",
-        )),
+        offset = end;
     }
+    log::info!(
+        "copied {} message(s) from {} to {}",
+        message_ids.len(),
+        from_chat_id,
+        to_chat_id
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -950,6 +951,7 @@ mod tests {
             from_chat_id: 1,
             to_chat_id: 2,
             message_ids: vec![1],
+            forward_offset: 0,
             notify_chat_id: None,
             notify_message_id: None,
         };
@@ -1447,6 +1449,7 @@ mod tests {
             from_chat_id: 1,
             to_chat_id: 2,
             message_ids: vec![3],
+            forward_offset: 0,
             notify_chat_id: None,
             notify_message_id: None,
         };
@@ -1476,10 +1479,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn long_forward_is_split_into_telegram_batches() {
+        let sender = MockSender::scripted(vec![Outcome::CopyOk, Outcome::CopyOk], || {
+            api_error("unused")
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = Task::ForwardMessages {
+            from_chat_id: 1,
+            to_chat_id: 2,
+            message_ids: (1..=201).collect(),
+            forward_offset: 0,
+            notify_chat_id: None,
+            notify_message_id: None,
+        };
+        forward_messages(&ctx, &task).await.unwrap();
+        assert_eq!(
+            sender.calls(),
+            vec!["copy_messages", "copy_messages", "copy_messages"]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_forward_resumes_after_completed_batches() {
+        use teloxide::types::Seconds;
+        let sender = MockSender::scripted(vec![Outcome::CopyOk, Outcome::CopyErr], || {
+            RequestError::RetryAfter(Seconds::from_seconds(7))
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = Task::ForwardMessages {
+            from_chat_id: 1,
+            to_chat_id: 2,
+            message_ids: (1..=201).collect(),
+            forward_offset: 0,
+            notify_chat_id: None,
+            notify_message_id: None,
+        };
+
+        match forward_messages(&ctx, &task).await {
+            Err(SendError::Retryable { task, .. }) => {
+                let Task::ForwardMessages { forward_offset, .. } = *task else {
+                    panic!("retry task is not a forward");
+                };
+                assert_eq!(forward_offset, 100);
+            }
+            other => panic!("expected retryable forward, got {other:?}"),
+        }
+        assert_eq!(
+            sender.calls(),
+            vec!["copy_messages", "copy_messages"],
+            "the first completed batch must not be replayed"
+        );
+    }
+
+    #[tokio::test]
     async fn dead_letter_releases_keep_alive_temp_media() {
-        // A task that exhausts its retries is dead-lettered by the queue
-        // without the handler running again: the keep-alive temp dir the
-        // fetch pipeline handed over must not outlive the task.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ugoira.mp4");
         std::fs::write(&file, b"not-a-real-mp4").unwrap();
