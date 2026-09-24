@@ -247,20 +247,15 @@ impl PersistentTaskQueue {
     /// `(id, payload)` of every row that can still run (`pending`,
     /// `in_progress`). The startup repair reads these before the workers start:
     /// with no worker running, no row can be leased while it writes.
-    pub async fn runnable_rows(&self) -> Vec<(String, String)> {
+    pub async fn runnable_rows(&self) -> rusqlite::Result<Vec<(String, String)>> {
         self.pool
-            .with_conn_or(
-                log::Level::Error,
-                "queue row scan failed",
-                Vec::new(),
-                |conn| {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, payload FROM tasks WHERE status IN ('pending', 'in_progress') ORDER BY run_after",
-                    )?;
-                    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                    rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
-                },
-            )
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, payload FROM tasks WHERE status IN ('pending', 'in_progress') ORDER BY run_after",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+            })
             .await
     }
 
@@ -269,7 +264,7 @@ impl PersistentTaskQueue {
     /// already spent do not carry over. Startup repair only — a worker's
     /// write-back is lease-token guarded instead (`replace_payload` cannot race
     /// one: it runs before any worker does).
-    pub async fn replace_payload(&self, id: &str, payload: &Value) -> bool {
+    pub async fn replace_payload(&self, id: &str, payload: &Value) -> rusqlite::Result<bool> {
         let logged_id = id.to_string();
         let (id, payload) = (id.to_string(), payload.to_string());
         let result = self
@@ -282,18 +277,11 @@ impl PersistentTaskQueue {
                 )?;
                 Ok(affected == 1)
             })
-            .await;
-        match result {
-            Ok(true) => true,
-            Ok(false) => {
-                log::warn!("queue: row {logged_id} vanished before its payload could be replaced");
-                false
-            }
-            Err(e) => {
-                log::error!("queue payload replace failed for {logged_id}: {e}");
-                false
-            }
+            .await?;
+        if !result {
+            log::warn!("queue: row {logged_id} vanished before its payload could be replaced");
         }
+        Ok(result)
     }
 
     pub async fn pending_backlog(&self) -> Option<(i64, f64)> {
@@ -308,7 +296,6 @@ impl PersistentTaskQueue {
                         [],
                         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?)),
                     )?;
-                    // `MIN` over zero rows is NULL, so the count is what decides.
                     Ok(match oldest {
                         Some(oldest) if count > 0 => Some((count, oldest)),
                         _ => None,
@@ -1025,7 +1012,7 @@ mod tests {
             .enqueue(serde_json::json!({"s": 1}), now_f64())
             .await
             .unwrap();
-        let rows = queue.runnable_rows().await;
+        let rows = queue.runnable_rows().await.unwrap();
         assert_eq!(rows.len(), 1);
         let (id, payload) = rows[0].clone();
         assert_eq!(payload, "{\"s\":1}");
@@ -1047,19 +1034,20 @@ mod tests {
             queue
                 .replace_payload(&id, &serde_json::json!({"s": 2}))
                 .await
+                .unwrap()
         );
-        let rows = queue.runnable_rows().await;
+        let rows = queue.runnable_rows().await.unwrap();
         assert_eq!(rows[0].1, "{\"s\":2}");
         assert_eq!(
             queue.pending_backlog().await.map(|(n, _)| n),
             Some(1),
             "a repaired row is pending work again"
         );
-        // A row that is gone (or done) is not rewritten.
         assert!(
             !queue
                 .replace_payload("task_missing", &serde_json::json!({}))
                 .await
+                .unwrap()
         );
     }
 

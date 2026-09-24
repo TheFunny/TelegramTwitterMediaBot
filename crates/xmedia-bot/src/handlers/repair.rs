@@ -21,6 +21,7 @@ struct Refetched {
     caption: String,
     items: Vec<MediaItemPayload>,
     cache_data: Option<CachedPost>,
+    keep_alive: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 /// Whether a queued task should have its post re-fetched, because it still
@@ -117,28 +118,24 @@ async fn refetch(
     if items.is_empty() {
         return Ok(None);
     }
-    // The re-fetch may produce a fresh local file (ugoira / bsky remux): hand it
-    // to the same keep-alive registry the first fetch uses.
-    if let Some(dir) = fetched.keep_alive() {
-        send::KEEP_ALIVE.lock().push(dir);
-    }
     Ok(Some(Refetched {
         caption,
         items,
         cache_data,
+        keep_alive: fetched.keep_alive(),
     }))
 }
 
-/// Re-fetches every queued task whose local media did not survive the restart,
-/// so the user's link is still delivered instead of dead-lettering on a file
-/// that cannot come back. Returns how many rows were rewritten.
-///
-/// Startup only, before the queue workers start: no worker can lease a row while
-/// this writes, which is what lets it replace payloads without the lease-token
-/// guard every worker write-back carries.
-pub(crate) async fn repair_lost_local_media(ctx: &AppContext<'_>) -> usize {
+/// Re-fetches every queued task whose local media did not survive the restart.
+/// This runs at startup before queue workers exist, so any SQLite error is
+/// returned to the caller and prevents workers from starting on unrepaired
+/// state.
+pub(crate) async fn repair_lost_local_media(
+    ctx: &AppContext<'_>,
+) -> Result<usize, rusqlite::Error> {
+    let rows = ctx.task_queue.runnable_rows().await?;
     let mut repaired = 0;
-    for (id, payload) in ctx.task_queue.runnable_rows().await {
+    for (id, payload) in rows {
         let Ok(task) = serde_json::from_str::<Task>(&payload) else {
             continue;
         };
@@ -155,17 +152,26 @@ pub(crate) async fn repair_lost_local_media(ctx: &AppContext<'_>) -> usize {
                     continue;
                 };
                 let updated = serde_json::to_value(&updated).expect("task serializes");
-                if ctx.task_queue.replace_payload(&id, &updated).await {
-                    repaired += 1;
-                    log::info!(
-                        "startup repair: re-fetched [key={}] for chat={chat_id} (its local media did not survive the restart)",
-                        log_key(&url)
-                    );
+                match ctx.task_queue.replace_payload(&id, &updated).await {
+                    Ok(true) => {
+                        if let Some(dir) = fresh.keep_alive {
+                            send::KEEP_ALIVE.lock().push(dir);
+                        }
+                        repaired += 1;
+                        log::info!(
+                            "startup repair: re-fetched [key={}] for chat={chat_id}",
+                            log_key(&url)
+                        );
+                    }
+                    Ok(false) => {
+                        log::warn!("startup repair: queue row {id} disappeared before rewrite")
+                    }
+                    Err(e) => {
+                        log::error!("startup repair: queue row {id} rewrite failed: {e}");
+                        return Err(e);
+                    }
                 }
             }
-            // The post is gone or withheld now: the retry could not have
-            // delivered anything either, so say why instead of letting it
-            // dead-letter on a missing file.
             Ok(None) | Err(_) => {
                 let (notify_chat_id, notify_message_id) = task.notify_target();
                 log::warn!(
@@ -185,7 +191,7 @@ pub(crate) async fn repair_lost_local_media(ctx: &AppContext<'_>) -> usize {
             }
         }
     }
-    repaired
+    Ok(repaired)
 }
 
 #[cfg(test)]
@@ -259,6 +265,7 @@ mod tests {
             caption: "fresh caption".into(),
             items: vec![photo_item("https://cdn/fresh.jpg", true, false)],
             cache_data: None,
+            keep_alive: None,
         };
         match apply_refresh(&task, &fresh).expect("a repairable task") {
             Task::SendMediaSequence {
@@ -303,6 +310,17 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_queue_scan_error_is_reported_to_the_startup_caller() {
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![], permanent_error);
+        let ctx = stores.ctx(&sender);
+        let raw = rusqlite::Connection::open(stores.db_path()).unwrap();
+        raw.execute_batch("DROP TABLE tasks").unwrap();
+
+        assert!(repair_lost_local_media(&ctx).await.is_err());
+    }
+
     /// The whole repair against a real post: a queued row whose media is a local
     /// file the restart took away is re-fetched from its `source_url` and
     /// rewritten in place, so the retry can still deliver it.
@@ -323,7 +341,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(repair_lost_local_media(&ctx).await, 1);
+        assert_eq!(repair_lost_local_media(&ctx).await, Ok(1));
 
         let updated: Task = serde_json::from_value(stores.queued_payload().await).unwrap();
         match updated {

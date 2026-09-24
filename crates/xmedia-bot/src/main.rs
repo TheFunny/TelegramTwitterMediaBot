@@ -157,7 +157,13 @@ async fn main() {
     // succeed after a restart — the registry that kept those files alive is in
     // memory — so those rows are re-fetched from their post instead of
     // dead-lettering the user's link.
-    let repaired = handlers::repair_lost_local_media(&CONTEXT).await;
+    let repaired = match handlers::repair_lost_local_media(&CONTEXT).await {
+        Ok(repaired) => repaired,
+        Err(e) => {
+            log::error!("startup repair failed: {e}; refusing to start queue workers");
+            return;
+        }
+    };
     if repaired > 0 {
         log::info!("startup repair: re-fetched {repaired} queued task(s)");
     }

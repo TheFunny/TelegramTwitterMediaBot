@@ -186,6 +186,12 @@ pub(crate) mod test_support {
             &self.task_queue
         }
 
+        /// Path to the shared test database, for tests that need to corrupt or
+        /// inspect schema through a separate connection.
+        pub(crate) fn db_path(&self) -> &str {
+            self.pool.path()
+        }
+
         /// Rows persisted in the task queue: what "queued for retry" looks like
         /// from the outside.
         pub(crate) async fn queued_tasks(&self) -> i64 {
