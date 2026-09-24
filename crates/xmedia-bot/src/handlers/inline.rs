@@ -114,16 +114,10 @@ static INLINE_DEBOUNCE_STATE: LazyLock<parking_lot::Mutex<DebounceStates>> =
     LazyLock::new(|| parking_lot::Mutex::new(DebounceStates::default()));
 
 pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), RequestError> {
-    if query.query.is_empty() {
-        return respond(());
+    let ctx = AppContext::from_statics(&bot);
+    if query.query.is_empty() || x_media::site::cache_key(&query.query).is_none() {
+        return answer_inline_query(&ctx, query).await.map(|_| ());
     }
-    // Only run a fetch for something that is actually a supported post URL.
-    if x_media::site::cache_key(&query.query).is_none() {
-        return respond(());
-    }
-    // Debounce: record the query and answer only after it has been stable for
-    // INLINE_DEBOUNCE (the timer below). An already-answered repeat of the
-    // same query is left to Telegram's inline cache instead of re-fetching.
     let user_id = query.from.id.0;
     if !INLINE_DEBOUNCE_STATE.lock().note(user_id, &query.query) {
         return respond(());
@@ -131,19 +125,15 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
     let query_text = query.query.clone();
     tokio::spawn(async move {
         tokio::time::sleep(INLINE_DEBOUNCE).await;
-        // Only the user's last query of a typing burst survives: earlier
-        // timers see the query changed and give up without answering.
         if !INLINE_DEBOUNCE_STATE.lock().claim(user_id, &query_text) {
             return;
         }
         let ctx = AppContext::from_statics(&bot);
         match answer_inline_query(&ctx, query).await {
             Ok(true) => {}
-            // The fetch or the answer call failed: release so a repeat of the
-            // same query may retry it. An *empty* answer is a real answer
-            // (`Ok(true)`), so a link whose media Telegram cannot fetch is not
-            // re-fetched on every keystroke.
-            Ok(false) | Err(_) => INLINE_DEBOUNCE_STATE.lock().release(user_id, &query_text),
+            Ok(false) | Err(_) => {
+                INLINE_DEBOUNCE_STATE.lock().release(user_id, &query_text);
+            }
         }
     });
     respond(())
@@ -160,7 +150,8 @@ async fn answer_inline_query(
     log::debug!("inline query [key={}]", log_key(&query.query));
     log::trace!("inline query: {}", query.query);
     let Some(key) = x_media::site::cache_key(&query.query) else {
-        return Ok(false);
+        answer(ctx.sender, query.id, Vec::new()).await?;
+        return Ok(true);
     };
     // A post that was already sent to some chat is answered from the link
     // cache: its Telegram file ids make the answer instant, and — unlike a URL
@@ -237,10 +228,17 @@ async fn answer_inline_query(
             answer(ctx.sender, query.id, results).await?;
             return Ok(true);
         }
-        Ok(None) => {}
-        Err(e) => log::error!("inline fetch [key={}]: {e}", log_key(&query.query)),
+        Ok(None) | Err(_) => {
+            if let Err(e) = answer(ctx.sender, query.id, Vec::new()).await {
+                log::error!(
+                    "inline empty answer failed for [key={}]: {e}",
+                    log_key(&query.query)
+                );
+                return Err(e);
+            }
+            return Ok(true);
+        }
     }
-    Ok(false)
 }
 
 /// The caption of an inline answer, from a cached post: the caption that was
