@@ -496,8 +496,9 @@ impl QueueWorker {
             Ok(value) => value,
             Err(e) => {
                 log::error!("queue: unparseable payload for {}: {e}", row.id);
-                self.delete_row(&row.id, &row.lease_token).await;
-                (self.dead_letter)(Value::Null, format!("invalid stored payload: {e}")).await;
+                if self.delete_row(&row.id, &row.lease_token).await {
+                    (self.dead_letter)(Value::Null, format!("invalid stored payload: {e}")).await;
+                }
                 return;
             }
         };
@@ -546,8 +547,9 @@ impl QueueWorker {
                         row.id,
                         row.attempts + 1
                     );
-                    self.delete_row(&row.id, &row.lease_token).await;
-                    (self.dead_letter)(payload, message).await;
+                    if self.delete_row(&row.id, &row.lease_token).await {
+                        (self.dead_letter)(payload, message).await;
+                    }
                 } else {
                     let delay = scaled_retry_delay(delay_seconds, row.attempts);
                     log::debug!(
@@ -561,8 +563,9 @@ impl QueueWorker {
             }
             Err(QueueError::Permanent { message, payload }) => {
                 log::error!("dead-lettering {} {fields}: {message}", row.id);
-                self.delete_row(&row.id, &row.lease_token).await;
-                (self.dead_letter)(payload, message).await;
+                if self.delete_row(&row.id, &row.lease_token).await {
+                    (self.dead_letter)(payload, message).await;
+                }
             }
         }
     }
@@ -611,7 +614,10 @@ impl QueueWorker {
                         // future here stops this attempt instead of racing the
                         // new holder through the same send.
                         Ok(_) => return Err(LeaseLost),
-                        Err(e) => log::error!("queue lease heartbeat failed: {e}"),
+                        Err(e) => {
+                            log::error!("queue lease heartbeat failed: {e}; abandoning attempt");
+                            return Err(LeaseLost);
+                        }
                     }
                 }
             }
@@ -625,19 +631,18 @@ impl QueueWorker {
     /// (a busy/contended DB is the usual cause and clears), and if the DB still
     /// refuses, the row is marked `done` — a status neither the lease query
     /// (`pending`) nor the sweep (`in_progress`) looks at — so a task that
-    /// already ran can never be re-leased. Both writes failing is logged at
-    /// error level with the row id, since that is the one case where a
-    /// duplicate send stays possible.
-    async fn delete_row(&self, id: &str, lease_token: &str) {
+    /// already ran can never be re-leased. Returns `false` when the token is
+    /// no longer ours; callers must not run dead-letter side effects then.
+    async fn delete_row(&self, id: &str, lease_token: &str) -> bool {
         for attempt in 0..TERMINAL_WRITE_ATTEMPTS {
             match self.try_delete_row(id, lease_token).await {
-                Ok(true) => return,
+                Ok(true) => return true,
                 // The row is not ours any more (re-leased while we worked):
                 // leaving it alone *is* the clean outcome — retrying or
                 // tombstoning here would erase the new holder's work.
                 Ok(false) => {
                     log::warn!("queue: row {id} was re-leased; not deleting it");
-                    return;
+                    return false;
                 }
                 Err(e) => {
                     log::error!("queue delete failed (attempt {}): {e}", attempt + 1);
@@ -646,12 +651,21 @@ impl QueueWorker {
             }
         }
         match mark_done(&self.pool, id, lease_token).await {
-            Ok(true) => log::warn!("queue: row {id} marked done instead of deleted"),
-            Ok(false) => log::warn!("queue: row {id} was re-leased; nothing to tombstone"),
-            Err(e) => log::error!(
-                "queue: row {id} could not be deleted or marked done ({e}); \
-                 the expiry sweep may run this finished task again"
-            ),
+            Ok(true) => {
+                log::warn!("queue: row {id} marked done instead of deleted");
+                true
+            }
+            Ok(false) => {
+                log::warn!("queue: row {id} was re-leased; nothing to tombstone");
+                false
+            }
+            Err(e) => {
+                log::error!(
+                    "queue: row {id} could not be deleted or marked done ({e}); \
+                     the expiry sweep may run this finished task again"
+                );
+                false
+            }
         }
     }
 
@@ -869,6 +883,54 @@ mod tests {
             "the finished row must not run again"
         );
         queue.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_re_leased_row_cannot_dead_letter_the_old_attempt() {
+        let (queue, _dir) = new_queue().await;
+        queue
+            .enqueue(serde_json::json!({"a": 1}), now_f64())
+            .await
+            .unwrap();
+        let id: String = queue
+            .pool
+            .with_conn(|conn| conn.query_row("SELECT id FROM tasks", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        set_lease(&queue, &id, "old-holder").await;
+        let dead_calls = Arc::new(AtomicUsize::new(0));
+        let worker = QueueWorker {
+            pool: std::sync::Arc::clone(&queue.pool),
+            notify: Arc::new(Notify::new()),
+            stop: Arc::new(AtomicBool::new(false)),
+            handler: Arc::new(|_payload| {
+                Box::pin(async {
+                    Err(QueueError::Permanent {
+                        message: "stale failure".into(),
+                        payload: serde_json::json!({"a": 1}),
+                    })
+                })
+            }),
+            dead_letter: Arc::new({
+                let dead_calls = Arc::clone(&dead_calls);
+                move |_payload, _message| {
+                    let dead_calls = Arc::clone(&dead_calls);
+                    Box::pin(async move {
+                        dead_calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    })
+                }
+            }),
+        };
+        set_lease(&queue, &id, "new-holder").await;
+        worker
+            .process(LeasedRow {
+                id,
+                payload: "{\"a\":1}".into(),
+                attempts: 0,
+                lease_token: "old-holder".into(),
+            })
+            .await;
+        assert_eq!(dead_calls.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[tokio::test]
