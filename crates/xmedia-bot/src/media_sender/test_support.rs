@@ -428,6 +428,22 @@ impl MediaSender for MockSender {
         })
     }
 
+    fn send_html_message(
+        &self,
+        _chat_id: ChatId,
+        text: String,
+        _reply_to: Option<MessageId>,
+    ) -> BoxFuture<'_, Result<i64, RequestError>> {
+        Box::pin(async move {
+            self.messages.lock().push(text);
+            match self.next("send_html_message") {
+                Outcome::MessageOk => Ok(MockSender::SENT_ID),
+                Outcome::MessageErr => Err(self.error()),
+                other => panic!("unexpected outcome {other:?} for send_html_message"),
+            }
+        })
+    }
+
     fn answer_inline_query(
         &self,
         _id: InlineQueryId,

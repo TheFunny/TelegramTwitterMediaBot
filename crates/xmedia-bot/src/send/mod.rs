@@ -681,12 +681,7 @@ pub(crate) async fn send_text_post(
 ) {
     match ctx
         .sender
-        .send_message(
-            ChatId(chat_id),
-            caption,
-            Some(MessageId(reply_to as i32)),
-            None,
-        )
+        .send_html_message(ChatId(chat_id), caption, Some(MessageId(reply_to as i32)))
         .await
     {
         Ok(_) => log::info!("sent the post's text for chat={chat_id}"),
@@ -847,7 +842,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(sender.calls(), vec!["send_message"]);
+        assert_eq!(sender.calls(), vec!["send_html_message"]);
         assert_eq!(
             sender.messages(),
             vec!["https://x.com/u/status/1\n<a>u</a>: hello"]
@@ -861,7 +856,7 @@ mod tests {
 
         send_text_post(&ctx, 1, 2, "text".into()).await;
 
-        assert_eq!(sender.calls(), vec!["send_message", "send_message"]);
+        assert_eq!(sender.calls(), vec!["send_html_message", "send_message"]);
         assert!(sender.messages()[1].contains("Could not send this post's text"));
     }
 

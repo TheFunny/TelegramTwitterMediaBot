@@ -60,6 +60,14 @@ pub trait MediaSender: Send + Sync {
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<i64, RequestError>>;
 
+    /// Sends an HTML-formatted plain message.
+    fn send_html_message(
+        &self,
+        chat_id: ChatId,
+        text: String,
+        reply_to: Option<MessageId>,
+    ) -> BoxFuture<'_, Result<i64, RequestError>>;
+
     /// Answers an inline query with `results`, cached by Telegram for
     /// `cache_time` seconds. An empty `results` answers *empty*, which is a
     /// real answer: it stops the client spinning and lets Telegram serve a
@@ -196,6 +204,24 @@ impl MediaSender for Bot {
             }
             if let Some(markup) = reply_markup {
                 request = request.reply_markup(markup);
+            }
+            request.await.map(|message| message.id.0 as i64)
+        })
+    }
+
+    fn send_html_message(
+        &self,
+        chat_id: ChatId,
+        text: String,
+        reply_to: Option<MessageId>,
+    ) -> BoxFuture<'_, Result<i64, RequestError>> {
+        Box::pin(async move {
+            crate::rate_limit::acquire_global(1.0).await;
+            let mut request =
+                <Bot as Requester>::send_message(self, chat_id, text).parse_mode(ParseMode::Html);
+            if let Some(reply_to) = reply_to {
+                request = request
+                    .reply_parameters(ReplyParameters::new(reply_to).allow_sending_without_reply());
             }
             request.await.map(|message| message.id.0 as i64)
         })
