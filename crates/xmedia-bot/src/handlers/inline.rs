@@ -331,7 +331,6 @@ fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryR
         .media
         .iter()
         .enumerate()
-        .take(50)
         .filter_map(|(i, media)| {
             let id = i.to_string();
             let caption = || caption.to_string();
@@ -344,15 +343,11 @@ fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryR
                     caption(),
                 ));
             }
-            // A degraded entry: no file id, so Telegram must fetch the URL.
             if x_media::site::needs_media_headers(&media.url) {
                 log::debug!("inline: skipping hotlink-protected cached media {i}");
                 return None;
             }
             let url = url::Url::parse(&media.url).ok()?;
-            // A degraded entry has no poster, and Telegram would try to render
-            // a video URL as its own thumbnail — skip it. A photo or gif is an
-            // image, so its own URL serves as the thumbnail.
             if matches!(media.kind, CachedMediaKind::Video) {
                 log::debug!("inline: skipping a cached video with no thumbnail {i}");
                 return None;
@@ -375,8 +370,9 @@ fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryR
 async fn answer(
     sender: &dyn crate::media_sender::MediaSender,
     id: teloxide::types::InlineQueryId,
-    results: Vec<InlineQueryResult>,
+    mut results: Vec<InlineQueryResult>,
 ) -> Result<(), RequestError> {
+    results.truncate(50);
     if results.is_empty() {
         log::debug!("inline: nothing Telegram can serve for the query; answering empty");
     }
@@ -493,8 +489,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inline_results_are_capped_at_telegram_limit() {
+    #[tokio::test]
+    async fn unsupported_inline_query_answers_empty() {
+        let sender = MockSender::scripted(vec![], || api_error("boom"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let answered = answer_inline_query(&ctx, inline_query("not a supported post"))
+            .await
+            .unwrap();
+        assert!(answered);
+        assert_eq!(sender.inline_answers(), vec![Vec::<String>::new()]);
+    }
+
+    #[tokio::test]
+    async fn answer_caps_cached_results_at_telegram_limit() {
+        let sender = MockSender::scripted(vec![], || api_error("boom"));
         let mut entry = cached_photo();
         entry.media = (0..51)
             .map(|i| CachedMedia {
@@ -503,7 +512,16 @@ mod tests {
                 url: format!("https://p/{i}.jpg"),
             })
             .collect();
-        assert_eq!(cached_inline_results(&entry, "caption").len(), 50);
+        let results = cached_inline_results(&entry, "caption");
+        assert!(results.len() > 50, "the builder itself may keep all items");
+        super::answer(
+            &sender,
+            inline_query("https://x.com/u/status/1").id,
+            results,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sender.inline_answers()[0].len(), 50);
     }
 
     #[test]
@@ -544,6 +562,18 @@ mod tests {
         assert!(!states.entries.contains_key(&1));
         assert!(states.entries.contains_key(&2));
         assert!(states.note(1, URL_A).0);
+    }
+
+    #[test]
+    fn stale_same_query_generation_cannot_claim_after_a_b_a() {
+        let mut states = DebounceStates::default();
+        assert!(states.note(1, URL_A).0);
+        assert!(states.note(1, URL_B).0);
+        let (_, stale_generation) = states.note(1, URL_A);
+        let (_, current_generation) = states.note(1, URL_A);
+        assert_ne!(stale_generation, current_generation);
+        assert!(!states.claim(1, URL_A, stale_generation));
+        assert!(states.claim(1, URL_A, current_generation));
     }
 
     #[test]
