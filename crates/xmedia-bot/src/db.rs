@@ -174,9 +174,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         if version >= target {
             continue;
         }
-        conn.execute_batch(statement)?;
-        // `PRAGMA` does not take bind parameters; the value is our own index.
-        conn.execute_batch(&format!("PRAGMA user_version = {target}"))?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(statement)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {target}"))?;
+        tx.commit()?;
     }
     Ok(())
 }
