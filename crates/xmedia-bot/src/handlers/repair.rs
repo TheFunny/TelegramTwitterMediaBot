@@ -112,7 +112,7 @@ async fn refetch(
     let items: Vec<MediaItemPayload> = fetched
         .media
         .iter()
-        .map(|media| media_to_payload(media, fetched.sensitive))
+        .filter_map(|media| media_to_payload(media, fetched.sensitive))
         .collect();
     // The re-fetch may produce a fresh local file (ugoira / bsky remux): hand it
     // to the same keep-alive registry the first fetch uses.

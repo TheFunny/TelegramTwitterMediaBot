@@ -182,7 +182,7 @@ pub(super) fn cached_snapshot(fetched: &x_media::site::Fetched) -> Option<Cached
         })
 }
 
-pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
+pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> Option<MediaItemPayload> {
     let url = media.url();
     // Only adapter-produced temp files may be non-HTTP. A bare path from an
     // upstream JSON field must never reach InputFile::file().
@@ -192,18 +192,14 @@ pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPaylo
         .is_some_and(|name| name.starts_with(x_media::TEMP_FILE_PREFIX));
     if !url.starts_with("http://") && !url.starts_with("https://") && !is_local_temp {
         log::warn!("dropping media with a non-URL upstream path");
-        return MediaItemPayload::Photo {
-            media: MediaRef::Source(String::new()),
-            has_spoiler: sensitive,
-            fallback_url: None,
-        };
+        return None;
     }
     let media_ref = MediaRef::Source(url.to_string());
     let fallback_url = media
         .smaller_url()
         .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
         .map(str::to_string);
-    match media {
+    Some(match media {
         // A gif inside a group becomes a video item; a lone gif takes the
         // animation path (see url_media).
         Media::Illustration { .. } => MediaItemPayload::Photo {
@@ -223,7 +219,7 @@ pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPaylo
             thumbnail: thumbnail_for(media),
             fallback_url,
         },
-    }
+    })
 }
 
 /// Sends a task and handles the outcome: post-send actions on success, retry
@@ -662,11 +658,8 @@ async fn url_media_inner(
             let items: Vec<MediaItemPayload> = fetched
                 .media
                 .iter()
-                .map(|media| media_to_payload(media, fetched.sensitive))
+                .filter_map(|media| media_to_payload(media, fetched.sensitive))
                 .collect();
-            // The indicator switches to "sending photo/video" once the kinds
-            // are known; `items` is moved into the task below.
-            *hint.lock() = ActionHint::for_items(&items);
             let task = build_send_task(
                 &chat_data,
                 chat_id,
@@ -825,17 +818,7 @@ mod tests {
             thumbnail_url: Some("/etc/passwd".into()),
             fallback_url: Some("https://safe.example/fallback.jpg".into()),
         };
-        match media_to_payload(&media, false) {
-            MediaItemPayload::Photo {
-                media: MediaRef::Source(source),
-                fallback_url,
-                ..
-            } => {
-                assert!(source.is_empty());
-                assert_eq!(fallback_url.as_deref(), None);
-            }
-            other => panic!("expected rejected photo payload, got {other:?}"),
-        }
+        assert!(media_to_payload(&media, false).is_none());
     }
 
     /// The caption-quote threshold matches the post's text inside the caption,
