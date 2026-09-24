@@ -74,6 +74,8 @@ fn parse_arg_remainder(s: String) -> Result<(String,), ParseError> {
 /// `x_media::site::caption_from_fields` substitutes.
 const FORMAT_PLACEHOLDERS: [&str; 6] = ["url", "author", "author_url", "title", "content", "tags"];
 
+const CHAT_STATE_READ_ERROR: &str = "Couldn't read chat settings; try again.";
+
 /// `/start`'s welcome: what the bot is for, where links work, where to look
 /// next. The old "Hello!" left a first-time user with nothing.
 const START_TEXT: &str = "\
@@ -294,14 +296,19 @@ pub(crate) async fn execute_command(
         }
         Command::SetForwardChannel(channel) => {
             let result = match set_forward_channel_handler(bot, message, channel).await {
-                Ok(channel_id) => {
-                    ctx.chat_store
-                        .update(message.chat.id.0, |data| {
-                            data.forward_channel_id = Some(channel_id);
-                        })
-                        .await;
-                    "Add successfully.".to_string()
-                }
+                Ok(channel_id) => match ctx
+                    .chat_store
+                    .update(message.chat.id.0, |data| {
+                        data.forward_channel_id = Some(channel_id);
+                    })
+                    .await
+                {
+                    Ok((_, true)) => "Add successfully.".to_string(),
+                    Ok((_, false)) => {
+                        "Forward channel set only in memory; retry later.".to_string()
+                    }
+                    Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+                },
                 Err(SetForwardChannelError::EmptyParameter) => {
                     "Receive empty parameter.\nYou should enter a channel id or username"
                         .to_string()
@@ -323,7 +330,7 @@ pub(crate) async fn execute_command(
         }
         Command::RemoveForwardChannel => {
             let chat_id = message.chat.id.0;
-            let (text, _) = ctx
+            let text = match ctx
                 .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_some() {
@@ -333,12 +340,16 @@ pub(crate) async fn execute_command(
                         "No channel to remove.".to_string()
                     }
                 })
-                .await;
+                .await
+            {
+                Ok((text, _)) => text,
+                Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+            };
             reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::EditBeforeForward => {
             let chat_id = message.chat.id.0;
-            let (text, _) = ctx
+            let text = match ctx
                 .chat_store
                 .update(chat_id, |data| {
                     if data.forward_channel_id.is_none() {
@@ -352,7 +363,11 @@ pub(crate) async fn execute_command(
                         "Enable edit before forward.".to_string()
                     }
                 })
-                .await;
+                .await
+            {
+                Ok((text, _)) => text,
+                Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+            };
             reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::SetTemplate(name) => {
@@ -366,15 +381,22 @@ pub(crate) async fn execute_command(
                     } else if name.is_empty() {
                         "Please provide a name for the template.".to_string()
                     } else {
-                        ctx.chat_store
+                        match ctx
+                            .chat_store
                             .update(chat_id, |data| {
                                 data.template.insert(
                                     name,
                                     html_escape::encode_text(reply_text).into_owned(),
                                 );
                             })
-                            .await;
-                        "Template set.".to_string()
+                            .await
+                        {
+                            Ok((_, true)) => "Template set.".to_string(),
+                            Ok((_, false)) => {
+                                "Template set only in memory; retry later.".to_string()
+                            }
+                            Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+                        }
                     }
                 }
             };
@@ -393,21 +415,21 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            let (removed, _) = ctx
+            let text = match ctx
                 .chat_store
                 .update(chat_id, |data| data.template.remove(&name).is_some())
-                .await;
-            let text = if removed {
-                format!("Template '{name}' removed.")
-            } else {
-                // Name the live templates: a typo would otherwise look like a
-                // successful delete.
-                let names = sorted_template_names(&ctx.chat_store.get(chat_id).await);
-                if names.is_empty() {
-                    format!("No template named '{name}'. None are saved yet.")
-                } else {
-                    format!("No template named '{name}'. Saved: {}", names.join(", "))
+                .await
+            {
+                Ok((true, _)) => format!("Template '{name}' removed."),
+                Ok((false, _)) => {
+                    let names = sorted_template_names(&ctx.chat_store.get(chat_id).await);
+                    if names.is_empty() {
+                        format!("No template named '{name}'. None are saved yet.")
+                    } else {
+                        format!("No template named '{name}'. Saved: {}", names.join(", "))
+                    }
                 }
+                Err(()) => CHAT_STATE_READ_ERROR.to_string(),
             };
             reply(ctx.sender, chat_id, message.id, text).await?;
         }
@@ -461,23 +483,18 @@ pub(crate) async fn execute_command(
             // set a format once could never get back to the default (the
             // built-in format string is not something a user can retype).
             if format == "-" {
-                let (_, saved) = ctx
+                let text = match ctx
                     .chat_store
                     .update(chat_id, |data| {
                         data.message_format.remove(site);
                     })
-                    .await;
-                reply(
-                    ctx.sender,
-                    message.chat.id.0,
-                    message.id,
-                    if saved {
-                        "Format reset to the built-in one.".to_string()
-                    } else {
-                        "Reset in memory only: the database write failed, so it will be lost on restart.".to_string()
-                    },
-                )
-                .await?;
+                    .await
+                {
+                    Ok((_, true)) => "Format reset to the built-in one.".to_string(),
+                    Ok((_, false)) => "Reset in memory only; retry later.".to_string(),
+                    Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+                };
+                reply(ctx.sender, message.chat.id.0, message.id, text).await?;
                 return Ok(());
             }
             // A typo like {titel} would otherwise be rendered literally into
@@ -500,23 +517,20 @@ pub(crate) async fn execute_command(
                 .await?;
                 return Ok(());
             }
-            let (_, saved) = ctx
+            let text = match ctx
                 .chat_store
                 .update(chat_id, |data| {
                     data.message_format.insert(site.to_string(), format);
                 })
-                .await;
-            reply(
-                ctx.sender,
-                message.chat.id.0,
-                message.id,
-                if saved {
+                .await
+            {
+                Ok((_, true)) => {
                     "Format set. Use /debug <link> to preview the caption.".to_string()
-                } else {
-                    "Set in memory only: the database write failed, so it will be lost on restart. Use /debug <link> to preview the caption.".to_string()
-                },
-            )
-            .await?;
+                }
+                Ok((_, false)) => "Format set only in memory; retry later.".to_string(),
+                Err(()) => CHAT_STATE_READ_ERROR.to_string(),
+            };
+            reply(ctx.sender, message.chat.id.0, message.id, text).await?;
         }
         Command::ClearCache(arg) => {
             let Some(sender_id) = require_admin(ctx, message).await? else {

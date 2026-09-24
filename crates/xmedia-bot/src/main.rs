@@ -448,7 +448,8 @@ mod tests {
                     },
                 );
             })
-            .await;
+            .await
+            .unwrap();
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let sweep = periodic_sweep(stores.ctx(&sender), stop_rx);

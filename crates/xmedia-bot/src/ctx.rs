@@ -131,7 +131,8 @@ pub(crate) mod test_support {
                     },
                 );
             })
-            .await;
+            .await
+            .expect("seed prompt state");
     }
 
     pub(crate) struct TestStores {

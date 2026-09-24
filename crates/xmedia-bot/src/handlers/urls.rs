@@ -1009,7 +1009,8 @@ mod tests {
                 data.forward_channel_id = Some(2);
                 data.edit_before_forward = true;
             })
-            .await;
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

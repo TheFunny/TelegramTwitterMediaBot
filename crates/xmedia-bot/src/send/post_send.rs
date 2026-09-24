@@ -301,7 +301,8 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                     log_key(&source_url)
                 );
                 let source_url = source_url.clone();
-                ctx.chat_store
+                let _ = ctx
+                    .chat_store
                     .update(chat_id, move |data| {
                         data.edit_message.insert(
                             prompt_id,

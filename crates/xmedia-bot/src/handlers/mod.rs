@@ -145,7 +145,8 @@ async fn edit_message_handler(
     // (not yet swept) is dropped and the reply falls through to the normal
     // message flow instead of rewriting a caption from a dead prompt.
     if edit.created_at + ctx.config.edit_message_ttl.as_secs() as i64 <= crate::db::unix_now() {
-        ctx.chat_store
+        let _ = ctx
+            .chat_store
             .update(chat_id, |data| {
                 data.edit_message.remove(&reply_to_message_id);
             })

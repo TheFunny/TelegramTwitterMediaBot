@@ -59,7 +59,8 @@ async fn handle_callback(
     };
     // Lazy expiry: a stale record (past the TTL, not yet swept) is dropped.
     if edit.created_at + ttl_secs <= unix_now() {
-        ctx.chat_store
+        let _ = ctx
+            .chat_store
             .update(chat_id, |data| {
                 data.edit_message.remove(&prompt_message_id);
             })
@@ -80,7 +81,8 @@ async fn handle_callback(
         // "do not forward this" answer, and it drops the record so the forward
         // can never happen later.
         log::info!("edit-before-forward prompt {prompt_message_id} skipped");
-        ctx.chat_store
+        let _ = ctx
+            .chat_store
             .update(chat_id, |data| {
                 data.edit_message.remove(&prompt_message_id);
             })
@@ -150,7 +152,8 @@ async fn handle_callback(
                         .sender
                         .delete_message(ChatId(chat_id), MessageId(prompt_message_id as i32))
                         .await;
-                    ctx.chat_store
+                    let _ = ctx
+                        .chat_store
                         .update(chat_id, |data| {
                             data.edit_message.remove(&prompt_message_id);
                         })
@@ -190,7 +193,8 @@ async fn handle_callback(
             .await
             {
                 super::EditOutcome::Applied => {
-                    ctx.chat_store
+                    let _ = ctx
+                        .chat_store
                         .update(chat_id, |data| {
                             if let Some(entry) = data.edit_message.get_mut(&prompt_message_id) {
                                 entry.template = name.to_string();

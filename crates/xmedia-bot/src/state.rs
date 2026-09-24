@@ -151,25 +151,17 @@ impl ChatStore {
     /// e.g. a second `edit_message` record. The per-chat lock makes the
     /// cycle atomic. Returns the closure's result plus whether the DB write
     /// landed (see [`Self::set`]); callers that do not care ignore the flag.
-    pub async fn update<R: Default>(
+    pub async fn update<R>(
         &self,
         chat_id: i64,
         f: impl FnOnce(&mut ChatData) -> R,
-    ) -> (R, bool) {
+    ) -> Result<(R, bool), ()> {
         let lock = self.lock_for(chat_id);
         let _guard = lock.lock().await;
-        let mut data = match self.load(chat_id).await {
-            Ok(data) => data,
-            Err(()) => {
-                // Do not run the mutation closure on an empty fallback: a
-                // command could otherwise report success after the failed
-                // read and the next update could write those defaults back.
-                return (R::default(), false);
-            }
-        };
+        let mut data = self.load(chat_id).await?;
         let r = f(&mut data);
         let saved = self.set(chat_id, &data).await;
-        (r, saved)
+        Ok((r, saved))
     }
 
     /// Removes edit-before-forward records whose `created_at + ttl` is in the
@@ -276,7 +268,8 @@ mod tests {
                             },
                         );
                     })
-                    .await;
+                    .await
+                    .unwrap();
             }));
         }
         for h in handles {
@@ -312,7 +305,8 @@ mod tests {
                 data.edit_message.insert(1, edit_entry(7, now - 3600));
                 data.edit_message.insert(2, edit_entry(7, now));
             })
-            .await;
+            .await
+            .unwrap();
 
         let removed = store.prune_expired(Duration::from_secs(60)).await;
 
@@ -339,7 +333,8 @@ mod tests {
                 data.forward_channel_id = Some(-100);
                 data.message_format.insert("twitter".into(), "{url}".into());
             })
-            .await;
+            .await
+            .unwrap();
         assert!(store.cache.lock().contains_key(&9));
 
         let removed = store.prune_expired(Duration::from_secs(60)).await;
@@ -368,7 +363,8 @@ mod tests {
             .update(10, |data| {
                 data.edit_message.insert(1, edit_entry(10, unix_now()));
             })
-            .await;
+            .await
+            .unwrap();
 
         store.prune_expired(Duration::from_secs(3600)).await;
 
@@ -390,7 +386,8 @@ mod tests {
                 data.template.insert("keep".into(), "[]".into());
                 data.edit_message.insert(1, edit_entry(8, 0));
             })
-            .await;
+            .await
+            .unwrap();
 
         let removed = store.prune_expired(Duration::from_secs(60)).await;
 
@@ -446,30 +443,32 @@ mod tests {
         let path = dir.path().join("update.db");
         let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
         let raw = rusqlite::Connection::open(&path).unwrap();
-        let real = ChatData {
-            forward_channel_id: Some(42),
-            ..ChatData::default()
-        };
+        let stored = "{\"forward_channel_id\":";
         raw.execute(
             "INSERT INTO chat_state (chat_id, payload) VALUES ('7', ?1)",
-            rusqlite::params![serde_json::to_string(&real).unwrap()],
+            rusqlite::params![stored],
         )
         .unwrap();
-        raw.execute_batch("DROP TABLE chat_state").unwrap();
         let store = ChatStore::new(pool);
-
         let mut called = false;
-        let (result, saved) = store
+        let result = store
             .update(7, |data| {
                 called = true;
                 data.message_format.insert("twitter".into(), "{url}".into());
             })
             .await;
 
-        assert_eq!(result, ());
-        assert!(!saved);
+        assert!(result.is_err());
         assert!(!called, "a failed load must not run a destructive mutation");
         assert!(!store.cache.lock().contains_key(&7));
+        let payload: String = raw
+            .query_row(
+                "SELECT payload FROM chat_state WHERE chat_id='7'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload, stored, "the original row must remain unchanged");
     }
 
     #[tokio::test]
