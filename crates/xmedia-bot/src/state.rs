@@ -178,7 +178,7 @@ impl ChatStore {
         // what the eviction below is for. The pruning itself re-reads and
         // writes under the per-chat lock below; taking no lock here means a
         // chat appearing later is simply picked up by the next sweep.
-        let candidates: Vec<i64> = {
+        let mut candidates: Vec<i64> = {
             let cache = self.cache.lock();
             cache
                 .iter()
@@ -192,6 +192,48 @@ impl ChatStore {
                 .map(|(chat_id, _)| *chat_id)
                 .collect()
         };
+        let persisted = self
+            .pool
+            .with_conn_or(
+                log::Level::Warn,
+                "expired prompt scan failed",
+                Vec::<i64>::new(),
+                move |conn| {
+                    let mut stmt = conn.prepare("SELECT chat_id, payload FROM chat_state")?;
+                    let rows = stmt.query_map([], |row| {
+                        let id: String = row.get(0)?;
+                        let id: i64 = id.parse().map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
+                        let payload: String = row.get(1)?;
+                        let data: ChatData = serde_json::from_str(&payload).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
+                        Ok((id, data))
+                    })?;
+                    Ok(rows
+                        .filter_map(Result::ok)
+                        .filter(|(_, data)| {
+                            data.edit_message
+                                .values()
+                                .any(|entry| entry.created_at + ttl_secs <= now)
+                        })
+                        .map(|(id, _)| id)
+                        .collect())
+                },
+            )
+            .await;
+        candidates.extend(persisted);
+        candidates.sort_unstable();
+        candidates.dedup();
         let mut removed = Vec::new();
         let mut evicted_chats = Vec::new();
         for chat_id in candidates {
@@ -317,6 +359,31 @@ mod tests {
             data.template.get("t").map(String::as_str),
             Some("[]"),
             "unrelated state lost by the prune"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_expired_prompts_are_pruned_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cold.db");
+        let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let data = ChatData {
+            edit_message: [(1, edit_entry(7, unix_now() - 3600))]
+                .into_iter()
+                .collect(),
+            ..ChatData::default()
+        };
+        raw.execute(
+            "INSERT INTO chat_state (chat_id, payload) VALUES ('7', ?1)",
+            rusqlite::params![serde_json::to_string(&data).unwrap()],
+        )
+        .unwrap();
+        let store = ChatStore::new(pool);
+        assert!(store.cache.lock().get(&7).is_none());
+        assert_eq!(
+            store.prune_expired(Duration::from_secs(60)).await,
+            vec![(7, 1)]
         );
     }
 
