@@ -34,7 +34,7 @@ impl Config {
         fn parse_u64(name: &str, default: u64) -> u64 {
             match env::var(name) {
                 Ok(v) => v.parse::<u64>().unwrap_or_else(|_| {
-                    log::warn!("invalid {name}={v:?}; using default {default}");
+                    log::warn!("invalid {name}; using default {default}");
                     default
                 }),
                 Err(_) => default,
@@ -46,7 +46,7 @@ impl Config {
         fn parse_opt<T: std::str::FromStr>(name: &str) -> Option<T> {
             env::var(name).ok().and_then(|s| {
                 s.parse::<T>().ok().or_else(|| {
-                    log::warn!("invalid {name}={s:?}");
+                    log::warn!("invalid {name}");
                     None
                 })
             })
@@ -68,7 +68,7 @@ impl Config {
                     })
                     .collect();
                 if !bad.is_empty() {
-                    log::warn!("BOT_ADMIN: ignoring non-numeric ids: {bad:?}");
+                    log::warn!("BOT_ADMIN: ignoring {} non-numeric id(s)", bad.len());
                 }
                 ids
             })

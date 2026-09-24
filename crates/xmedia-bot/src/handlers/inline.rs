@@ -155,7 +155,7 @@ async fn answer_inline_query(
     // The query is user input: `debug` keeps only its normalized key, the
     // text itself is `trace` (same split as the message handler).
     log::debug!("inline query [key={}]", log_key(&query.query));
-    log::trace!("inline query: {}", query.query);
+    log::trace!("inline query: {}", super::log_escape(&query.query));
     let Some(key) = x_media::site::cache_key(&query.query) else {
         answer(ctx.sender, query.id, Vec::new()).await?;
         return Ok(true);

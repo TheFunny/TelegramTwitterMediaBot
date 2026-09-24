@@ -222,14 +222,15 @@ pub(crate) async fn handle_message(
         .text()
         .map(|t| {
             let end = t.floor_char_boundary(120.min(t.len()));
-            &t[..end]
+            log_escape(&t[..end])
         })
-        .unwrap_or("<no text>");
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("<no text>"));
     // Per-request detail: who and where at `debug`; the message text itself is
     // user data and only ever appears at `trace`, so a `debug` log can be
     // shared without leaking what people pasted.
     log::debug!(
-        "message from {sender} in {} (private={is_private})",
+        "message from {} in {} (private={is_private})",
+        log_escape(&sender),
         message.chat.id
     );
     log::trace!("message text: {text_preview}");
@@ -249,7 +250,7 @@ pub(crate) async fn handle_message(
         log::debug!(
             "command from {}: {}",
             message.chat.id,
-            text.split_whitespace().next().unwrap_or("<empty>")
+            log_escape(text.split_whitespace().next().unwrap_or("<empty>"))
         );
         log::trace!("command text: {text_preview}");
         execute_command(ctx, bot, &message, command).await?;

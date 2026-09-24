@@ -609,7 +609,7 @@ async fn url_media_inner(
     }
 
     log::debug!("fetching [key={}]", log_key(url));
-    log::trace!("fetching {url}");
+    log::trace!("fetching {}", super::log_escape(url));
     // One fetch per post at a time: a concurrent duplicate of this link waits
     // for *this* fetch instead of running its own.
     let outcome = match x_media::site::cache_key(url) {
@@ -624,11 +624,15 @@ async fn url_media_inner(
             // The URL itself is user data, so only `trace` names the link;
             // `debug` just records that the message was looked at.
             log::debug!("no site pattern matches the link; ignoring");
-            log::trace!("no site pattern matches {url}");
+            log::trace!("no site pattern matches {}", super::log_escape(url));
         }
         // Retries exhausted: notify the user (Rust-only requirement 3).
         Err(e) => {
-            log::error!("fetch [key={}]: {e}", log_key(url));
+            log::error!(
+                "fetch [key={}]: {}",
+                log_key(url),
+                super::log_escape(&e.to_string())
+            );
             let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(e)).await;
         }
         Ok(Some(fetched)) => {

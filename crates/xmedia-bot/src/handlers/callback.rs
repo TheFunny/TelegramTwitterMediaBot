@@ -202,14 +202,21 @@ async fn handle_callback(
                             }
                         })
                         .await;
-                    log::info!("template '{name}' applied to prompt {prompt_message_id}");
+                    log::info!(
+                        "template '{}' applied to prompt {prompt_message_id}",
+                        super::log_escape(name)
+                    );
                 }
                 // Nothing was applied, so nothing is recorded either: the
                 // prompt keeps rendering through whatever it used before, and
                 // the toast says why (a silently "successful" press left the
                 // caption unchanged).
                 super::EditOutcome::Failed(reason) => {
-                    log::error!("template '{name}' could not be applied: {reason}");
+                    log::error!(
+                        "template '{}' could not be applied: {}",
+                        super::log_escape(name),
+                        super::log_escape(&reason)
+                    );
                     answer = Some(format!("Could not apply the template: {reason}"));
                 }
             }
