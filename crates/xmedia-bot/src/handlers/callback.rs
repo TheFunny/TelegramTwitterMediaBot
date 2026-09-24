@@ -357,7 +357,8 @@ mod tests {
         seed_prompt(&ctx, "", crate::db::unix_now()).await;
         ctx.chat_store
             .update(1, |data| data.forward_channel_id = None)
-            .await;
+            .await
+            .unwrap();
 
         handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
 
