@@ -36,54 +36,55 @@ const INLINE_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(300
 /// different user's query) cancel another user's pending answer.
 struct InlineDebounceState {
     query: String,
+    generation: u64,
     answered: bool,
-    /// When a query last touched this entry, so the periodic sweep can drop
-    /// one per user who ever used inline mode (the map had no eviction at all,
-    /// unlike the rate limiter's buckets and the chat store).
     last_seen: std::time::Instant,
 }
 
 #[derive(Default)]
-struct DebounceStates(HashMap<u64, InlineDebounceState>);
+struct DebounceStates {
+    entries: HashMap<u64, InlineDebounceState>,
+    generation: u64,
+}
 
 impl DebounceStates {
     /// Records `query` as the user's newest query. Returns false when it is a
     /// repeat whose answer already went out (Telegram's inline cache serves
     /// it; re-fetching would only hit the source site again).
-    fn note(&mut self, user_id: u64, query: &str) -> bool {
-        if let Some(prev) = self.0.get(&user_id)
+    fn note(&mut self, user_id: u64, query: &str) -> (bool, u64) {
+        if let Some(prev) = self.entries.get(&user_id)
             && prev.query == query
             && prev.answered
         {
-            return false;
+            return (false, prev.generation);
         }
-        self.0.insert(
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.entries.insert(
             user_id,
             InlineDebounceState {
                 query: query.to_string(),
+                generation,
                 answered: false,
                 last_seen: std::time::Instant::now(),
             },
         );
-        true
+        (true, generation)
     }
 
     /// Drops entries no query has touched for `idle_for`. Split from the clock
     /// so the boundary is testable without ageing a monotonic instant.
     fn prune_idle_at(&mut self, now: std::time::Instant, idle_for: std::time::Duration) -> usize {
-        let before = self.0.len();
-        self.0
+        let before = self.entries.len();
+        self.entries
             .retain(|_, state| now.saturating_duration_since(state.last_seen) < idle_for);
-        before - self.0.len()
+        before - self.entries.len()
     }
-
-    /// Claims the answer for the user's newest query; false when a newer query
-    /// superseded it or the answer was already claimed.
-    fn claim(&mut self, user_id: u64, query: &str) -> bool {
-        let Some(state) = self.0.get_mut(&user_id) else {
+    fn claim(&mut self, user_id: u64, query: &str, generation: u64) -> bool {
+        let Some(state) = self.entries.get_mut(&user_id) else {
             return false;
         };
-        if state.query != query || state.answered {
+        if state.query != query || state.generation != generation || state.answered {
             return false;
         }
         state.answered = true;
@@ -91,10 +92,10 @@ impl DebounceStates {
         true
     }
 
-    /// Releases a claimed-but-unsent answer so a repeat can retry the fetch.
-    fn release(&mut self, user_id: u64, query: &str) {
-        if let Some(state) = self.0.get_mut(&user_id)
+    fn release(&mut self, user_id: u64, query: &str, generation: u64) {
+        if let Some(state) = self.entries.get_mut(&user_id)
             && state.query == query
+            && state.generation == generation
         {
             state.answered = false;
             state.last_seen = std::time::Instant::now();
@@ -119,20 +120,26 @@ pub async fn inline_query_handler(bot: Bot, query: InlineQuery) -> Result<(), Re
         return answer_inline_query(&ctx, query).await.map(|_| ());
     }
     let user_id = query.from.id.0;
-    if !INLINE_DEBOUNCE_STATE.lock().note(user_id, &query.query) {
+    let (should_answer, generation) = INLINE_DEBOUNCE_STATE.lock().note(user_id, &query.query);
+    if !should_answer {
         return respond(());
     }
     let query_text = query.query.clone();
     tokio::spawn(async move {
         tokio::time::sleep(INLINE_DEBOUNCE).await;
-        if !INLINE_DEBOUNCE_STATE.lock().claim(user_id, &query_text) {
+        if !INLINE_DEBOUNCE_STATE
+            .lock()
+            .claim(user_id, &query_text, generation)
+        {
             return;
         }
         let ctx = AppContext::from_statics(&bot);
         match answer_inline_query(&ctx, query).await {
             Ok(true) => {}
             Ok(false) | Err(_) => {
-                INLINE_DEBOUNCE_STATE.lock().release(user_id, &query_text);
+                INLINE_DEBOUNCE_STATE
+                    .lock()
+                    .release(user_id, &query_text, generation);
             }
         }
     });
@@ -185,7 +192,7 @@ async fn answer_inline_query(
                 ctx.config.caption_quote_text_chars,
             );
             let mut results: Vec<InlineQueryResult> = Vec::new();
-            for (i, media) in fetched.media.iter().enumerate() {
+            for (i, media) in fetched.media.iter().enumerate().take(50) {
                 // Telegram fetches an inline result's URL itself and cannot
                 // send site-specific headers, so hotlink-protected media
                 // (pixiv's pximg.net) would render as a broken file there.
@@ -328,6 +335,7 @@ fn cached_inline_results(cached: &CachedPost, caption: &str) -> Vec<InlineQueryR
         .media
         .iter()
         .enumerate()
+        .take(50)
         .filter_map(|(i, media)| {
             let id = i.to_string();
             let caption = || caption.to_string();
@@ -381,7 +389,7 @@ async fn answer(
 
 #[cfg(test)]
 mod tests {
-    use super::{DebounceStates, INLINE_STATE_TTL, answer_inline_query};
+    use super::{DebounceStates, INLINE_STATE_TTL, answer_inline_query, cached_inline_results};
     use crate::ctx::test_support::{TestStores, api_error, cached_photo};
     use crate::link_cache::{CachedMedia, CachedMediaKind};
     use crate::media_sender::test_support::MockSender;
@@ -490,63 +498,67 @@ mod tests {
     }
 
     #[test]
+    fn inline_results_are_capped_at_telegram_limit() {
+        let mut entry = cached_photo();
+        entry.media = (0..51)
+            .map(|i| CachedMedia {
+                kind: CachedMediaKind::Photo,
+                file_id: format!("id-{i}"),
+                url: format!("https://p/{i}.jpg"),
+            })
+            .collect();
+        assert_eq!(cached_inline_results(&entry, "caption").len(), 50);
+    }
+
+    #[test]
     fn debounce_state_is_per_user() {
         let mut states = DebounceStates::default();
-        // Two users query different links: both proceed, and neither timer
-        // cancels the other (a single shared slot dropped one of them).
-        assert!(states.note(1, URL_A));
-        assert!(states.note(2, URL_B));
-        assert!(states.claim(1, URL_A), "user 1's answer was cancelled");
-        assert!(states.claim(2, URL_B), "user 2's answer was cancelled");
+        assert!(states.note(1, URL_A).0);
+        assert!(states.note(2, URL_B).0);
+        let (_, generation_a) = states.note(1, URL_A);
+        let (_, generation_b) = states.note(2, URL_B);
+        assert!(states.claim(1, URL_A, generation_a));
+        assert!(states.claim(2, URL_B, generation_b));
     }
 
     #[test]
     fn answered_query_is_suppressed_per_user_only() {
         let mut states = DebounceStates::default();
-        assert!(states.note(1, URL_A));
-        assert!(states.claim(1, URL_A));
-        // A repeat of the answered query by the same user is left to
-        // Telegram's inline cache.
-        assert!(!states.note(1, URL_A));
-        // Another user pasting the same link still gets an answer.
-        assert!(states.note(2, URL_A));
-        assert!(states.claim(2, URL_A));
+        assert!(states.note(1, URL_A).0);
+        let (_, generation) = states.note(1, URL_A);
+        assert!(states.claim(1, URL_A, generation));
+        assert!(!states.note(1, URL_A).0);
+        assert!(states.note(2, URL_A).0);
+        let (_, generation) = states.note(2, URL_A);
+        assert!(states.claim(2, URL_A, generation));
     }
 
     #[test]
     fn idle_states_are_pruned_and_live_ones_kept() {
         let mut states = DebounceStates::default();
-        assert!(states.note(1, URL_A));
-        let first = states.0[&1].last_seen;
-        // Entry 2 is strictly newer, so one timestamp can sit exactly on the
-        // window's edge for one and comfortably inside it for the other.
+        assert!(states.note(1, URL_A).0);
+        let first = states.entries[&1].last_seen;
         std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(states.note(2, URL_B));
+        assert!(states.note(2, URL_B).0);
 
         assert_eq!(
             states.prune_idle_at(first + INLINE_STATE_TTL, INLINE_STATE_TTL),
             1
         );
-        assert!(
-            !states.0.contains_key(&1),
-            "the entry past the window must go"
-        );
-        assert!(states.0.contains_key(&2), "the live entry must stay");
-        // A pruned user's repeat is answered fresh instead of suppressed.
-        assert!(states.note(1, URL_A));
+        assert!(!states.entries.contains_key(&1));
+        assert!(states.entries.contains_key(&2));
+        assert!(states.note(1, URL_A).0);
     }
 
     #[test]
     fn newer_query_supersedes_and_failed_answer_is_released() {
         let mut states = DebounceStates::default();
-        assert!(states.note(1, URL_A));
-        assert!(states.note(1, URL_B));
-        // The stale timer for the half-typed query gives up…
-        assert!(!states.claim(1, URL_A));
-        // …and the newest one answers.
-        assert!(states.claim(1, URL_B));
-        // No results → release so a repeat may retry the fetch.
-        states.release(1, URL_B);
-        assert!(states.claim(1, URL_B));
+        assert!(states.note(1, URL_A).0);
+        let (_, generation_a) = states.note(1, URL_B);
+        assert!(!states.claim(1, URL_A, generation_a));
+        let (_, generation_b) = states.note(1, URL_B);
+        assert!(states.claim(1, URL_B, generation_b));
+        states.release(1, URL_B, generation_b);
+        assert!(states.claim(1, URL_B, generation_b));
     }
 }
