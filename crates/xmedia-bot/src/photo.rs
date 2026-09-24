@@ -65,12 +65,22 @@ fn decode_bytes(w: u32, h: u32, channels: usize) -> u64 {
     (w as u64) * (h as u64) * channels as u64
 }
 
-/// Units to charge for `bytes`, clamped to the whole budget: an item must never
-/// ask for more than exists, or it would wait for itself forever.
 fn memory_units(bytes: u64) -> u32 {
     bytes
         .div_ceil(MEMORY_UNIT_BYTES)
         .clamp(1, MEMORY_UNITS as u64) as u32
+}
+
+/// Conservative peak estimate for one photo preparation. The source bytes,
+/// decoded pixels, any RGBA-to-RGB copy, resize output, and encoded output
+/// can coexist briefly; charging only `w*h*channels` under-counts the real
+/// process peak.
+fn processing_peak_bytes(downloaded: u64, decode: u64) -> u64 {
+    downloaded
+        .saturating_add(decode)
+        .saturating_add(decode / 2)
+        .saturating_add(decode)
+        .saturating_add(MAX_UPLOAD_BYTES)
 }
 
 /// Reserves `bytes` of the preparation budget until the returned permit drops.
@@ -133,7 +143,7 @@ pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
         PhotoPlan::AsIs
     };
     match plan {
-        PhotoPlan::Decode(bytes) => bytes,
+        PhotoPlan::Decode(bytes) => processing_peak_bytes(bytes as u64, bytes),
         PhotoPlan::AsIs | PhotoPlan::TooLarge => 0,
     }
 }
@@ -461,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn huge_decodes_cannot_overlap_but_do_run_alone() {
         let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
-        let max_photo = MAX_DECODE_BYTES + MAX_PHOTO_DOWNLOAD_BYTES;
+        let max_photo = processing_peak_bytes(MAX_PHOTO_DOWNLOAD_BYTES as u64, MAX_DECODE_BYTES);
 
         // One max-size photo fits (clamped to the whole budget), so it can
         // never wait for budget that cannot exist.
