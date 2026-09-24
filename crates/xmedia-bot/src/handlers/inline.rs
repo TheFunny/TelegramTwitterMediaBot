@@ -228,12 +228,8 @@ async fn answer_inline_query(
                     caption.clone().into_owned(),
                 ));
             }
-            // Every item was skipped, or the post has no media at all: answer
-            // *empty* rather than leaving the query unanswered (a client keeps
-            // spinning on that, and the debounce's release re-runs the fetch on
-            // every keystroke).
             answer(ctx.sender, query.id, results).await?;
-            return Ok(true);
+            Ok(true)
         }
         Ok(None) | Err(_) => {
             if let Err(e) = answer(ctx.sender, query.id, Vec::new()).await {
@@ -243,7 +239,7 @@ async fn answer_inline_query(
                 );
                 return Err(e);
             }
-            return Ok(true);
+            Ok(true)
         }
     }
 }
