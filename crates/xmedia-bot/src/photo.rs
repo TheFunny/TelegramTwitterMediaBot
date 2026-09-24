@@ -108,7 +108,7 @@ enum PhotoPlan {
 /// [`PhotoPlan`] for a photo whose header said `w`×`h` in `channels` output
 /// channels, `len` bytes long.
 fn plan_photo(w: u32, h: u32, len: usize, channels: usize) -> PhotoPlan {
-    if w + h <= PHOTO_MAX_DIMENSION_SUM && len as u64 <= MAX_UPLOAD_BYTES {
+    if (w as u64) + (h as u64) <= PHOTO_MAX_DIMENSION_SUM as u64 && len as u64 <= MAX_UPLOAD_BYTES {
         return PhotoPlan::AsIs;
     }
     let bytes = decode_bytes(w, h, channels);
@@ -310,7 +310,7 @@ fn write_temp(bytes: &[u8], ext: &str) -> Result<NamedTempFile, String> {
 }
 
 fn target_dims(w: u32, h: u32) -> (u32, u32) {
-    let scale = PHOTO_TARGET_DIMENSION_SUM as f64 / (w + h) as f64;
+    let scale = PHOTO_TARGET_DIMENSION_SUM as f64 / ((w as u64) + (h as u64)) as f64;
     (
         ((w as f64 * scale).round() as u32).max(1),
         ((h as f64 * scale).round() as u32).max(1),
@@ -367,7 +367,7 @@ fn prepare_png(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> {
     };
 
     let (mut w, mut h) = (out_w, out_h);
-    if w + h > PHOTO_MAX_DIMENSION_SUM {
+    if (w as u64) + (h as u64) > PHOTO_MAX_DIMENSION_SUM as u64 {
         let (nw, nh) = target_dims(w, h);
         pix = resize_pix(pix, w, h, nw, nh)?;
         (w, h) = (nw, nh);
@@ -409,7 +409,7 @@ fn prepare_jpeg(file: NamedTempFile, bytes: &[u8]) -> Result<PhotoPrep, String> 
     let pixels = decoder.decode().map_err(|e| format!("jpeg decode: {e}"))?;
     let mut pix = PixBuf::Rgb(pixels);
     let (mut w, mut h) = (w, h);
-    if w + h > PHOTO_MAX_DIMENSION_SUM {
+    if (w as u64) + (h as u64) > PHOTO_MAX_DIMENSION_SUM as u64 {
         let (nw, nh) = target_dims(w, h);
         pix = resize_pix(pix, w, h, nw, nh)?;
         (w, h) = (nw, nh);
@@ -523,6 +523,16 @@ mod tests {
             memory_units(MAX_DECODE_BYTES + MAX_PHOTO_DOWNLOAD_BYTES),
             MEMORY_UNITS
         );
+    }
+
+    #[test]
+    fn a_wrapping_dimension_sum_never_reads_as_within_limits() {
+        // u32::MAX + 2 wraps to 1: the pre-u64 sum advertised AsIs here and
+        // handed the absurd dimensions to Telegram untouched.
+        assert!(matches!(
+            plan_photo(u32::MAX, 2, 16, 3),
+            PhotoPlan::TooLarge
+        ));
     }
 
     /// What the reservation is charged is decided by the header, and it has to
