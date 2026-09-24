@@ -271,27 +271,28 @@ pub(super) async fn prepare_upload_item(
                 // limits degrade to the smaller URL. CPU-heavy work runs off
                 // the async executor thread.
                 //
-                // The header decides what that will cost in memory, so the
-                // probe travels with the downloaded bytes (both stay alive
-                // through the decode) and the reservation covers their sum:
-                // `PREP_SLOTS` bounds how many photos are prepared at once,
-                // this bounds what they hold between them — 512 MiB, whatever
-                // the batch looks like.
-                let (bytes, decode) = tokio::task::spawn_blocking(move || {
-                    let decode = photo::decode_budget_bytes(&bytes);
-                    (bytes, decode)
+                // Keep the permit inside the blocking closure. If the async
+                // future is cancelled while `spawn_blocking` is still
+                // decoding, dropping the permit here would undercount the
+                // process memory bound until that closure finishes.
+                let (bytes, budget_bytes) = tokio::task::spawn_blocking(move || {
+                    let budget_bytes = photo::prepare_budget_bytes(&bytes);
+                    (bytes, budget_bytes)
                 })
                 .await
                 .map_err(|e| FallbackError::Permanent {
                     message: format!("photo worker panicked: {e}"),
                 })?;
-                let _budget = photo::reserve_memory(bytes.len() as u64 + decode).await;
-                let prep = tokio::task::spawn_blocking(move || photo::prepare_photo(file, &bytes))
-                    .await
-                    .map_err(|e| FallbackError::Permanent {
-                        message: format!("photo worker panicked: {e}"),
-                    })?
-                    .map_err(|message| FallbackError::Permanent { message })?;
+                let budget = photo::reserve_memory(budget_bytes).await;
+                let prep = tokio::task::spawn_blocking(move || {
+                    let _budget = budget;
+                    photo::prepare_photo(file, &bytes)
+                })
+                .await
+                .map_err(|e| FallbackError::Permanent {
+                    message: format!("photo worker panicked: {e}"),
+                })?
+                .map_err(|message| FallbackError::Permanent { message })?;
                 match prep {
                     PhotoPrep::Upload(upload) => {
                         let path = upload.path().to_path_buf();

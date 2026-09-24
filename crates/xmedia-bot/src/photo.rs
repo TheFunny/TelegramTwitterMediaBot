@@ -129,12 +129,11 @@ fn plan_photo(w: u32, h: u32, len: usize, channels: usize) -> PhotoPlan {
     }
 }
 
-/// The decode buffer a downloaded photo will allocate, from its header alone —
-/// zero when it is already within Telegram's limits and is uploaded as-is, zero
-/// for a format [`prepare_photo`] does not decode. The PNG or JPEG header
-/// decides (palette counted as RGB, which `EXPAND` produces); anything else is
-/// uploaded as-is, since [`prepare_photo`] does not decode it.
-pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
+/// The memory budget for one photo preparation, from its header alone. The
+/// result includes the already-buffered download and the conservative decode,
+/// transform, resize, and encoding peak; the caller holds that reservation
+/// through the whole preparation.
+pub(crate) fn prepare_budget_bytes(bytes: &[u8]) -> u64 {
     let plan = if let Some((w, h, _depth, color)) = parse_png_header(bytes) {
         plan_photo(w, h, bytes.len(), output_channels(color))
     } else if let Some((w, h)) = jpeg_dims(bytes) {
@@ -143,8 +142,8 @@ pub(crate) fn decode_budget_bytes(bytes: &[u8]) -> u64 {
         PhotoPlan::AsIs
     };
     match plan {
-        PhotoPlan::Decode(bytes) => processing_peak_bytes(bytes as u64, bytes),
-        PhotoPlan::AsIs | PhotoPlan::TooLarge => 0,
+        PhotoPlan::Decode(decode) => processing_peak_bytes(bytes.len() as u64, decode),
+        PhotoPlan::AsIs | PhotoPlan::TooLarge => bytes.len() as u64,
     }
 }
 
@@ -471,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn huge_decodes_cannot_overlap_but_do_run_alone() {
         let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
-        let max_photo = processing_peak_bytes(MAX_PHOTO_DOWNLOAD_BYTES as u64, MAX_DECODE_BYTES);
+        let max_photo = processing_peak_bytes(MAX_PHOTO_DOWNLOAD_BYTES, MAX_DECODE_BYTES);
 
         // One max-size photo fits (clamped to the whole budget), so it can
         // never wait for budget that cannot exist.
@@ -503,21 +502,29 @@ mod tests {
         );
     }
 
-    /// A 10-image album of ordinary photos must not serialize: they charge
-    /// their real (small) buffers, not a fixed heavyweight slot.
+    /// A 10-image album of ordinary photos must not serialize: the conservative
+    /// peak still allows several small/medium photos to run together.
     #[tokio::test]
     async fn ordinary_photos_share_the_budget() {
         let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
-        // A 4 MiB photo that decodes to ~36 MiB (4000x3000 RGB).
-        let ordinary = 4 * 1024 * 1024 + 36 * 1024 * 1024;
+        // A 4 MiB photo that decodes to ~36 MiB (4000x3000 RGB): its peak
+        // costs two 64 MiB units, so four fit in the 512 MiB process budget.
+        let ordinary = processing_peak_bytes(4 * 1024 * 1024, 36 * 1024 * 1024);
+        assert_eq!(memory_units(ordinary), 2);
         let mut held = Vec::new();
-        for i in 0..MEMORY_UNITS {
+        for i in 0..4 {
             held.push(
                 tokio::time::timeout(Duration::from_millis(50), reserve(budget.clone(), ordinary))
                     .await
                     .unwrap_or_else(|_| panic!("ordinary photo {i} waited for budget")),
             );
         }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), reserve(budget, ordinary))
+                .await
+                .is_err(),
+            "the budget should reject a fifth two-unit photo"
+        );
     }
 
     #[test]
@@ -546,18 +553,22 @@ mod tests {
     }
 
     /// What the reservation is charged is decided by the header, and it has to
-    /// agree with what the pipeline does: a photo uploaded as-is costs nothing,
-    /// one that gets processed costs its decoded buffer.
+    /// agree with what the pipeline does: a photo uploaded as-is costs only
+    /// its buffered bytes, while a processed one costs its conservative peak.
     #[test]
-    fn decode_budget_follows_the_processing_decision() {
+    fn prepare_budget_follows_the_processing_decision() {
         // 9999x2 (sum 10001) is over the dimension cap → processed → charged.
         let oversized = png_header(9999, 2, 8, 2); // 8-bit RGB
-        assert_eq!(decode_budget_bytes(&oversized), 9999 * 2 * 3);
+        assert_eq!(
+            prepare_budget_bytes(&oversized),
+            processing_peak_bytes(oversized.len() as u64, 9999 * 2 * 3)
+        );
         // Inside the limits (dimensions *and* bytes) → uploaded as-is.
         let small = png_header(100, 100, 8, 2);
-        assert_eq!(decode_budget_bytes(&small), 0);
-        // A format the pipeline does not decode costs nothing either.
-        assert_eq!(decode_budget_bytes(b"GIF89a not a photo"), 0);
+        assert_eq!(prepare_budget_bytes(&small), small.len() as u64);
+        // An unsupported format still keeps its already-buffered bytes alive.
+        let unsupported = b"GIF89a not a photo";
+        assert_eq!(prepare_budget_bytes(unsupported), unsupported.len() as u64);
 
         // JPEG: 9999x2 is over the cap, so its RGB decode buffer is charged.
         let (w, h) = (9999u16, 2u16);
@@ -566,7 +577,10 @@ mod tests {
         jpeg_encoder::Encoder::new(&mut bytes, 90)
             .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
             .unwrap();
-        assert_eq!(decode_budget_bytes(&bytes), 9999 * 2 * 3);
+        assert_eq!(
+            prepare_budget_bytes(&bytes),
+            processing_peak_bytes(bytes.len() as u64, 9999 * 2 * 3)
+        );
     }
 
     #[test]
