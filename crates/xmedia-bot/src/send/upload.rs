@@ -229,13 +229,25 @@ pub(super) async fn prepare_upload_item(
             message: "file id reached the upload fallback".into(),
         });
     }
+    let media_url = item_url(&item);
     // Locally produced files (ugoira / bsky remux MP4): nothing to download
     // or shrink — upload the file directly. The send is a multipart upload,
     // so the only remaining failure is an upload-cap error, which is
     // permanent (a video cannot be re-encoded here).
-    let media_url = item_url(&item);
     if !media_url.starts_with("http://") && !media_url.starts_with("https://") {
-        let media = media_from_file(&item, std::path::PathBuf::from(media_url), caption)
+        let path = std::path::Path::new(media_url);
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| FallbackError::Permanent {
+                message: format!("local media unavailable: {e}"),
+            })?
+            .len();
+        if size > MAX_MEDIA_UPLOAD_BYTES {
+            return Err(FallbackError::Permanent {
+                message: "local media exceeds Telegram upload limit".into(),
+            });
+        }
+        let media = media_from_file(&item, path.to_path_buf(), caption)
             .map_err(|message| FallbackError::Permanent { message })?;
         return Ok(PreparedItem {
             index,
@@ -453,5 +465,24 @@ mod download_class_tests {
             Err(_) => panic!("expected a permanent classification, got a different error"),
             Ok(_) => panic!("a file id must be refused, not prepared"),
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_local_media_is_refused_before_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("video.mp4");
+        let handle = std::fs::File::create(&file).unwrap();
+        handle.set_len(MAX_MEDIA_UPLOAD_BYTES + 1).unwrap();
+        drop(handle);
+        let item = MediaItemPayload::Video {
+            media: MediaRef::Source(file.to_string_lossy().into_owned()),
+            has_spoiler: false,
+            thumbnail: None,
+            fallback_url: None,
+        };
+        assert!(matches!(
+            prepare_upload_item(item, 0, None).await,
+            Err(FallbackError::Permanent { .. })
+        ));
     }
 }
