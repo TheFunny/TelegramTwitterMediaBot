@@ -185,6 +185,10 @@ impl MediaSender for Bot {
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<i64, RequestError>> {
         Box::pin(async move {
+            // Plain messages never met a bucket: a dead-letter storm (or one
+            // error reply per failed item) could burst past Telegram's
+            // per-bot ceiling with only 429s left to absorb it.
+            crate::rate_limit::acquire_global(1.0).await;
             let mut request = <Bot as Requester>::send_message(self, chat_id, text);
             if let Some(reply_to) = reply_to {
                 request = request
@@ -272,6 +276,10 @@ impl MediaSender for Bot {
         action: ChatAction,
     ) -> BoxFuture<'_, Result<(), RequestError>> {
         Box::pin(async move {
+            // Same gap as send_message: actions count against the bot-wide
+            // budget too (see there); the refresh loop behind
+            // `run_with_chat_action` makes them frequent enough to matter.
+            crate::rate_limit::acquire_global(1.0).await;
             // teloxide's `send_chat_action` returns `Result<True, _>` (its
             // unit marker type); map the success to `()`.
             <Bot as Requester>::send_chat_action(self, chat_id, action)
