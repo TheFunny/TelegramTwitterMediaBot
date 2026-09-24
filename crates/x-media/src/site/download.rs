@@ -1,8 +1,8 @@
 //! The media-download stack: the two HTTP clients (site metadata vs. media,
-//! which need different timeouts), the guard that keeps a download out of the
-//! host's own network, and the two streaming entry points — a capped body in
-//! memory ([`download_media_limited`]) and a large one written as it arrives
-//! ([`download_media_to_file`]).
+//! which need different timeouts), the CDN allowlist that keeps a download
+//! out of the host's own network, and the two streaming entry points — a capped
+//! body in memory ([`download_media_limited`]) and a large one written as it
+//! arrives ([`download_media_to_file`]).
 //!
 //! Site-specific headers come from each adapter's `Site::media_headers`; no
 //! code here knows about a particular site.
@@ -43,13 +43,12 @@ fn build_client(total_timeout: Option<Duration>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .connect_timeout(Duration::from_secs(10));
-    // Redirects stay allowed (site CDNs use them), but every hop goes through
-    // the same guard as the initial URL, and the cap stays reqwest's default:
-    // a third-party response must not be able to walk the bot into the host's
-    // own network.
+    // Redirects stay allowed for allowlisted CDN hops, but every hop goes
+    // through the same policy as the initial URL; a third-party response must
+    // not be able to introduce a new host.
     builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
         if !media_url_allowed(attempt.url()) {
-            log::warn!("refusing a media redirect into the host's own network");
+            log::warn!("refusing a media redirect outside the CDN allowlist");
             return attempt.error(FetchError::Blocked);
         }
         if attempt.previous().len() >= 10 {
@@ -159,81 +158,51 @@ pub(crate) async fn send_json_response(
     Ok(bytes::Bytes::from(body))
 }
 
-/// Whether an address must never be fetched. Media URLs come from a site's own
-/// API response and the bytes are uploaded to Telegram, so following one into
-/// the host's own network would turn the bot into a proxy for it: a cloud
-/// metadata endpoint read back into a chat.
-fn blocked_ip(addr: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match addr {
-        IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            v4.is_private()           // 10/8, 172.16/12, 192.168/16
-                || v4.is_loopback()   // 127/8
-                || v4.is_link_local() // 169.254/16 — the cloud metadata range
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_multicast()
-                // Ranges the std helpers do not cover: carrier-grade NAT and
-                // benchmarking.
-                || (a == 100 && (64..=127).contains(&b))
-                || (a == 198 && (18..=19).contains(&b))
-        }
-        IpAddr::V6(v6) => {
-            let [first, ..] = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
-                || (first & 0xffc0) == 0xfe80 // link local fe80::/10
-                || v6.to_ipv4_mapped().is_some_and(|v4| blocked_ip(IpAddr::V4(v4)))
-        }
-    }
-}
-
-/// `localhost` (and anything under it) plus the mDNS `.local` suffix: names that
-/// only ever mean this machine.
+/// `localhost` (and anything under it) plus the mDNS `.local` suffix.
 fn is_local_name(name: &str) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
     name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local")
 }
 
-/// Whether a media URL may be requested at all: http(s), and a host that is no
-/// address or name of the host's own network. Applied to the URL a download
-/// starts from *and* to every redirect hop.
-///
-/// The residual gap is DNS rebinding — a name the site controls that resolves to
-/// a private address. Closing it needs a `reqwest::dns::Resolve` wrapper
-/// filtering resolved addresses; it is deliberately not installed, because the
-/// same resolver also resolves the operator's proxy host and `TELOXIDE_PROXY`
-/// is routinely a LAN address, so the guard would take down a working
-/// deployment to block a far less likely attack.
+/// Media is fetched only from the CDN families used by the site adapters.
+/// IP literals are rejected as well: a public IP is not a member of that
+/// allowlist, and accepting one would turn the bot into a generic proxy.
+fn media_host_allowed(name: &str) -> bool {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    name == "misskey.io"
+        || name.ends_with(".misskey.io")
+        || name == "misskeyusercontent.jp"
+        || name.ends_with(".misskeyusercontent.jp")
+        || name == "bsky.app"
+        || name.ends_with(".bsky.app")
+        || name == "twimg.com"
+        || name.ends_with(".twimg.com")
+        || name == "pximg.net"
+        || name.ends_with(".pximg.net")
+        || name == "hdslb.com"
+        || name.ends_with(".hdslb.com")
+}
+
 fn media_url_allowed(url: &url::Url) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
-    match url.host() {
-        Some(url::Host::Ipv4(v4)) => !blocked_ip(v4.into()),
-        Some(url::Host::Ipv6(v6)) => !blocked_ip(v6.into()),
-        Some(url::Host::Domain(name)) => !is_local_name(name),
-        None => false,
-    }
+    matches!(url.host(), Some(url::Host::Domain(name)) if !is_local_name(name) && media_host_allowed(name))
 }
 
-/// Prepares a media download: refuses a URL pointing inside the host's own
-/// network ([`FetchError::Blocked`], permanent — the same URL would be refused
-/// again), then applies every site's media-header rule (pixiv's `Referer` for
-/// pximg.net hotlink protection; sites contribute via `media_headers(url)`, so
-/// the central download code carries no other per-site logic). One choke
-/// point so every download path gets both.
+/// Prepares a media download: refuses a URL outside the CDN allowlist
+/// ([`FetchError::Blocked`], permanent — the same URL would be refused again),
+/// then applies every site's media-header rule (pixiv's `Referer` for pximg.net
+/// hotlink protection; sites contribute via `media_headers(url)`, so the
+/// central download code carries no other per-site logic). One choke point so
+/// every download path gets both.
 fn media_request(url: &str) -> Result<reqwest::RequestBuilder, FetchError> {
     let parsed = url::Url::parse(url).map_err(|e| {
         log::warn!("media url is not a url: {e}");
         FetchError::Blocked
     })?;
     if !media_url_allowed(&parsed) {
-        log::warn!("refusing to fetch media from the host's own network");
+        log::warn!("refusing media URL outside the CDN allowlist");
         return Err(FetchError::Blocked);
     }
     let mut request = MEDIA_CLIENT.get(parsed);
@@ -329,88 +298,45 @@ mod tests {
     use crate::site::{Fetched, pixiv};
 
     #[test]
-    fn blocked_addresses_are_the_hosts_own_network() {
-        for addr in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.1.1",
-            "169.254.169.254", // cloud metadata
-            "0.0.0.0",
-            "255.255.255.255",
-            "100.64.0.1", // carrier-grade NAT
-            "198.18.0.1", // benchmarking
-            "::1",
-            "::",
-            "fc00::1",
-            "fe80::1",
-            "::ffff:127.0.0.1",
-        ] {
-            assert!(blocked_ip(addr.parse().unwrap()), "{addr}");
-        }
-        for addr in [
-            "1.1.1.1",
-            "93.184.216.34",
-            "2606:4700::1111",
-            "::ffff:1.1.1.1",
-        ] {
-            assert!(!blocked_ip(addr.parse().unwrap()), "{addr}");
-        }
-    }
-
-    #[test]
-    fn media_urls_inside_the_host_are_refused() {
+    fn media_urls_outside_the_allowlist_are_refused() {
         for url in [
             "http://127.0.0.1:9/x",
             "http://169.254.169.254/latest/meta-data/",
             "http://[::1]:9/x",
+            "https://1.1.1.1/x",
+            "https://[2606:4700::1111]/x",
             "https://localhost/",
             "https://prompt.localhost/x",
             "https://printer.local/x",
+            "https://example.com/a",
+            "https://evil.pximg.net.attacker.example/a",
             "file:///etc/passwd",
             "gopher://example.com/1",
         ] {
             let parsed = url::Url::parse(url).unwrap();
             assert!(!media_url_allowed(&parsed), "{url}");
         }
-        // Real media hosts and any public address stay fetchable.
         for url in [
             "https://i.pximg.net/img-original/img/1.jpg",
             "https://cdn.bsky.app/img/feed_thumbnail/plain/x",
-            "http://example.com/a",
-            "https://93.184.216.34/a",
+            "https://pbs.twimg.com/media/1.jpg",
+            "https://media.misskeyusercontent.jp/io/1.jpg",
+            "https://i0.hdslb.com/bfs/1.jpg",
         ] {
             let parsed = url::Url::parse(url).unwrap();
             assert!(media_url_allowed(&parsed), "{url}");
         }
     }
-    /// The redirect-hop guard, against a public redirector: the initial URL is
-    /// checked by [`media_request`], but a redirect is the part of the path a
-    /// third-party response actually controls.
 
     #[tokio::test]
-    #[ignore = "live network: requires outbound HTTPS to httpbin.org"]
-    async fn live_redirect_into_the_hosts_network_is_refused() {
-        let url = "https://httpbin.org/redirect-to?url=http://169.254.169.254/latest/meta-data/";
-        match download_media_limited(url, u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
-            .await
-            .unwrap_err()
-        {
-            // A policy refusal reaches the caller wrapped by reqwest.
-            FetchError::Http(e) => assert!(e.is_redirect(), "got {e}"),
-            FetchError::Blocked => {}
-            other => panic!("expected a refusal, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_download_into_the_hosts_network_is_refused() {
+    async fn a_download_from_a_refused_host_is_blocked() {
         // Refused on the URL alone: nothing has to be listening (or leaking) at
         // the metadata endpoint for this to hold, and the class is permanent so
         // the send path does not retry it.
         for url in [
             "http://169.254.169.254/latest/meta-data/",
             "http://127.0.0.1:9/secret",
+            "http://8.8.8.8/x",
         ] {
             let err = download_media_limited(url, u64::MAX, DOWNLOAD_TOTAL_TIMEOUT)
                 .await
