@@ -210,8 +210,16 @@ impl PixivAPI {
             return Ok(None);
         }
         let metadata = self.ugoira_metadata(illust_id).await?;
+        const MAX_UGOIRA_FRAMES: usize = 5_000;
+        const MAX_UGOIRA_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
         if metadata.frames.is_empty() {
             return Ok(None);
+        }
+        if metadata.frames.len() > MAX_UGOIRA_FRAMES {
+            return Err(PixivError::Api(format!(
+                "ugoira has too many frames: {}",
+                metadata.frames.len()
+            )));
         }
         let zip_url = metadata
             .zip_url
@@ -267,10 +275,6 @@ impl PixivAPI {
                     .prefix(crate::TEMP_FILE_PREFIX)
                     .tempdir()
                     .map_err(|e| e.to_string())?;
-
-                // Extract frames to canonical zero-padded names; pixiv ugoira
-                // frames are uniformly jpg or png per artwork. The zip is read
-                // from disk; `zip_file` stays alive for the whole extraction.
                 let mut archive = zip::ZipArchive::new(
                     std::fs::File::open(zip_file.path()).map_err(|e| e.to_string())?,
                 )
@@ -278,34 +282,15 @@ impl PixivAPI {
                 if archive.is_empty() {
                     return Err("empty frame zip".to_string());
                 }
-                // Uniform jpg or png per artwork; sniff the first entry's
-                // magic bytes instead of trusting its filename.
-                let first = archive.by_index(0).map_err(|e| e.to_string())?;
-                let mut first_bytes = Vec::new();
-                first
-                    .take(64 * 1024 * 1024 + 1)
-                    .read_to_end(&mut first_bytes)
-                    .map_err(|e| e.to_string())?;
-                if first_bytes.len() > 64 * 1024 * 1024 {
-                    return Err("frame exceeds size cap".to_string());
+                if archive.len() > MAX_UGOIRA_FRAMES {
+                    return Err("ugoira frame zip has too many entries".to_string());
                 }
-                let extension = if first_bytes.starts_with(&[0xFF, 0xD8]) {
-                    "jpg"
-                } else if first_bytes.starts_with(b"\x89PNG") {
-                    "png"
-                } else {
-                    "jpg"
-                };
+
                 let mut count = 0usize;
-                {
-                    let path = frames_dir
-                        .path()
-                        .join(format!("img_{count:05}.{extension}"));
-                    std::fs::write(&path, &first_bytes).map_err(|e| e.to_string())?;
-                    count += 1;
-                }
-                for i in 1..archive.len() {
-                    let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                let mut unpacked = 0u64;
+                let mut extension = "jpg";
+                for i in 0..archive.len() {
+                    let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
                     if entry.size() > 64 * 1024 * 1024 {
                         return Err(format!("frame {i} exceeds size cap"));
                     }
@@ -317,6 +302,21 @@ impl PixivAPI {
                     if bytes.len() > 64 * 1024 * 1024 {
                         return Err(format!("frame {i} exceeds size cap"));
                     }
+                    unpacked = unpacked
+                        .checked_add(bytes.len() as u64)
+                        .ok_or_else(|| "ugoira unpacked size overflow".to_string())?;
+                    if unpacked > MAX_UGOIRA_UNPACKED_BYTES {
+                        return Err("ugoira exceeds total unpacked size cap".to_string());
+                    }
+                    if i == 0 {
+                        extension = if bytes.starts_with(&[0xFF, 0xD8]) {
+                            "jpg"
+                        } else if bytes.starts_with(b"\x89PNG") {
+                            "png"
+                        } else {
+                            "jpg"
+                        };
+                    }
                     let path = frames_dir
                         .path()
                         .join(format!("img_{count:05}.{extension}"));
@@ -326,7 +326,6 @@ impl PixivAPI {
                 if count == 0 {
                     return Err("empty frame zip".to_string());
                 }
-
                 // Constant rate from the median frame delay (ms).
                 let mut delays = frame_delays;
                 delays.sort_unstable();
