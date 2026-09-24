@@ -93,7 +93,7 @@ services:
     # reported unhealthy. nginx-proxy shows 502s while webhook mode is down,
     # so surface that to the orchestrator.
     healthcheck:
-      test: ["CMD-SHELL", "test '${WEBHOOK:-true}' != true || exec 3<>/dev/tcp/127.0.0.1/${WEBHOOK_PORT:-8443}"]
+      test: ["CMD-SHELL", "test '${WEBHOOK:-true}' != true || bash -c 'exec 3<>/dev/tcp/127.0.0.1/${WEBHOOK_PORT:-8443}'"]
       interval: 30s
       timeout: 5s
       retries: 3

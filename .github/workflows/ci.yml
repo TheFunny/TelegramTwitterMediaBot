@@ -28,6 +28,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
   schedule:
     # Weekly probe of the live endpoints, so external API changes surface.
