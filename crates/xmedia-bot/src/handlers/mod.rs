@@ -141,6 +141,17 @@ async fn edit_message_handler(
     let Some(edit) = chat_data.edit_message.get(&reply_to_message_id) else {
         return false;
     };
+    // Lazy expiry, the same rule a button press gets: a record past the TTL
+    // (not yet swept) is dropped and the reply falls through to the normal
+    // message flow instead of rewriting a caption from a dead prompt.
+    if edit.created_at + ctx.config.edit_message_ttl.as_secs() as i64 <= crate::db::unix_now() {
+        ctx.chat_store
+            .update(chat_id, |data| {
+                data.edit_message.remove(&reply_to_message_id);
+            })
+            .await;
+        return false;
+    }
     let Some(first_forward_id) = edit.forward_message_ids.first() else {
         return false;
     };
@@ -315,6 +326,27 @@ mod tests {
             log_escape("plain text"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_reply_to_an_expired_prompt_is_not_edited() {
+        // 90 000 s ago: past the TTL under any config a test can hold.
+        let sender = MockSender::scripted(vec![], || api_error(API_ERROR));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "tpl", crate::db::unix_now() - 90_000).await;
+
+        let consumed = edit_message_handler(&ctx, 1, PROMPT_ID, "new caption").await;
+
+        assert!(!consumed, "an expired prompt must not consume the reply");
+        assert!(
+            sender.captions().is_empty(),
+            "no caption edit may reach a dead prompt"
+        );
+        assert!(
+            stores.chat_store().get(1).await.edit_message.is_empty(),
+            "the stale record must be dropped for good"
+        );
     }
 
     #[tokio::test]
