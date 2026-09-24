@@ -114,6 +114,9 @@ async fn refetch(
         .iter()
         .filter_map(|media| media_to_payload(media, fetched.sensitive))
         .collect();
+    if items.is_empty() {
+        return Ok(None);
+    }
     // The re-fetch may produce a fresh local file (ugoira / bsky remux): hand it
     // to the same keep-alive registry the first fetch uses.
     if let Some(dir) = fetched.keep_alive() {

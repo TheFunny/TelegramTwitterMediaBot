@@ -637,10 +637,7 @@ async fn url_media_inner(
             let format = chat_data.format_for(fetched.site_id);
             if fetched.media.is_empty() {
                 // A post with no media is still a post: its text goes out as a
-                // message (through the same caption the media path would
-                // attach, plus the long-post quoting the senders apply to
-                // their own), instead of answering "No media found" to text
-                // the fetch already parsed.
+                // message through the same caption the media path would attach.
                 let text = fetched
                     .render_fields()
                     .map(|(_, _, title, content, _)| x_media::site::compose_text(title, content))
@@ -652,14 +649,24 @@ async fn url_media_inner(
                 return;
             }
             let caption = fetched.caption_with(&format);
-            // Raw render data for the link cache; the send fills in the
-            // Telegram file ids and persists the entry.
             let cache_data = cached_snapshot(fetched);
             let items: Vec<MediaItemPayload> = fetched
                 .media
                 .iter()
                 .filter_map(|media| media_to_payload(media, fetched.sensitive))
                 .collect();
+            if items.is_empty() {
+                let text = fetched
+                    .render_fields()
+                    .map(|(_, _, title, content, _)| x_media::site::compose_text(title, content))
+                    .unwrap_or_default();
+                let caption = fetched.caption_with(&format);
+                let caption =
+                    send::quote_long_caption(&caption, &text, ctx.config.caption_quote_text_chars);
+                send::send_text_post(ctx, chat_id, reply_to.0 as i64, caption.into_owned()).await;
+                return;
+            }
+            *hint.lock() = ActionHint::for_items(&items);
             let task = build_send_task(
                 &chat_data,
                 chat_id,

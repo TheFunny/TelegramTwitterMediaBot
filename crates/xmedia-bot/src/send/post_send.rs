@@ -301,7 +301,7 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                     log_key(&source_url)
                 );
                 let source_url = source_url.clone();
-                let _ = ctx
+                let saved = match ctx
                     .chat_store
                     .update(chat_id, move |data| {
                         data.edit_message.insert(
@@ -315,7 +315,25 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                             },
                         );
                     })
+                    .await
+                {
+                    Ok((_, true)) => true,
+                    Ok((_, false)) | Err(()) => false,
+                };
+                if !saved {
+                    log::error!("edit prompt {prompt_id} could not be persisted; removing it");
+                    let _ = ctx
+                        .sender
+                        .delete_message(ChatId(chat_id), MessageId(prompt_id as i32))
+                        .await;
+                    notify_failure(
+                        ctx.sender,
+                        notify_chat_id,
+                        notify_message_id,
+                        "Could not save the edit-before-forward prompt — nothing was forwarded.",
+                    )
                     .await;
+                }
             }
             Err(e) => {
                 log::error!("failed to send edit prompt: {e}");
