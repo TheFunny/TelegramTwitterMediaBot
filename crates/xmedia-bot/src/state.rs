@@ -62,9 +62,13 @@ impl ChatStore {
         }
     }
 
-    pub async fn get(&self, chat_id: i64) -> ChatData {
+    /// Loads persisted state, distinguishing a missing row and a failed read
+    /// from valid default settings. Only the ordinary read-only `get` path is
+    /// allowed to degrade to defaults; mutations must not write those defaults
+    /// back over a real row.
+    async fn load(&self, chat_id: i64) -> Result<ChatData, ()> {
         if let Some(data) = self.cache.lock().get(&chat_id) {
-            return data.clone();
+            return Ok(data.clone());
         }
         let chat_key = chat_id.to_string();
         let payload = self
@@ -81,28 +85,31 @@ impl ChatStore {
                 )
                 .optional()
             })
-            .await;
-        let payload = match payload {
-            // A row — or its documented absence — is a real answer and may be
-            // cached.
-            Ok(payload) => payload.unwrap_or_default(),
-            Err(e) => {
-                // A failed read must not be cached: the default would become
-                // what every later get returns, and the next update would
-                // write it back over the chat's real settings. The next get
-                // simply retries the DB.
+            .await
+            .map_err(|e| {
                 log::warn!("chat_state read failed: {e}");
-                return ChatData::default();
-            }
+            })?;
+        let payload = payload.unwrap_or_default();
+        let data = if payload.is_empty() {
+            ChatData::default()
+        } else {
+            serde_json::from_str(&payload).map_err(|e| {
+                log::warn!("chat_state payload is invalid: {e}");
+            })?
         };
-        let data: ChatData = serde_json::from_str(&payload).unwrap_or_default();
         // Only fill a miss: an unconditional insert would let this (possibly
         // stale) snapshot overwrite what a concurrent set just wrote.
         self.cache
             .lock()
             .entry(chat_id)
             .or_insert_with(|| data.clone());
-        data
+        Ok(data)
+    }
+
+    /// Read-only access may degrade to defaults for display and control flow.
+    /// Mutating callers use [`Self::update`], which refuses a failed load.
+    pub async fn get(&self, chat_id: i64) -> ChatData {
+        self.load(chat_id).await.unwrap_or_default()
     }
 
     /// Write-through: update the cache and the DB. Returns whether the DB
@@ -144,10 +151,22 @@ impl ChatStore {
     /// e.g. a second `edit_message` record. The per-chat lock makes the
     /// cycle atomic. Returns the closure's result plus whether the DB write
     /// landed (see [`Self::set`]); callers that do not care ignore the flag.
-    pub async fn update<R>(&self, chat_id: i64, f: impl FnOnce(&mut ChatData) -> R) -> (R, bool) {
+    pub async fn update<R: Default>(
+        &self,
+        chat_id: i64,
+        f: impl FnOnce(&mut ChatData) -> R,
+    ) -> (R, bool) {
         let lock = self.lock_for(chat_id);
         let _guard = lock.lock().await;
-        let mut data = self.get(chat_id).await;
+        let mut data = match self.load(chat_id).await {
+            Ok(data) => data,
+            Err(()) => {
+                // Do not run the mutation closure on an empty fallback: a
+                // command could otherwise report success after the failed
+                // read and the next update could write those defaults back.
+                return (R::default(), false);
+            }
+        };
         let r = f(&mut data);
         let saved = self.set(chat_id, &data).await;
         (r, saved)
@@ -419,6 +438,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.get(7).await.forward_channel_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_does_not_overwrite_existing_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update.db");
+        let pool = crate::db::open_store(path.to_str().unwrap()).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let real = ChatData {
+            forward_channel_id: Some(42),
+            ..ChatData::default()
+        };
+        raw.execute(
+            "INSERT INTO chat_state (chat_id, payload) VALUES ('7', ?1)",
+            rusqlite::params![serde_json::to_string(&real).unwrap()],
+        )
+        .unwrap();
+        raw.execute_batch("DROP TABLE chat_state").unwrap();
+        let store = ChatStore::new(pool);
+
+        let mut called = false;
+        let (result, saved) = store
+            .update(7, |data| {
+                called = true;
+                data.message_format.insert("twitter".into(), "{url}".into());
+            })
+            .await;
+
+        assert_eq!(result, ());
+        assert!(!saved);
+        assert!(!called, "a failed load must not run a destructive mutation");
+        assert!(!store.cache.lock().contains_key(&7));
     }
 
     #[tokio::test]
