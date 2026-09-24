@@ -183,23 +183,42 @@ pub(super) fn cached_snapshot(fetched: &x_media::site::Fetched) -> Option<Cached
 }
 
 pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> MediaItemPayload {
-    let fallback_url = media.smaller_url().map(str::to_string);
+    let url = media.url();
+    // Only adapter-produced temp files may be non-HTTP. A bare path from an
+    // upstream JSON field must never reach InputFile::file().
+    let is_local_temp = std::path::Path::new(url)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(x_media::TEMP_FILE_PREFIX));
+    if !url.starts_with("http://") && !url.starts_with("https://") && !is_local_temp {
+        log::warn!("dropping media with a non-URL upstream path");
+        return MediaItemPayload::Photo {
+            media: MediaRef::Source(String::new()),
+            has_spoiler: sensitive,
+            fallback_url: None,
+        };
+    }
+    let media_ref = MediaRef::Source(url.to_string());
+    let fallback_url = media
+        .smaller_url()
+        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+        .map(str::to_string);
     match media {
         // A gif inside a group becomes a video item; a lone gif takes the
         // animation path (see url_media).
         Media::Illustration { .. } => MediaItemPayload::Photo {
-            media: MediaRef::Source(media.url().to_string()),
+            media: media_ref,
             has_spoiler: sensitive,
             fallback_url,
         },
         Media::Video { .. } => MediaItemPayload::Video {
-            media: MediaRef::Source(media.url().to_string()),
+            media: media_ref,
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
         },
         Media::Animated { .. } => MediaItemPayload::Video {
-            media: MediaRef::Source(media.url().to_string()),
+            media: media_ref,
             has_spoiler: sensitive,
             thumbnail: thumbnail_for(media),
             fallback_url,
@@ -796,6 +815,26 @@ mod tests {
                 assert!(fallback_url.is_none());
             }
             other => panic!("expected a video payload by URL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn media_to_payload_rejects_an_upstream_local_path() {
+        let media = Media::Illustration {
+            url: "/etc/passwd".into(),
+            thumbnail_url: Some("/etc/passwd".into()),
+            fallback_url: Some("https://safe.example/fallback.jpg".into()),
+        };
+        match media_to_payload(&media, false) {
+            MediaItemPayload::Photo {
+                media: MediaRef::Source(source),
+                fallback_url,
+                ..
+            } => {
+                assert!(source.is_empty());
+                assert_eq!(fallback_url.as_deref(), None);
+            }
+            other => panic!("expected rejected photo payload, got {other:?}"),
         }
     }
 
