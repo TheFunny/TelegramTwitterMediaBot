@@ -112,8 +112,9 @@ const MAX_TEMPLATE_NAME_BYTES: usize = 64 - "template|".len();
 /// Keep the persisted map bounded well below the prompt keyboard's 60-button
 /// cap so every stored template remains usable in a prompt.
 const MAX_TEMPLATES: usize = 50;
-/// Keep the persisted template body within a caption-sized value. It is
-/// escaped before storage, so validate the user's reply text before encoding.
+/// Keep the persisted template body within a caption-sized value. Validation
+/// applies to the escaped body after `html_escape::encode_text` (before the
+/// `[]` placeholder is substituted at apply time).
 const MAX_TEMPLATE_BODY_CHARS: usize = x_media::site::MAX_CAPTION_CHARS;
 const MAX_SETTINGS_CHARS: usize = 4000;
 
