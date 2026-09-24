@@ -332,7 +332,7 @@ fn kind_of_item(item: &MediaItemPayload) -> CachedMediaKind {
 
 /// A cache entry may replay a remote source URL. Local temp paths disappear
 /// when the task settles and must never be persisted as a source.
-fn replayable_cache_url(media: &str) -> String {
+pub(super) fn replayable_cache_url(media: &str) -> String {
     if media.starts_with("http://") || media.starts_with("https://") {
         media.to_string()
     } else {

@@ -50,7 +50,7 @@ pub(super) async fn cache_animation_send(
             vec![CachedMedia {
                 kind: CachedMediaKind::Animation,
                 file_id,
-                url: source_url.to_string(),
+                url: super::replayable_cache_url(source_url),
             }],
         )
         .await;
