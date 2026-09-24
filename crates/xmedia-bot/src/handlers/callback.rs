@@ -71,7 +71,10 @@ async fn handle_callback(
         return;
     }
 
-    log::info!("callback from {chat_id} on prompt {prompt_message_id}: {data}");
+    log::info!(
+        "callback from {chat_id} on prompt {prompt_message_id}: {}",
+        super::log_escape(data)
+    );
     if data == SKIP {
         // Skip works with or without a forward channel: it is the explicit
         // "do not forward this" answer, and it drops the record so the forward

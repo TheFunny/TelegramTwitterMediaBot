@@ -205,14 +205,18 @@ async fn set_forward_channel_handler(
     if let Some(from) = &message.from {
         log::info!(
             "Set forward channel for {} ({}) to {}",
-            from.full_name(),
+            super::log_escape(&from.full_name()),
             message.chat.id,
-            channel
+            super::log_escape(&channel.to_string())
         );
     }
     let chat = match bot.get_chat(channel.clone()).await {
         Err(e) => {
-            log::error!("Failed to get channel {}: {}", channel, e);
+            log::error!(
+                "Failed to get channel {}: {}",
+                super::log_escape(&channel.to_string()),
+                e
+            );
             return Err(SetForwardChannelError::NotBotAdmin(e));
         }
         Ok(chat) => chat,
@@ -229,7 +233,11 @@ async fn set_forward_channel_handler(
     };
     match bot.get_chat_administrators(channel.clone()).await {
         Err(e) => {
-            log::error!("Failed to get channel administrators {}: {}", channel, e);
+            log::error!(
+                "Failed to get channel administrators {}: {}",
+                super::log_escape(&channel.to_string()),
+                e
+            );
             return Err(SetForwardChannelError::NotBotAdmin(e));
         }
         Ok(admins) => {

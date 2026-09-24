@@ -56,6 +56,26 @@ pub fn log_key(url: &str) -> String {
     x_media::site::cache_key(url).unwrap_or_else(|| "<unsupported>".to_string())
 }
 
+/// Makes user-supplied text (a display name, callback data, a channel handle)
+/// fit one log line: newlines and other control characters are escaped, so a
+/// crafted value cannot forge a second log entry or hide inside one. Tab is
+/// kept — it cannot break the line.
+pub(crate) fn log_escape(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(|c| c.is_control() && c != '\t') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c != '\t' && c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// How long a caption edit may sleep before it gives up on retrying: the reply
 /// (or button press) that carried the text is already consumed, so the update
 /// must not stall the chat's queue behind a long flood-control wait — the user
@@ -281,6 +301,21 @@ mod tests {
     /// The Telegram wording the mocks answer with: a message the bot cannot
     /// edit (the prompt was deleted).
     const API_ERROR: &str = "Bad Request: message not found";
+
+    #[test]
+    fn log_escape_cannot_forge_a_second_log_line() {
+        let forged = log_escape("alice\nINFO injected entry");
+        assert!(!forged.contains('\n'), "no raw newline may survive");
+        assert!(
+            forged.contains("\\n"),
+            "the break stays visible as an escape"
+        );
+        // The common case (clean input) borrows — logging must not allocate.
+        assert!(matches!(
+            log_escape("plain text"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     #[tokio::test]
     async fn reply_to_a_prompt_swaps_the_caption_through_its_template() {
