@@ -330,6 +330,16 @@ fn kind_of_item(item: &MediaItemPayload) -> CachedMediaKind {
     }
 }
 
+/// A cache entry may replay a remote source URL. Local temp paths disappear
+/// when the task settles and must never be persisted as a source.
+fn replayable_cache_url(media: &str) -> String {
+    if media.starts_with("http://") || media.starts_with("https://") {
+        media.to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Collects the Telegram file ids of a sent media group, aligned to the
 /// batch's items.
 fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut Vec<CachedMedia>) {
@@ -338,9 +348,7 @@ fn collect_file_ids(messages: &[Message], batch: &[MediaItemPayload], out: &mut 
             out.push(CachedMedia {
                 kind: kind_of_item(item),
                 file_id,
-                // A fresh send's item is the source URL (file ids only appear
-                // in a *cached* send, and `cache_sent_task` skips those).
-                url: item_url(item).to_string(),
+                url: replayable_cache_url(item_url(item)),
             });
         }
     }
@@ -1776,6 +1784,14 @@ mod tests {
                 .await
                 .is_none(),
             "a degraded entry that fails again must be dropped"
+        );
+    }
+    #[test]
+    fn local_media_cache_does_not_store_a_dead_path() {
+        assert_eq!(replayable_cache_url("/tmp/tgxmb-ugoira/video.mp4"), "");
+        assert_eq!(
+            replayable_cache_url("https://cdn.example/video.mp4"),
+            "https://cdn.example/video.mp4"
         );
     }
 }

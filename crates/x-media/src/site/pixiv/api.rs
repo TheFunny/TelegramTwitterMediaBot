@@ -290,7 +290,7 @@ impl PixivAPI {
                 let mut unpacked = 0u64;
                 let mut extension = "jpg";
                 for i in 0..archive.len() {
-                    let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                    let entry = archive.by_index(i).map_err(|e| e.to_string())?;
                     if entry.size() > 64 * 1024 * 1024 {
                         return Err(format!("frame {i} exceeds size cap"));
                     }
