@@ -142,9 +142,23 @@ async fn handle_callback(
                             )
                         }
                     }
-                    Err(send::SendError::Permanent { message, .. }) => {
+                    Err(send::SendError::Permanent { message, task }) => {
                         log::error!("forward failed permanently: {message}");
-                        (format!("Forward failed: {message}"), false)
+                        // `forward_offset` is where the failed batch began, so a
+                        // non-zero offset means earlier messages already reached
+                        // the channel. Keeping the prompt live there let a second
+                        // Confirm rebuild the task from offset 0 and copy those
+                        // messages a second time.
+                        let partial = matches!(
+                            *task,
+                            Task::ForwardMessages { forward_offset, .. } if forward_offset > 0
+                        );
+                        let answer = if partial {
+                            format!("Forward failed partway: {message}")
+                        } else {
+                            format!("Forward failed: {message}")
+                        };
+                        (answer, partial)
                     }
                 };
                 if settled {
@@ -231,7 +245,9 @@ async fn handle_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::test_support::{FORWARDED_ID, PROMPT_ID, TestStores, api_error, seed_prompt};
+    use crate::ctx::test_support::{
+        FORWARDED_ID, PROMPT_ID, TestStores, api_error, permanent_error, seed_prompt,
+    };
     use crate::media_sender::test_support::{MockSender, Outcome};
 
     /// The Telegram wording the mocks answer with: a chat the bot cannot reach.
@@ -428,6 +444,86 @@ mod tests {
             Some(Some("Expired"))
         );
         assert_eq!(stores.queued_tasks().await, 1, "no second forward row");
+    }
+
+    /// A Permanent forward failure that already copied some batches must settle
+    /// the prompt: leaving it live rebuilt the task from offset 0 on a second
+    /// Confirm and copied those messages to the channel a second time.
+    #[tokio::test]
+    async fn a_partial_permanent_forward_settles_the_prompt() {
+        let sender = MockSender::scripted(vec![Outcome::CopyOk, Outcome::CopyErr], permanent_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
+        // Two copy batches: the first (100) succeeds, the second fails, so the
+        // failed task's offset is non-zero — a partial copy reached the channel.
+        ctx.chat_store
+            .update(1, |data| {
+                data.edit_message
+                    .get_mut(&PROMPT_ID)
+                    .unwrap()
+                    .forward_message_ids = (1..=150).collect();
+            })
+            .await
+            .unwrap();
+
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
+
+        assert_eq!(
+            sender.calls(),
+            vec![
+                "copy_messages",
+                "copy_messages",
+                "delete_message",
+                "answer_callback_query"
+            ]
+        );
+        let answer = sender.answers()[0].clone().unwrap();
+        assert!(answer.starts_with("Forward failed partway"), "{answer}");
+        assert!(
+            !ctx.chat_store
+                .get(1)
+                .await
+                .edit_message
+                .contains_key(&PROMPT_ID),
+            "a partial copy must close the prompt so it cannot re-copy from 0"
+        );
+
+        // A second Confirm finds no record: it cannot copy the first batch again.
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
+        let copies = sender
+            .calls()
+            .iter()
+            .filter(|c| **c == "copy_messages")
+            .count();
+        assert_eq!(copies, 2, "the second Confirm must not copy again");
+    }
+
+    /// A Permanent failure on the first batch copied nothing, so the prompt
+    /// stays live for the user to retry.
+    #[tokio::test]
+    async fn a_permanent_forward_that_copied_nothing_keeps_the_prompt() {
+        let sender = MockSender::scripted(vec![Outcome::CopyErr], permanent_error);
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        seed_prompt(&ctx, "", crate::db::unix_now()).await;
+
+        handle_callback(&ctx, callback_id(), 1, PROMPT_ID, "forward").await;
+
+        assert_eq!(
+            sender.calls(),
+            vec!["copy_messages", "answer_callback_query"]
+        );
+        let answer = sender.answers()[0].clone().unwrap();
+        assert!(answer.starts_with("Forward failed: "), "{answer}");
+        assert!(
+            ctx.chat_store
+                .get(1)
+                .await
+                .edit_message
+                .contains_key(&PROMPT_ID),
+            "nothing was copied, so the prompt may be retried"
+        );
     }
 
     #[tokio::test]
