@@ -186,10 +186,7 @@ pub(super) fn media_to_payload(media: &Media, sensitive: bool) -> Option<MediaIt
     let url = media.url();
     // Only adapter-produced temp files may be non-HTTP. A bare path from an
     // upstream JSON field must never reach InputFile::file().
-    let is_local_temp = std::path::Path::new(url)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(x_media::TEMP_FILE_PREFIX));
+    let is_local_temp = x_media::is_own_temp_file(std::path::Path::new(url));
     if !url.starts_with("http://") && !url.starts_with("https://") && !is_local_temp {
         log::warn!("dropping media with a non-URL upstream path");
         return None;
@@ -828,6 +825,46 @@ mod tests {
             url: "/etc/passwd".into(),
             thumbnail_url: Some("/etc/passwd".into()),
             fallback_url: Some("https://safe.example/fallback.jpg".into()),
+        };
+        assert!(media_to_payload(&media, false).is_none());
+    }
+
+    /// Adapter output (bsky remux, pixiv ugoira) lives at `tgxmb-XXXX/video.mp4`
+    /// under the OS temp dir: the prefix is on the directory, so it must pass.
+    #[test]
+    fn media_to_payload_accepts_an_adapter_temp_video() {
+        let dir = tempfile::Builder::new()
+            .prefix(x_media::TEMP_FILE_PREFIX)
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("video.mp4");
+        std::fs::write(&path, b"mp4").unwrap();
+        let media = Media::Video {
+            url: path.to_string_lossy().into_owned(),
+            thumbnail_url: String::new(),
+        };
+        assert!(matches!(
+            media_to_payload(&media, false),
+            Some(MediaItemPayload::Video {
+                media: MediaRef::Source(_),
+                ..
+            })
+        ));
+    }
+
+    /// A `tgxmb-` directory outside the OS temp dir is an upstream-chosen path,
+    /// not one of ours, and must still be dropped.
+    #[test]
+    fn media_to_payload_rejects_a_tgxmb_dir_outside_the_temp_root() {
+        let dir = tempfile::Builder::new()
+            .prefix(x_media::TEMP_FILE_PREFIX)
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let path = dir.path().join("video.mp4");
+        std::fs::write(&path, b"mp4").unwrap();
+        let media = Media::Video {
+            url: path.to_string_lossy().into_owned(),
+            thumbnail_url: String::new(),
         };
         assert!(media_to_payload(&media, false).is_none());
     }
