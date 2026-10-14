@@ -112,6 +112,14 @@ impl ChatStore {
         self.load(chat_id).await.unwrap_or_default()
     }
 
+    /// Strict read for callers whose *behavior* depends on the settings. A
+    /// send that reads them via [`Self::get`] would silently use the defaults
+    /// on a failed read — no channel forward, no edit prompt — and persist
+    /// those defaults into the retry payload it builds.
+    pub async fn try_get(&self, chat_id: i64) -> Result<ChatData, ()> {
+        self.load(chat_id).await
+    }
+
     /// Write-through: update the cache and the DB. Returns whether the DB
     /// write landed: the cache is updated either way, so `false` means the
     /// change lives only until the next restart and the caller has to say so

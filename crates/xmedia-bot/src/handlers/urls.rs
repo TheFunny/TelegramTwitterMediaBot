@@ -543,6 +543,31 @@ fn site_title(site: &str) -> String {
     }
 }
 
+/// The chat's settings, or `None` after telling the user the send was dropped
+/// because they could not be read. Falling back to defaults silently dropped
+/// the chat's channel forward / edit-before-forward, and wrote those defaults
+/// into the retry payload the task carries.
+async fn settings_or_report(
+    ctx: &AppContext<'_>,
+    chat_id: i64,
+    reply_to: MessageId,
+) -> Option<ChatData> {
+    match ctx.chat_store.try_get(chat_id).await {
+        Ok(data) => Some(data),
+        Err(()) => {
+            log::error!("chat settings read failed for chat={chat_id}; not sending");
+            let _ = reply(
+                ctx.sender,
+                chat_id,
+                reply_to,
+                "Couldn't read this chat's settings. Please try again.",
+            )
+            .await;
+            None
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn url_media_inner(
     ctx: &AppContext<'_>,
@@ -564,7 +589,9 @@ async fn url_media_inner(
         && let Some(cached) = ctx.link_cache.get(&key, ctx.config.link_cache_ttl).await
     {
         log::debug!("link cache hit for {key}");
-        let chat_data = ctx.chat_store.get(chat_id).await;
+        let Some(chat_data) = settings_or_report(ctx, chat_id, reply_to).await else {
+            return;
+        };
         // Cache keys are prefixed with the site id ("twitter:…"), matching
         // the value a fresh fetch would read from Fetched::site_id. The key
         // came out of cache_key, so its prefix is a registered id by
@@ -633,7 +660,9 @@ async fn url_media_inner(
             let _ = reply(ctx.sender, chat_id, reply_to, fetch_error_message(e)).await;
         }
         Ok(Some(fetched)) => {
-            let chat_data = ctx.chat_store.get(chat_id).await;
+            let Some(chat_data) = settings_or_report(ctx, chat_id, reply_to).await else {
+                return;
+            };
             // Per-site caption format override (empty -> built-in caption).
             let format = chat_data.format_for(fetched.site_id);
             if fetched.media.is_empty() {
@@ -750,6 +779,28 @@ mod tests {
             .await
             .expect("the entry must stay");
         assert!(entry.media[0].file_id.is_empty());
+    }
+
+    /// A settings read failure must drop the send, not fall back to defaults:
+    /// sending anyway silently ignored the chat's channel forward and
+    /// edit-before-forward, and wrote those defaults into the retry payload.
+    #[tokio::test]
+    async fn an_unreadable_settings_row_drops_the_send_and_tells_the_user() {
+        let stores = TestStores::new();
+        let sender = MockSender::scripted(vec![Outcome::MessageOk], permanent_error);
+        let ctx = stores.ctx(&sender);
+        stores.link_cache().put("twitter:1", &cached_photo()).await;
+        // Force the read to fail (the missing-table shape `state.rs` uses).
+        let raw = rusqlite::Connection::open(stores.db_path()).unwrap();
+        raw.execute_batch("DROP TABLE chat_state").unwrap();
+
+        url_media(&ctx, 1, 2, "https://x.com/u/status/1", PostSend::FromChat).await;
+
+        assert_eq!(
+            sender.calls(),
+            vec!["send_chat_action", "send_message"],
+            "no media may go out without the chat's settings; the user is told instead"
+        );
     }
 
     /// A repeat request for a single-gif post re-sends the cached file id
