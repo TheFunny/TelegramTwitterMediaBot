@@ -111,14 +111,27 @@ jobs:
           fi
           echo "build=true" >> "$GITHUB_OUTPUT"
 
+  # The publish gate: the offline suite CI runs (fmt, clippy, tests, release
+  # build, audit), reused rather than copied, so no image is pushed for a
+  # commit whose tests are red. Pull requests skip it: their own CI run covers
+  # the code, and the docker job there only proves the image still builds.
+  ci:
+    needs: should-build
+    if: needs.should-build.outputs.build == 'true' && github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci.yml
+    with:
+      gate: true
+
   # No `actions/checkout` here on purpose: `docker/build-push-action` defaults
   # to the Git context (`https://github.com/<owner>/<repo>.git#<ref>`), so
   # BuildKit clones the repo itself and authenticates with the automatic
   # github.token. Adding `context: .` below without a checkout step would hand
   # BuildKit an empty workspace.
   docker:
-    needs: should-build
-    if: needs.should-build.outputs.build == 'true'
+    needs: [should-build, ci]
+    # `always()`: a skipped `ci` (pull requests) must not skip this job; only a
+    # failed or cancelled gate does.
+    if: always() && needs.should-build.outputs.build == 'true' && (github.event_name == 'pull_request' || needs.ci.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
