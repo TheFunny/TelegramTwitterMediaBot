@@ -116,11 +116,12 @@ jobs:
   # commit whose tests are red. Pull requests skip it: their own CI run covers
   # the code, and the docker job there only proves the image still builds.
   ci:
-    # The offline suite's only master/tag run (`ci.yml` has no push trigger).
-    # Every non-PR push runs it — the gate's own `changes` job skips the heavy
-    # work for a docs-only diff — independently of whether the image itself is
-    # rebuilt.
-    if: github.event_name != 'pull_request'
+    needs: should-build
+    # The suite's only master/tag run (`ci.yml` has no push trigger). Gated on
+    # `should-build` so a release push — which fires a master *and* a tag run for
+    # one commit — tests once: the master run's `should-build` is false (already
+    # tagged), so only the tag run gates.
+    if: needs.should-build.outputs.build == 'true' && github.event_name != 'pull_request'
     uses: ./.github/workflows/ci.yml
     with:
       gate: true
