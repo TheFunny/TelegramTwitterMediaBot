@@ -1,19 +1,22 @@
 name: CI
 
-# Test/lint gate (offline, no secrets) on every push/PR, plus a live-network
-# job that exercises the real source sites and the token-gated pixiv tests.
+# Test/lint gate (offline, no secrets). Standalone on pull requests, schedule
+# and manual dispatch; a master/tag push does not trigger it directly — that
+# push is tested once, by docker.yml's `ci` gate, which calls this workflow
+# with `gate: true` and blocks the image on the result.
 #
 # Layering:
 #   changes — decides whether anything but documentation changed; a docs-only
-#           push/PR skips `test` (which then reports as skipped, not missing).
+#           diff skips `test` (which then reports as skipped, not missing).
 #   test  — fmt + clippy + the full offline unit suite + a release-profile
-#           build + cargo-audit dependency gate. Runs on every push and PR,
-#           including forks (it needs no secrets).
+#           build + cargo-audit dependency gate. Runs on PRs, and for a
+#           master/tag push under the docker gate; no secrets needed.
 #   live  — the #[ignore]d live-network tests plus the pixiv tests that are
-#           gated on PIXIV_REFRESH_TOKEN. Runs on schedule / manual dispatch
-#           / tag pushes only, because pull requests from forks cannot read
-#           repository secrets. continue-on-error keeps a flaky external site
-#           from blocking, while the run still records the outcome.
+#           gated on PIXIV_REFRESH_TOKEN. Runs on schedule / manual dispatch,
+#           and on a release tag (through the docker gate), because pull
+#           requests from forks cannot read repository secrets.
+#           continue-on-error keeps a flaky external site from blocking,
+#           while the run still records the outcome.
 #
 # Every action is pinned to a commit SHA (Dependabot keeps the pins current);
 # `dtolnay/rust-toolchain` deliberately stays on its channel ref, because the
@@ -26,9 +29,6 @@ name: CI
 #     PIXIV_REFRESH_TOKEN is absent or empty (empty = unset CI secret).
 
 on:
-  push:
-    branches: [master]
-    tags: ['v*']
   pull_request:
   schedule:
     # Weekly probe of the live endpoints, so external API changes surface.
@@ -43,6 +43,14 @@ on:
       gate:
         type: boolean
         default: false
+      # Passed by docker.yml for a release tag: the caller computes it from its
+      # own `github.ref`, so the called workflow needs no ref check of its own.
+      # A string (not boolean) on purpose: a boolean input fed by an expression
+      # arrives as the string "true"/"false", and "false" is truthy in `if`.
+      live:
+        description: Run the live-network suite too (docker passes "true" on a release tag).
+        type: string
+        default: 'false'
 
 permissions:
   contents: read
@@ -143,7 +151,7 @@ jobs:
 
   live:
     needs: test
-    if: ${{ !inputs.gate && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ inputs.live == 'true' || (!inputs.gate && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
