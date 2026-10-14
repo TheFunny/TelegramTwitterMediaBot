@@ -28,9 +28,13 @@ pub const PHOTO_TARGET_DIMENSION_SUM: u32 = 9900;
 /// own, larger cap — `send::upload::MAX_MEDIA_UPLOAD_BYTES` — and never become
 /// photos.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
-/// Decode budget (bytes): a larger intermediate buffer is not worth the peak
-/// memory; the photo degrades to the smaller URL instead.
-pub(crate) const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+/// Decode budget (bytes), derived from the memory budget below. A photo's peak
+/// is `download + 2.5 × decode + upload cap` (see `processing_peak_bytes`), so
+/// the decode buffer is what remains after the download and the upload
+/// allowance, divided by 2.5: (512 − 32 − 10) MiB × 2/5 = 188 MiB. A larger
+/// photo degrades to the smaller URL instead.
+pub(crate) const MAX_DECODE_BYTES: u64 =
+    (MEMORY_UNITS as u64 * MEMORY_UNIT_BYTES - MAX_PHOTO_DOWNLOAD_BYTES - MAX_UPLOAD_BYTES) * 2 / 5;
 /// Cap for *downloading* a photo in the send fallback, kept separate from the
 /// decode budget above: the whole body is buffered before it is processed, once
 /// per download slot in flight, while the decode budget is about a single
@@ -47,10 +51,9 @@ const MEMORY_UNIT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Process-wide memory budget for photo preparation, in [`MEMORY_UNIT_BYTES`]
 /// units: 512 MiB. `PREP_SLOTS` bounds how many items are prepared at once but
-/// not how much memory they hold — one photo's decode buffer can be up to
-/// [`MAX_DECODE_BYTES`] (512 MiB), and the guard that refuses a bigger one is
-/// per photo, so six concurrent photos could peak near 3 GiB on a host sized
-/// for a fraction of that. Each item charges what it actually holds (its
+/// not how much memory they hold, so [`MAX_DECODE_BYTES`] is derived to keep one
+/// photo's worst-case peak inside this budget, not just its decode buffer.
+/// Each item charges what it actually holds (its
 /// downloaded bytes plus the decode buffer its header predicts), so a 10-image
 /// album of ordinary photos still runs several at a time while huge ones
 /// serialize.
@@ -466,13 +469,13 @@ mod tests {
 
     /// The budget is a *process-wide* memory bound: `PREP_SLOTS` (6) caps how
     /// many photos are prepared at once, but six max-size photos would still
-    /// hold six decode buffers of up to 512 MiB each.
+    /// hold six peaks of the whole budget each.
     #[tokio::test]
     async fn huge_decodes_cannot_overlap_but_do_run_alone() {
         let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(MEMORY_UNITS as usize));
         let max_photo = processing_peak_bytes(MAX_PHOTO_DOWNLOAD_BYTES, MAX_DECODE_BYTES);
 
-        // One max-size photo fits (clamped to the whole budget), so it can
+        // One max-size photo fits exactly in the whole budget, so it can
         // never wait for budget that cannot exist.
         let first = tokio::time::timeout(
             Duration::from_millis(50),
@@ -534,12 +537,11 @@ mod tests {
         assert_eq!(memory_units(MEMORY_UNIT_BYTES + 1), 2);
         // Never more than exists, or the item waits for itself forever.
         assert_eq!(memory_units(u64::MAX), MEMORY_UNITS);
-        // One item's worst case (a max download plus a max decode) takes the
-        // whole budget by itself.
-        assert_eq!(
-            memory_units(MAX_DECODE_BYTES + MAX_PHOTO_DOWNLOAD_BYTES),
-            MEMORY_UNITS
-        );
+        // One item's worst case (a max download plus a max decode) fits the
+        // whole budget exactly: it never waits, and never exceeds the budget.
+        let worst = processing_peak_bytes(MAX_PHOTO_DOWNLOAD_BYTES, MAX_DECODE_BYTES);
+        assert!(worst <= MEMORY_UNIT_BYTES * MEMORY_UNITS as u64);
+        assert_eq!(memory_units(worst), MEMORY_UNITS);
     }
 
     #[test]
