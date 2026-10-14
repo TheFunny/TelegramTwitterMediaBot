@@ -30,6 +30,17 @@ fn terminal_write_backoff(attempt: u32) -> Duration {
 }
 pub const LOCK_TTL_SECONDS: f64 = 120.0;
 
+/// Heartbeat cadence: a running handler's lease is re-extended this often.
+const HEARTBEAT_SECONDS: f64 = 30.0;
+
+/// Whether a failed heartbeat must abandon the attempt. The lease was last
+/// confirmed `secs_since_confirmed` ago and expires `LOCK_TTL_SECONDS` after
+/// that; if the next beat would land at or past expiry, another worker may
+/// already re-lease the row, so the attempt has to stop before then.
+fn heartbeat_failure_is_fatal(secs_since_confirmed: f64) -> bool {
+    secs_since_confirmed + HEARTBEAT_SECONDS >= LOCK_TTL_SECONDS
+}
+
 /// Number of concurrent worker loops. Tasks are independent (retries and
 /// forward resumes); leases serialize row claims via SQLite transactions, so
 /// extra workers drain backlogs faster. Each worker can be mid-send to
@@ -598,10 +609,13 @@ impl QueueWorker {
     ) -> Result<Result<(), QueueError>, LeaseLost> {
         let fut = (self.handler)(payload);
         tokio::pin!(fut);
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs_f64(HEARTBEAT_SECONDS));
         // The first interval tick fires immediately; skip it (the lease was
         // just set by lease_next).
         interval.tick().await;
+        // The lease was set by lease_next just before this, so the first
+        // confirmation point is now.
+        let mut confirmed = std::time::Instant::now();
         let id_owned = id.to_string();
         let token_owned = lease_token.to_string();
         loop {
@@ -609,6 +623,7 @@ impl QueueWorker {
                 result = &mut fut => return Ok(result),
                 _ = interval.tick() => {
                     let now = now_f64();
+                    let sent = std::time::Instant::now();
                     let id = id_owned.clone();
                     let token = token_owned.clone();
                     let result = self
@@ -622,16 +637,27 @@ impl QueueWorker {
                         })
                         .await;
                     match result {
-                        // Still ours: the lease is extended.
-                        Ok(1) => {}
+                        // Still ours: the lease is extended, and this beat is
+                        // the new confirmation point.
+                        Ok(1) => confirmed = sent,
                         // The row is no longer leased to us (another worker
                         // re-leased it, or it is gone): dropping the handler
                         // future here stops this attempt instead of racing the
                         // new holder through the same send.
                         Ok(_) => return Err(LeaseLost),
+                        // A failed write says nothing about the lease itself,
+                        // which stays valid until `locked_until`. Abandoning
+                        // the attempt here re-ran tasks whose side effects were
+                        // half done, so keep going and beat again; stop only
+                        // when the next beat could land past expiry.
                         Err(e) => {
-                            log::error!("queue lease heartbeat failed: {e}; abandoning attempt");
-                            return Err(LeaseLost);
+                            if heartbeat_failure_is_fatal(confirmed.elapsed().as_secs_f64()) {
+                                log::error!(
+                                    "queue lease heartbeat failed: {e}; lease can no longer be confirmed, abandoning attempt"
+                                );
+                                return Err(LeaseLost);
+                            }
+                            log::warn!("queue lease heartbeat failed: {e}; retrying at the next beat");
                         }
                     }
                 }
@@ -796,6 +822,14 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn failed_heartbeat_is_fatal_only_when_the_next_beat_would_miss_expiry() {
+        // Confirmed at t=0, the lease expires at t=120 and beats land every 30s.
+        assert!(!heartbeat_failure_is_fatal(0.0));
+        assert!(!heartbeat_failure_is_fatal(89.0));
+        assert!(heartbeat_failure_is_fatal(90.0));
     }
 
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {
