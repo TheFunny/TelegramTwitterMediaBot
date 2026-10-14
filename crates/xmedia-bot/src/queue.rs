@@ -41,6 +41,73 @@ fn heartbeat_failure_is_fatal(secs_since_confirmed: f64) -> bool {
     secs_since_confirmed + HEARTBEAT_SECONDS >= LOCK_TTL_SECONDS
 }
 
+tokio::task_local! {
+    /// The lease of the attempt running on this worker task. A handler reads it
+    /// (via [`lease_still_held`]) to verify with a fresh DB read that it still
+    /// owns the row before running side effects a re-lease would duplicate.
+    static CURRENT_LEASE: Lease;
+}
+
+/// Handle to the row lease one queue attempt runs under.
+#[derive(Clone)]
+pub struct Lease {
+    pool: Arc<crate::db::DbPool>,
+    id: String,
+    token: String,
+}
+
+impl Lease {
+    /// Whether this attempt still owns the row. A fresh read on purpose: while
+    /// a stalled attempt sits between heartbeats its lease can expire and be
+    /// re-leased by the sweep, and only the DB knows.
+    pub async fn still_held(&self) -> bool {
+        let id = self.id.clone();
+        let token = self.token.clone();
+        self.pool
+            .with_conn_or(
+                log::Level::Warn,
+                "queue lease check failed",
+                false,
+                move |conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM tasks \
+                         WHERE id=?1 AND status='in_progress' AND lease_token=?2)",
+                        params![id, token],
+                        |row| row.get::<_, bool>(0),
+                    )
+                },
+            )
+            .await
+    }
+}
+
+/// Whether the attempt running on this worker task still owns its row. Answers
+/// `true` outside a queue worker (a direct handler call, as in tests), so a
+/// caller never skips its effects for want of a lease.
+pub async fn lease_still_held() -> bool {
+    match CURRENT_LEASE.try_with(|lease| lease.clone()) {
+        Ok(lease) => lease.still_held().await,
+        Err(_) => true,
+    }
+}
+
+/// Runs `f` with a lease installed as the current worker lease. Test-only seam
+/// for driving a handler's lease check without a live worker loop.
+#[cfg(test)]
+pub(crate) async fn scope_lease_for_test<F: Future>(
+    pool: Arc<crate::db::DbPool>,
+    id: &str,
+    token: &str,
+    f: F,
+) -> F::Output {
+    let lease = Lease {
+        pool,
+        id: id.to_string(),
+        token: token.to_string(),
+    };
+    CURRENT_LEASE.scope(lease, f).await
+}
+
 /// Number of concurrent worker loops. Tasks are independent (retries and
 /// forward resumes); leases serialize row claims via SQLite transactions, so
 /// extra workers drain backlogs faster. Each worker can be mid-send to
@@ -535,8 +602,19 @@ impl QueueWorker {
             row.attempts + 1
         );
         let attempt_started = std::time::Instant::now();
-        let outcome = match self
-            .run_with_lease(&row.id, &row.lease_token, payload)
+        // The attempt runs under its own lease handle, exposed to the handler
+        // through a task-local: a handler about to run duplicate-able side
+        // effects verifies it still owns the row first (see `lease_still_held`).
+        let lease = Lease {
+            pool: Arc::clone(&self.pool),
+            id: row.id.clone(),
+            token: row.lease_token.clone(),
+        };
+        let outcome = match CURRENT_LEASE
+            .scope(
+                lease,
+                self.run_with_lease(&row.id, &row.lease_token, payload),
+            )
             .await
         {
             Ok(outcome) => outcome,
@@ -830,6 +908,51 @@ mod tests {
         assert!(!heartbeat_failure_is_fatal(0.0));
         assert!(!heartbeat_failure_is_fatal(89.0));
         assert!(heartbeat_failure_is_fatal(90.0));
+    }
+
+    /// The lease handle a handler sees is a live view of the row: once the row
+    /// is re-leased — what a stalled attempt hits — `lease_still_held` says so,
+    /// which is what gates the duplicate-able side effects (forward, prompt).
+    #[tokio::test]
+    async fn lease_still_held_is_false_once_the_row_is_re_leased() {
+        let (queue, _dir) = new_queue().await;
+        let pool = Arc::clone(&queue.pool);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_handler = Arc::clone(&seen);
+        let pool_handler = Arc::clone(&pool);
+        queue
+            .start(
+                move |_payload| {
+                    let seen = Arc::clone(&seen_handler);
+                    let pool = Arc::clone(&pool_handler);
+                    async move {
+                        let held_before = lease_still_held().await;
+                        seen.lock().push(held_before);
+                        // Steal the lease, as the sweep does once a stalled
+                        // attempt let it expire.
+                        pool.with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE tasks SET lease_token='other' WHERE status='in_progress'",
+                                [],
+                            )
+                        })
+                        .await
+                        .unwrap();
+                        let held_after = lease_still_held().await;
+                        seen.lock().push(held_after);
+                        Ok(())
+                    }
+                },
+                |_payload, _message| async {},
+            )
+            .await;
+        queue
+            .enqueue(serde_json::json!({"n": 1}), now_f64())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(&*seen.lock(), &[true, false]);
+        queue.stop().await;
     }
 
     async fn new_queue() -> (PersistentTaskQueue, tempfile::TempDir) {

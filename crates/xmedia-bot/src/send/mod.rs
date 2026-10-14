@@ -1681,6 +1681,85 @@ mod tests {
         assert_eq!(payload["message_ids"], serde_json::json!([10, 11]));
     }
 
+    /// A re-leased row's handler must not run the forward: the new holder owns
+    /// that copy, so running it here too would deliver the messages twice.
+    #[tokio::test]
+    async fn a_forward_skips_the_copy_once_the_lease_is_gone() {
+        // The empty script panics on any call, so a copy that sneaks through
+        // fails loudly rather than hiding behind an assertion.
+        let sender = MockSender::scripted(vec![], || api_error("unused"));
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let task = Task::ForwardMessages {
+            from_chat_id: 1,
+            to_chat_id: 2,
+            message_ids: vec![10, 11],
+            forward_offset: 0,
+            notify_chat_id: None,
+            notify_message_id: None,
+        };
+        let payload = serde_json::to_value(&task).unwrap();
+        // A lease the tasks table does not hold: `still_held` reads false.
+        let pool = crate::db::open_store(stores.db_path()).unwrap();
+        let outcome =
+            crate::queue::scope_lease_for_test(pool, "gone", "tok", handle_task(&ctx, payload))
+                .await;
+
+        assert!(outcome.is_ok());
+        assert!(sender.calls().is_empty(), "no copy may run");
+    }
+
+    /// The completion gate: a media send whose row was re-leased must not open
+    /// the edit-before-forward prompt (nor forward) — the new holder does, so
+    /// doing it here too would prompt and forward the post a second time.
+    #[tokio::test]
+    async fn a_media_send_skips_post_send_actions_once_the_lease_is_gone() {
+        let sender = MockSender::scripted(vec![Outcome::GroupOk, Outcome::MessageOk], || {
+            api_error("unused")
+        });
+        let stores = TestStores::new();
+        let ctx = stores.ctx(&sender);
+        let mut task = sent_task(Some(2), false);
+        if let Task::SendMediaSequence {
+            media_batches,
+            edit_before_forward,
+            ..
+        } = &mut task
+        {
+            // Two items so the send is one `send_media_group`; the prompt on so
+            // the completion path has an observable call — a group send alone
+            // reports no message ids, so a forward would copy nothing.
+            *media_batches = vec![vec![
+                photo_item("https://p/1.jpg", false, false),
+                photo_item("https://p/2.jpg", false, false),
+            ]];
+            *edit_before_forward = true;
+        }
+        let payload = serde_json::to_value(&task).unwrap();
+        let pool = crate::db::open_store(stores.db_path()).unwrap();
+        let outcome =
+            crate::queue::scope_lease_for_test(pool, "gone", "tok", handle_task(&ctx, payload))
+                .await;
+
+        assert!(outcome.is_ok());
+        assert_eq!(
+            sender.calls(),
+            vec!["send_media_group"],
+            "the edit prompt must not open"
+        );
+
+        // Control: the same task under a live lease does open the prompt — so
+        // the assertion above cannot pass because the prompt was never
+        // observable in the first place.
+        let live = MockSender::scripted(vec![Outcome::GroupOk, Outcome::MessageOk], || {
+            api_error("unused")
+        });
+        let live_ctx = stores.ctx(&live);
+        let outcome = handle_task(&live_ctx, serde_json::to_value(&task).unwrap()).await;
+        assert!(outcome.is_ok());
+        assert_eq!(live.calls(), vec!["send_media_group", "send_message"]);
+    }
+
     #[tokio::test]
     async fn post_send_notifies_a_permanent_forward_failure() {
         let sender = MockSender::scripted(vec![Outcome::CopyErr, Outcome::MessageErr], || {

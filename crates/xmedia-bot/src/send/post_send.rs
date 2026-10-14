@@ -480,28 +480,49 @@ pub(crate) async fn handle_task(
             // whole sequence (every batch) completed, so the channel forward
             // and the edit-before-forward prompt must not be lost just
             // because the send needed a retry.
+            //
+            // Unless the row was re-leased while this attempt sat between
+            // heartbeats (a ≥120 s stall): the new holder runs the same
+            // effects, so running them here too would copy to the channel a
+            // second time and open a second prompt. The keep-alive release is
+            // skipped with them — the payload (and so its temp media) is the
+            // same one the new holder is using.
+            if !crate::queue::lease_still_held().await {
+                log::warn!(
+                    "queue: row re-leased before post-send actions; leaving the forward and the edit prompt to the new holder"
+                );
+                return Ok(());
+            }
             post_send_actions(ctx, &task, message_ids).await;
             settle_task(ctx, &task, Settled::Sent).await;
             Ok(())
         }
-        Task::ForwardMessages { .. } => match forward_messages(ctx, &task).await {
-            Ok(()) => Ok(()),
-            Err(SendError::Retryable {
-                delay_seconds,
-                task,
-            }) => Err(QueueError::Retryable {
-                delay_seconds,
-                payload: serde_json::to_value(task).expect("task serializes"),
-            }),
-            Err(SendError::Permanent { message, task }) => {
-                // Settled by `dead_letter_notify`, which the queue invokes for
-                // this payload.
-                Err(QueueError::Permanent {
-                    message,
-                    payload: serde_json::to_value(task).expect("task serializes"),
-                })
+        Task::ForwardMessages { .. } => {
+            // The copy *is* the side effect here, so it is the thing to gate:
+            // a re-leased row is already being copied by its new holder.
+            if !crate::queue::lease_still_held().await {
+                log::warn!("queue: row re-leased before the forward; leaving it to the new holder");
+                return Ok(());
             }
-        },
+            match forward_messages(ctx, &task).await {
+                Ok(()) => Ok(()),
+                Err(SendError::Retryable {
+                    delay_seconds,
+                    task,
+                }) => Err(QueueError::Retryable {
+                    delay_seconds,
+                    payload: serde_json::to_value(task).expect("task serializes"),
+                }),
+                Err(SendError::Permanent { message, task }) => {
+                    // Settled by `dead_letter_notify`, which the queue invokes
+                    // for this payload.
+                    Err(QueueError::Permanent {
+                        message,
+                        payload: serde_json::to_value(task).expect("task serializes"),
+                    })
+                }
+            }
+        }
     }
 }
 
