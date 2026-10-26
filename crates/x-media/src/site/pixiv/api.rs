@@ -512,4 +512,53 @@ mod tests {
         assert!(check_ugoira_archive_size(1, MAX_UGOIRA_UNPACKED_BYTES).is_ok());
         assert!(check_ugoira_archive_size(1, MAX_UGOIRA_UNPACKED_BYTES + 1).is_err());
     }
+
+    /// The ugoira path reads frame zips with `zip`'s `deflate` feature only
+    /// (see the manifest comment); ugoira archives are stored/deflate, so both
+    /// must decode with the codecs the manifest leaves off.
+    #[test]
+    fn ugoira_frame_zip_decodes_with_the_selected_zip_features() {
+        let path = tempfile::Builder::new()
+            .prefix(crate::TEMP_FILE_PREFIX)
+            .tempfile()
+            .expect("temp zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path.path()).expect("zip file"));
+        for (name, method, body) in [
+            (
+                "000001.jpg",
+                zip::CompressionMethod::Deflated,
+                &b"\xFF\xD8deflated frame"[..],
+            ),
+            (
+                "000002.jpg",
+                zip::CompressionMethod::Stored,
+                &b"\xFF\xD8stored frame"[..],
+            ),
+        ] {
+            writer
+                .start_file(
+                    name,
+                    zip::write::SimpleFileOptions::default().compression_method(method),
+                )
+                .expect("start entry");
+            std::io::Write::write_all(&mut writer, body).expect("write frame");
+        }
+        writer.finish().expect("finish zip");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path.path()).expect("open zip"))
+            .expect("read zip");
+        assert_eq!(archive.len(), 2);
+        for (index, expected) in [
+            (0, &b"\xFF\xD8deflated frame"[..]),
+            (1, &b"\xFF\xD8stored frame"[..]),
+        ] {
+            let mut frame = Vec::new();
+            archive
+                .by_index(index)
+                .expect("frame entry")
+                .read_to_end(&mut frame)
+                .expect("decode frame");
+            assert_eq!(frame, expected, "frame {index}");
+        }
+    }
 }
