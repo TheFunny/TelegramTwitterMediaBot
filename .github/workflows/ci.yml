@@ -124,7 +124,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # `--locked` on every cargo invocation: the version bump edits
       # Cargo.lock by hand (AGENTS.md), so a stale lock must fail here instead
       # of being silently re-resolved — otherwise CI tests a different
@@ -162,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # All #[ignore]d live tests, by the "live" name filter, in both crates:
       # the bot crate has two of its own (repair refetch, text-only link)
       # whose fetches are network-bound but whose sends go through MockSender.
