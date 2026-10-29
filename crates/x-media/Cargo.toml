@@ -8,7 +8,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1.12"
-html-escape = "0.2"
+html-escape = "0.3"
 url = "2.5.2"
 bytes = "1"
 # ugoira frame zips are stored/deflate only; everything in zip's default
