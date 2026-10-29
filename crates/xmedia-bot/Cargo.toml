@@ -16,7 +16,7 @@ html-escape = "0.2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rand = "0.10"
 tempfile = "3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 bytes = "1"
 png = "0.18"
 zune-jpeg = "0.5"
