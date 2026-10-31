@@ -227,6 +227,8 @@ pub(crate) struct MockSender {
     cursor: Mutex<usize>,
     calls: Mutex<Vec<&'static str>>,
     messages: Mutex<Vec<String>>,
+    /// The reply target of every `send_message`, in order.
+    message_replies: Mutex<Vec<Option<i64>>>,
     captions: Mutex<Vec<String>>,
     answers: Mutex<Vec<Option<String>>>,
     /// `(chat, message, text)` of every text rewrite, in order.
@@ -281,6 +283,7 @@ impl MockSender {
             cursor: Mutex::new(0),
             calls: Mutex::new(Vec::new()),
             messages: Mutex::new(Vec::new()),
+            message_replies: Mutex::new(Vec::new()),
             captions: Mutex::new(Vec::new()),
             answers: Mutex::new(Vec::new()),
             edited_texts: Mutex::new(Vec::new()),
@@ -299,6 +302,12 @@ impl MockSender {
     /// Texts of the plain messages sent, in order.
     pub(crate) fn messages(&self) -> Vec<String> {
         self.messages.lock().clone()
+    }
+
+    /// The reply target of every plain message sent, in order (`None` = no
+    /// reply).
+    pub(crate) fn message_replies(&self) -> Vec<Option<i64>> {
+        self.message_replies.lock().clone()
     }
 
     /// Captions passed to `edit_message_caption`, in order.
@@ -415,11 +424,14 @@ impl MediaSender for MockSender {
         &self,
         _chat_id: ChatId,
         text: String,
-        _reply_to: Option<MessageId>,
+        reply_to: Option<MessageId>,
         _reply_markup: Option<InlineKeyboardMarkup>,
     ) -> BoxFuture<'_, Result<i64, RequestError>> {
         Box::pin(async move {
             self.messages.lock().push(text);
+            self.message_replies
+                .lock()
+                .push(reply_to.map(|id| id.0 as i64));
             match self.next("send_message") {
                 Outcome::MessageOk => Ok(MockSender::SENT_ID),
                 Outcome::MessageErr => Err(self.error()),

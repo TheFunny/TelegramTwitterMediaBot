@@ -301,12 +301,18 @@ pub(crate) async fn post_send_actions(ctx: &AppContext<'_>, task: &Task, message
                 "\n({hidden} more templates not shown — /remove_template to prune.)"
             ));
         }
+        // Reply to this post's own first media message rather than the user's
+        // link message: one message carrying several links opens several
+        // prompts, and replying them all to that one message made each
+        // indistinguishable from the others. The media message is the thing
+        // the prompt actually edits and forwards.
+        let prompt_reply_to = message_ids.first().copied().unwrap_or(reply_to);
         let prompt = ctx
             .sender
             .send_message(
                 ChatId(chat_id),
                 text,
-                Some(MessageId(reply_to as i32)),
+                Some(MessageId(prompt_reply_to as i32)),
                 Some(keyboard),
             )
             .await;

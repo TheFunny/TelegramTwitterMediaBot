@@ -1646,6 +1646,9 @@ mod tests {
             .expect("the prompt record must be stored");
         assert_eq!(record.url, "https://x.com/u/status/1");
         assert_eq!(record.forward_message_ids, vec![10, 11]);
+        // The prompt replies to the post's first media message, so several
+        // links in one user message still get distinguishable prompts.
+        assert_eq!(sender.message_replies(), vec![Some(10)]);
     }
 
     #[tokio::test]
