@@ -121,7 +121,7 @@ Telegram only accepts ports 443/80/88/8443.
 | `/help` | List all commands and usage (this command table) |
 | `/set_forward_channel <channel>` | Set the forward channel: `@channel` or channel ID; media messages are forwarded to it automatically afterwards |
 | `/remove_forward_channel` | Remove the forward channel |
-| `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or tapping a template button applies one), then `↩️ Confirm` forwards and `🛑 Skip` drops this forward; the prompt states its expiry and is marked expired in place when it lapses (nothing is forwarded) |
+| `/edit_before_forward` | Toggle "edit before forward": when enabled, the bot posts a prompt after forwarding; replying to it edits the first forwarded message's caption (or tapping a template button applies one), then `↩️ Confirm` forwards and `🛑 Skip` drops this forward; the prompt states its expiry and is marked expired in place when it lapses (nothing is forwarded); it replies to the post's own first media message — the one it edits — so several links in one message keep their prompts distinguishable |
 | `/set_template <name>` | Reply to a message containing `[]` to save it as a named template; `[]` is replaced by the original post link when forwarding (used with "edit before forward"). Names are limited to 55 UTF-8 bytes, bodies to 1024 escaped characters, and 50 templates per chat |
 | `/remove_template <name>` | Remove a template (names are listed by `/settings`; the prompt's keyboard shows at most 60) |
 | `/settings` | Show this chat's configuration: forward channel, edit-before-forward, per-site caption formats, saved templates |

@@ -2690,7 +2690,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "x-media"
-version = "1.9.3"
+version = "1.9.4"
 dependencies = [
  "bytes",
  "dotenv",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "xmedia-bot"
-version = "1.9.3"
+version = "1.9.4"
 dependencies = [
  "bytes",
  "dotenv",
