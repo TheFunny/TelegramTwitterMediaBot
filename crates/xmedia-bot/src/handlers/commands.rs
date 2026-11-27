@@ -22,7 +22,7 @@ pub(crate) enum Command {
     Help,
     #[command(
         description = "Set forward channel (@channel or ID)",
-        parse_with = "split"
+        parse_with = parse_single_arg
     )]
     SetForwardChannel(String),
     #[command(description = "Remove forward channel")]
@@ -31,10 +31,10 @@ pub(crate) enum Command {
     EditBeforeForward,
     #[command(
         description = "Reply with [] to save as template",
-        parse_with = "split"
+        parse_with = parse_single_arg
     )]
     SetTemplate(String),
-    #[command(description = "Remove a saved template", parse_with = "split")]
+    #[command(description = "Remove a saved template", parse_with = parse_single_arg)]
     RemoveTemplate(String),
     #[command(description = "Show this chat's settings")]
     Settings,
@@ -60,6 +60,25 @@ pub(crate) enum Command {
         parse_with = parse_arg_remainder
     )]
     Debug(String),
+}
+
+/// Single-token parser equivalent to teloxide's built-in `"split"` for one
+/// `String` field. Avoids `teloxide-macros` 0.10's generated
+/// `<String as FromStr>::from_str(...).map_err(...)` call, which trips Rust
+/// 1.100's `unreachable_code` lint on `Infallible` (upstream teloxide#1485).
+fn parse_single_arg(s: String) -> Result<(String,), ParseError> {
+    let mut parts = s.split(' ');
+    let first = parts.next().unwrap_or_default().to_owned();
+    if let Some(excess) = parts.next()
+        && !s.is_empty()
+    {
+        return Err(ParseError::TooManyArguments {
+            expected: 1,
+            found: 2 + parts.count(),
+            message: format!("Excess argument: {excess}"),
+        });
+    }
+    Ok((first,))
 }
 
 /// `/test` and `/debug` argument parser: the whole remainder after the command
@@ -1446,6 +1465,42 @@ mod tests {
                 Err(e) => panic!("{text} did not parse: {e}"),
             }
         }
+    }
+
+    #[test]
+    fn parse_single_arg_matches_split_semantics() {
+        use teloxide::utils::command::{BotCommands, ParseError};
+
+        use super::Command;
+
+        // Empty argument passes "" through so the handler replies with its
+        // EmptyParameter guidance instead of silently falling through.
+        assert!(matches!(
+            Command::parse("/set_forward_channel", ""),
+            Ok(Command::SetForwardChannel(arg)) if arg.is_empty()
+        ));
+        assert!(matches!(
+            Command::parse("/set_template tpl", ""),
+            Ok(Command::SetTemplate(arg)) if arg == "tpl"
+        ));
+        // Multiple space-separated tokens are rejected with TooManyArguments,
+        // matching teloxide's built-in `"split"` parser.
+        assert!(matches!(
+            Command::parse("/set_forward_channel @a extra", ""),
+            Err(ParseError::TooManyArguments {
+                expected: 1,
+                found: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Command::parse("/remove_template a b c", ""),
+            Err(ParseError::TooManyArguments {
+                expected: 1,
+                found: 3,
+                ..
+            })
+        ));
     }
 
     #[test]

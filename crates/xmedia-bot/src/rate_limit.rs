@@ -192,12 +192,15 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_global_budget_is_paced_and_shared() {
-        // Drain the process-wide budget (no other test touches it: the send
-        // paths that use it are mocked), then prove the next message waits for
-        // the refill instead of going out instantly.
+        // Drain the process-wide budget, then prove a follow-up acquire waits
+        // for refill instead of going out instantly. Other real-Bot tests in
+        // the same binary also charge `GLOBAL_LIMITER`, so the first acquire
+        // may sleep a small deficit whose 1ms timer-wheel rounding leaves a
+        // fractional token (< 0.05) of surplus; requesting 2 tokens still
+        // guarantees waiting well past one refill interval.
         acquire_global(GLOBAL_CAPACITY).await;
         let start = tokio::time::Instant::now();
-        acquire_global(1.0).await;
+        acquire_global(2.0).await;
         assert!(
             start.elapsed() >= Duration::from_secs_f64(1.0 / GLOBAL_REFILL_PER_SEC),
             "a fanned-out burst must be paced: elapsed {:?}",

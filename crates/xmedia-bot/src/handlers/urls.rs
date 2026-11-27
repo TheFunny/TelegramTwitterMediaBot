@@ -971,8 +971,8 @@ mod tests {
 
         assert_eq!(
             sender.calls(),
-            vec!["send_chat_action", "send_message"],
-            "a media-less post is one message, not a media send"
+            vec!["send_chat_action", "send_html_message"],
+            "a media-less post is one HTML message, not a media send"
         );
         let text = &sender.messages()[0];
         assert!(text.contains("https://x.com/"), "{text}");
